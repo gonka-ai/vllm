@@ -16,6 +16,7 @@ class SamplingType(IntEnum):
     RANDOM = 1
     RANDOM_SEED = 2
     BEAM = 3
+    ENFORCED = 4
 
 
 LogitsProcessor = Union[Callable[[List[int], torch.Tensor], torch.Tensor],
@@ -134,6 +135,7 @@ class SamplingParams:
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        enforce_sequence: Optional[List[int]] = None,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -195,6 +197,7 @@ class SamplingParams:
                 self._verify_greedy_sampling()
         # eos_token_id is added to this by the engine
         self.all_stop_token_ids = set(self.stop_token_ids)
+        self.enforce_token_ids = enforce_sequence
 
     def _verify_args(self) -> None:
         if self.n < 1:
@@ -307,6 +310,8 @@ class SamplingParams:
 
     @cached_property
     def sampling_type(self) -> SamplingType:
+        if self.enforce_token_ids:
+            return SamplingType.ENFORCED
         if self.use_beam_search:
             return SamplingType.BEAM
         if self.temperature < _SAMPLING_EPS:

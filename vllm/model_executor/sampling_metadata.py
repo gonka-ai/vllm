@@ -14,6 +14,10 @@ _SAMPLING_EPS = 1e-5
 _SEED_0_REPLACEMENT = 3403598558
 
 
+from vllm.logger import init_logger
+logger = init_logger(__name__)
+
+
 @dataclass
 class SequenceGroupToSample:
     # |---------- N-1 iteration --------|
