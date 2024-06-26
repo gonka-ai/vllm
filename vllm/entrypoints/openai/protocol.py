@@ -346,6 +346,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, will override the default whitespace pattern "
             "for guided json decoding."))
+    enforced_str: Optional[str] = Field(default=None)
     priority: int = Field(
         default=0,
         description=(
