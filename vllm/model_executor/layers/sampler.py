@@ -368,12 +368,54 @@ def _random_sample(
     return results
 
 
+def _random_sample_enforced(
+    selected_seq_groups: List[SequenceGroupToSample],
+    num_samples,
+    enforced_token_ids: List[int]
+) -> SampleResultType:
+    """Run random sampling on a given samples.
+
+    Args:
+        selected_seq_groups: A list of sequence groups batched.
+        random_samples: (num_selected_samples,) A tensor of samples. The
+            length of samples could be smaller than selected_seq_groups if
+            seq_group.do_sample is False.
+    Returns:
+        Tuple of (next_token_ids, parent_ids). The length of returned list is
+        same as the length of selected_seq_groups. If the corresponding
+        seq_group has do_sample=False, tuple contains ([], [])
+    """
+    # Find the maximum best_of value of the prompt phase requests.
+    sample_idx = 0
+    results: SampleResultType = []
+    for enf_idx, seq_group in zip(enforced_token_ids, selected_seq_groups):
+        if not seq_group.do_sample:
+            results.append(([], []))
+            continue
+
+        seq_ids = seq_group.seq_ids
+        sampling_params = seq_group.sampling_params
+        is_prompt = seq_group.is_prompt
+        num_parent_seqs = len(seq_ids)
+        if is_prompt:
+            # Prompt phase.
+            parent_ids = [0] * sampling_params.best_of
+            next_token_ids = [enf_idx] * num_samples
+        else:
+            # Generation phase.
+            parent_ids = list(range(num_parent_seqs))
+            next_token_ids = [enf_idx] * num_parent_seqs
+        results.append(([enf_idx for _ in next_token_ids], parent_ids))
+        sample_idx += num_parent_seqs
+    return results
+
+
 def _enforced_sample(
     enforced_token_ids: List[int]
 ) -> SampleResultType:
     results: SampleResultType = []
     for next_token_id in enforced_token_ids:
-        results.append(([next_token_id, ], [0, ]))
+        results.append(([next_token_id, next_token_id], [0, 0]))
     
     return results
 
@@ -571,7 +613,14 @@ def _sample_with_torch(
                 sampled_token_ids_tensor[
                     long_sample_indices] = torch.tensor(enforced_token_ids, device=logprobs.device).view(-1, 1)
 
-
+            num_samples = 1
+            for seq_group in seq_groups:
+                if seq_group.is_prompt:
+                    sampling_params = seq_group.sampling_params
+                    num_samples = max(
+                        num_samples,
+                        sampling_params.best_of
+                    )
         elif sampling_type == SamplingType.BEAM:
             beam_search_logprobs = logprobs[sample_indices]
         else:
@@ -593,6 +642,11 @@ def _sample_with_torch(
                                                  beam_search_logprobs)
         elif sampling_type == SamplingType.ENFORCED:
             sample_results = _enforced_sample(enforced_token_ids)
+            sample_results = _random_sample_enforced(
+                seq_groups,
+                num_samples,
+                enforced_token_ids
+            )
         sample_results_dict.update(zip(seq_group_id, sample_results))
     
 
