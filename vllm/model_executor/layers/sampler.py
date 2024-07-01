@@ -411,6 +411,8 @@ def _random_sample_enforced(
 
 
 def _enforced_sample(
+    selected_seq_groups: List[SequenceGroupToSample],
+    num_samples,
     enforced_token_ids: List[int]
 ) -> SampleResultType:
     results: SampleResultType = []
@@ -641,12 +643,16 @@ def _sample_with_torch(
             sample_results = _beam_search_sample(seq_groups,
                                                  beam_search_logprobs)
         elif sampling_type == SamplingType.ENFORCED:
-            sample_results = _enforced_sample(enforced_token_ids)
-            sample_results = _random_sample_enforced(
+            sample_results = _enforced_sample(
                 seq_groups,
                 num_samples,
                 enforced_token_ids
             )
+            # sample_results = _random_sample_enforced(
+            #     seq_groups,
+            #     num_samples,
+            #     enforced_token_ids
+            # )
         sample_results_dict.update(zip(seq_group_id, sample_results))
     
 

@@ -226,6 +226,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, will override the default whitespace pattern "
             "for guided json decoding."))
+    
+    enforced_str: Optional[str] = Field(default=None)
 
     # doc: end-chat-completion-extra-params
 
