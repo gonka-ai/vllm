@@ -417,7 +417,7 @@ def _enforced_sample(
 ) -> SampleResultType:
     results: SampleResultType = []
     for next_token_id in enforced_token_ids:
-        results.append(([next_token_id, next_token_id], [0, 0]))
+        results.append(([next_token_id], [0]))
     
     return results
 
@@ -607,8 +607,10 @@ def _sample_with_torch(
             enforced_token_ids = []
             for seq_group in seq_groups:
                 sampling_params = seq_group.sampling_params
+                first_seq_id = seq_group.seq_ids[0]
+                output_token_ids = seq_group.seq_data[first_seq_id].output_token_ids
                 enforced_token_ids.append(
-                    sampling_params.enforce_token_ids[len(seq_group.seq_data[seq_group.seq_ids[0]].output_token_ids)]
+                    sampling_params.enforce_token_ids[len(output_token_ids)]
                 )
             
             if sampled_token_ids_tensor is not None:

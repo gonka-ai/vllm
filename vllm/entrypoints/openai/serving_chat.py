@@ -248,7 +248,7 @@ class OpenAIServingChat(OpenAIServing):
             sampling_params = request.to_sampling_params()
             if request.enforced_str:
                 toks = self.tokenizer(request.enforced_str, add_special_tokens=False)
-                sampling_params.enforce_token_ids = toks.input_ids
+                sampling_params.enforce_token_ids = toks.input_ids + [self.tokenizer.eos_token_id]
             lora_request = self._maybe_get_lora(request)
             decoding_config = await self.engine.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
