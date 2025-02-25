@@ -1,13 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import weakref
 from typing import List
 
 import pytest
 
-from vllm import LLM, EmbeddingRequestOutput, PoolingParams
+from vllm import LLM, PoolingParams, PoolingRequestOutput
+from vllm.config import LoadFormat
+from vllm.distributed import cleanup_dist_env_and_memory
 
-from ...conftest import cleanup
-
-MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
+MODEL_NAME = "s3://vllm-ci-model-weights/e5-mistral-7b-instruct"
 
 PROMPTS = [
     "Hello, my name is",
@@ -31,6 +33,7 @@ def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm = LLM(model=MODEL_NAME,
+              load_format=LoadFormat.RUNAI_STREAMER,
               max_num_batched_tokens=32768,
               tensor_parallel_size=1,
               gpu_memory_utilization=0.75,
@@ -41,11 +44,11 @@ def llm():
 
         del llm
 
-    cleanup()
+    cleanup_dist_env_and_memory()
 
 
-def assert_outputs_equal(o1: List[EmbeddingRequestOutput],
-                         o2: List[EmbeddingRequestOutput]):
+def assert_outputs_equal(o1: List[PoolingRequestOutput],
+                         o2: List[PoolingRequestOutput]):
     assert [o.outputs for o in o1] == [o.outputs for o in o2]
 
 
@@ -106,3 +109,10 @@ def test_multiple_pooling_params(llm: LLM):
     # pooling_params is None, default params should be applied
     outputs = llm.encode(PROMPTS, pooling_params=None)
     assert len(PROMPTS) == len(outputs)
+
+
+@pytest.mark.skip_global_cleanup
+def test_right_side_truncation(llm: LLM):
+    # Embeddings models should truncate the end of the prompt
+    tokenizer = llm.get_tokenizer()
+    assert tokenizer.truncation_side == "right"

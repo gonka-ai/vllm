@@ -1,11 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
-from vllm.compilation.levels import CompilationLevel
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
 
 TEST_MODELS = [
     ("facebook/opt-125m", {}),
@@ -13,23 +14,22 @@ TEST_MODELS = [
         "dtype": torch.float16,
         "quantization": "compressed-tensors"
     }),
-    ("neuralmagic/Meta-Llama-3-8B-Instruct-FP8", {
+    ("neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic", {
         "dtype": torch.float16,
-        "quantization": "fp8"
-    }),
-    ("nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Dyn-Per-Token-2048-Samples", {
         "quantization": "compressed-tensors"
     }),
-    ("meta-llama/Meta-Llama-3-8B", {}),
+    ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {
+        "quantization": "compressed-tensors"
+    }),
+    ("meta-llama/Llama-3.2-1B-Instruct", {}),
 ]
 
-# TODO: enable in pytorch 2.5
-if False and is_quant_method_supported("aqlm"):  # noqa: SIM223
+if is_quant_method_supported("aqlm"):
     TEST_MODELS.append(("ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf", {
         "quantization": "aqlm"
     }))
 
-# TODO: enable in pytorch 2.5
+# TODO: figure out why this fails.
 if False and is_quant_method_supported("gguf"):  # noqa: SIM223
     TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF", {
         "quantization": "gguf"
@@ -55,7 +55,7 @@ if is_quant_method_supported("marlin"):
         "quantization": "marlin"
     }))
 
-if not is_hip() and is_quant_method_supported("awq"):
+if not current_platform.is_rocm() and is_quant_method_supported("awq"):
     TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {
         "quantization": "AWQ"
     }))
@@ -66,15 +66,9 @@ def check_full_graph_support(model,
                              optimization_level,
                              tp_size=1):
     # make sure these models can be captured in full graph mode
-    os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(optimization_level)
     os.environ["VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "1"
 
-    # Inductor doesn't support fp8 and the base meta llama uses too
-    # much memory.
-    quantization = model_kwargs.get("quantization")
-    if ((quantization == "fp8" or model == "meta-llama/Meta-Llama-3-8B")
-            and optimization_level >= CompilationLevel.INDUCTOR):
-        return
+    print(f"MODEL={model}")
 
     prompts = [
         "Hello, my name is",
@@ -87,6 +81,7 @@ def check_full_graph_support(model,
               enforce_eager=True,
               tensor_parallel_size=tp_size,
               disable_custom_all_reduce=True,
+              compilation_config=optimization_level,
               **model_kwargs)
 
     outputs = llm.generate(prompts, sampling_params)
