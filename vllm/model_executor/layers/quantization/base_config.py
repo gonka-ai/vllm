@@ -1,5 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
+import inspect
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type
 
 import torch
 from torch import nn
@@ -23,6 +26,14 @@ class QuantizeMethodBase(ABC):
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
+    # Not required functions
+    def embedding(self, layer: torch.nn.Module, *args,
+                  **kwargs) -> torch.Tensor:
+        """Gather embeddings in the layer based on indices in the input tensor.
+
+        Expects create_weights to have been called before on the layer."""
+        raise NotImplementedError
+
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         """Process the weight after loading.
 
@@ -31,8 +42,28 @@ class QuantizeMethodBase(ABC):
         return
 
 
+def method_has_implemented_embedding(
+        method_class: Type[QuantizeMethodBase]) -> bool:
+    """
+    Not all quant methods have embedding implemented, so we need to check that
+    it exists for our given method. We check this by making sure the function
+    has been changed from the base implementation.
+    """
+    base_embedding = inspect.getattr_static(QuantizeMethodBase, "embedding",
+                                            None)
+    class_embedding = inspect.getattr_static(method_class, "embedding", None)
+
+    return (class_embedding is not None
+            and class_embedding is not base_embedding)
+
+
 class QuantizationConfig(ABC):
     """Base class for quantization configs."""
+
+    def __init__(self):
+        super().__init__()
+        # mapping is updated by models as they initialize
+        self.packed_modules_mapping: Dict[str, List[str]] = dict()
 
     @abstractmethod
     def get_name(self) -> str:
@@ -87,23 +118,28 @@ class QuantizationConfig(ABC):
         raise ValueError(f"Cannot find any of {keys} in the model's "
                          "quantization config.")
 
+    @staticmethod
+    def get_from_keys_or(config: Dict[str, Any], keys: List[str],
+                         default: Any) -> Any:
+        """Get a optional value from the model's quantization config."""
+        try:
+            return QuantizationConfig.get_from_keys(config, keys)
+        except ValueError:
+            return default
+
     @abstractmethod
-    def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional[QuantizeMethodBase]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional[QuantizeMethodBase]:
         """Get the quantize method to use for the quantized layer.
         
         Args:
             layer: The layer for the quant method.
+            prefix: The full name of the layer in the state dict
         Returns:
             The quantize method. None if the given layer doesn't support quant
             method.
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def get_scaled_act_names(self) -> List[str]:
-        """Returns the activation function names that should be post-scaled.
-
-        For now, this is only used by AWQ.
-        """
-        raise NotImplementedError
+    def get_cache_scale(self, name: str) -> Optional[str]:
+        return None

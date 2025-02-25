@@ -1,19 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import os
 from typing import List, Optional
 
-from ray.exceptions import ActorDiedError
+try:
+    from ray.exceptions import ActorDiedError  # type: ignore
+except ImportError:
+    # For older versions of Ray
+    from ray.exceptions import RayActorError as ActorDiedError  # type: ignore
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-from transformers import PreTrainedTokenizer
 
 from vllm.config import TokenizerPoolConfig
 from vllm.executor.ray_utils import ray
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
-    BaseTokenizerGroup)
-from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
-    TokenizerGroup)
+from vllm.transformers_utils.tokenizer import AnyTokenizer
+
+from .base_tokenizer_group import BaseTokenizerGroup
+from .tokenizer_group import TokenizerGroup
 
 logger = init_logger(__name__)
 
@@ -25,8 +30,10 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
     _worker_cls = TokenizerGroup
 
     @classmethod
-    def from_config(cls, tokenizer_pool_config: TokenizerPoolConfig,
+    def from_config(cls, tokenizer_pool_config: Optional[TokenizerPoolConfig],
                     **init_kwargs) -> "RayTokenizerGroupPool":
+        if not tokenizer_pool_config:
+            raise ValueError("tokenizer_pool_config must not be None.")
         ray_actor_options = (tokenizer_pool_config.extra_config or {
             "num_cpus": 0
         })
@@ -61,7 +68,7 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             **self._tokenizer_config, )
 
         self._ray_tokenizer_group_cls = ray.remote(
-            self._worker_cls).options(**ray_actor_options)
+            self._worker_cls).options(**ray_actor_options)  # type: ignore
         self.tokenizer_actors = [self._init_actor() for _ in range(num_actors)]
         self._idle_actors: Optional[asyncio.Queue] = None
 
@@ -77,8 +84,10 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         return len(self.tokenizer_actors)
 
     def ping(self):
-        return ray.get(
-            [actor.ping.remote() for actor in self.tokenizer_actors])
+        return ray.get([
+            actor.ping.remote()  # type: ignore
+            for actor in self.tokenizer_actors
+        ])
 
     def _ensure_queue_initialized(self):
         if self._idle_actors is None:
@@ -105,7 +114,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
     def encode(self,
                prompt: str,
                request_id: Optional[str] = None,
-               lora_request: Optional[LoRARequest] = None) -> List[int]:
+               lora_request: Optional[LoRARequest] = None,
+               add_special_tokens: Optional[bool] = None) -> List[int]:
         """Encode a prompt using the tokenizer group.
 
         We pick an idle actor and use it to encode the prompt.
@@ -125,7 +135,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             ret = ray.get(
                 actor.encode.remote(request_id=request_id,
                                     prompt=prompt,
-                                    lora_request=lora_request))
+                                    lora_request=lora_request,
+                                    add_special_tokens=add_special_tokens))
         except ActorDiedError as e:
             # If the actor is dead, we first try to reinitialize it.
             logger.warning("%s died with ActorDiedError, reinitializing.",
@@ -136,7 +147,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
                 ret = ray.get(
                     actor.encode.remote(request_id=request_id,
                                         prompt=prompt,
-                                        lora_request=lora_request))
+                                        lora_request=lora_request,
+                                        add_special_tokens=add_special_tokens))
             except ActorDiedError as e:
                 logger.error(
                     "%s died for second time in a row, marking "
@@ -153,7 +165,8 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             self,
             prompt: str,
             request_id: Optional[str] = None,
-            lora_request: Optional[LoRARequest] = None) -> List[int]:
+            lora_request: Optional[LoRARequest] = None,
+            add_special_tokens: Optional[bool] = None) -> List[int]:
         """Encode a prompt using the tokenizer group.
 
         We pick an idle actor and use it to encode the prompt.
@@ -170,9 +183,11 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         actor_is_alive = True
         original_actor = actor
         try:
-            ret = await actor.encode.remote(request_id=request_id,
-                                            prompt=prompt,
-                                            lora_request=lora_request)
+            ret = await actor.encode.remote(
+                request_id=request_id,
+                prompt=prompt,
+                lora_request=lora_request,
+                add_special_tokens=add_special_tokens)
         except ActorDiedError as e:
             # If the actor is dead, we first try to reinitialize it.
             logger.warning("%s died with ActorDiedError, reinitializing.",
@@ -180,9 +195,11 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
                            exc_info=e)
             actor = self._init_actor()
             try:
-                ret = await actor.encode.remote(request_id=request_id,
-                                                prompt=prompt,
-                                                lora_request=lora_request)
+                ret = await actor.encode.remote(
+                    request_id=request_id,
+                    prompt=prompt,
+                    lora_request=lora_request,
+                    add_special_tokens=add_special_tokens)
             except ActorDiedError as e:
                 logger.error(
                     "%s died for second time in a row, marking "
@@ -202,15 +219,15 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         return self._local_tokenizer_group.get_max_input_len(lora_request)
 
     def get_lora_tokenizer(
-            self,
-            lora_request: Optional[LoRARequest] = None
-    ) -> "PreTrainedTokenizer":
+        self,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> AnyTokenizer:
         return self._local_tokenizer_group.get_lora_tokenizer(lora_request)
 
     async def get_lora_tokenizer_async(
-            self,
-            lora_request: Optional[LoRARequest] = None
-    ) -> "PreTrainedTokenizer":
+        self,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> AnyTokenizer:
         return await self._local_tokenizer_group.get_lora_tokenizer_async(
             lora_request)
 

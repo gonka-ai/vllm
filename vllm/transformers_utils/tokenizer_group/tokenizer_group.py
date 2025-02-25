@@ -1,14 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional
 
-from transformers import PreTrainedTokenizer
-
+from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer import (get_lora_tokenizer,
+from vllm.transformers_utils.tokenizer import (AnyTokenizer, encode_tokens,
+                                               get_lora_tokenizer,
                                                get_lora_tokenizer_async,
                                                get_tokenizer)
-from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
-    BaseTokenizerGroup)
 from vllm.utils import LRUCache
+
+from .base_tokenizer_group import BaseTokenizerGroup
 
 
 class TokenizerGroup(BaseTokenizerGroup):
@@ -21,8 +23,14 @@ class TokenizerGroup(BaseTokenizerGroup):
         self.enable_lora = enable_lora
         self.max_input_length = max_input_length
         self.tokenizer = get_tokenizer(self.tokenizer_id, **tokenizer_config)
-        self.lora_tokenizers = LRUCache[PreTrainedTokenizer](
-            capacity=max_num_seqs) if enable_lora else None
+        max_loras = tokenizer_config.get("max_loras", 0)
+        self.lora_tokenizers = LRUCache[int, AnyTokenizer](
+            capacity=max(max_loras, max_num_seqs) if enable_lora else 0)
+
+    @classmethod
+    def from_config(cls, tokenizer_pool_config: Optional[TokenizerPoolConfig],
+                    **init_kwargs) -> "TokenizerGroup":
+        return cls(**init_kwargs)
 
     def ping(self) -> bool:
         """Check if the tokenizer group is alive."""
@@ -35,7 +43,7 @@ class TokenizerGroup(BaseTokenizerGroup):
         return self.max_input_length
 
     def _raise_if_input_too_long(self,
-                                 encoded_tokens: List[str],
+                                 encoded_tokens: List[int],
                                  lora_request: Optional[LoRARequest] = None):
         input_length = len(encoded_tokens)
         if lora_request:
@@ -49,9 +57,12 @@ class TokenizerGroup(BaseTokenizerGroup):
     def encode(self,
                prompt: str,
                request_id: Optional[str] = None,
-               lora_request: Optional[LoRARequest] = None) -> List[int]:
+               lora_request: Optional[LoRARequest] = None,
+               add_special_tokens: Optional[bool] = None) -> List[int]:
         tokenizer = self.get_lora_tokenizer(lora_request)
-        ret = tokenizer.encode(prompt)
+        ret = encode_tokens(tokenizer,
+                            prompt,
+                            add_special_tokens=add_special_tokens)
         self._raise_if_input_too_long(ret, lora_request)
         return ret
 
@@ -59,16 +70,19 @@ class TokenizerGroup(BaseTokenizerGroup):
             self,
             prompt: str,
             request_id: Optional[str] = None,
-            lora_request: Optional[LoRARequest] = None) -> List[int]:
+            lora_request: Optional[LoRARequest] = None,
+            add_special_tokens: Optional[bool] = None) -> List[int]:
         tokenizer = await self.get_lora_tokenizer_async(lora_request)
-        ret = tokenizer.encode(prompt)
+        ret = encode_tokens(tokenizer,
+                            prompt,
+                            add_special_tokens=add_special_tokens)
         self._raise_if_input_too_long(ret, lora_request)
         return ret
 
     def get_lora_tokenizer(
-            self,
-            lora_request: Optional[LoRARequest] = None
-    ) -> "PreTrainedTokenizer":
+        self,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> AnyTokenizer:
         if not lora_request or not self.enable_lora:
             return self.tokenizer
         if lora_request.lora_int_id not in self.lora_tokenizers:
@@ -77,12 +91,12 @@ class TokenizerGroup(BaseTokenizerGroup):
             self.lora_tokenizers.put(lora_request.lora_int_id, tokenizer)
             return tokenizer
         else:
-            return self.lora_tokenizers.get(lora_request.lora_int_id)
+            return self.lora_tokenizers[lora_request.lora_int_id]
 
     async def get_lora_tokenizer_async(
-            self,
-            lora_request: Optional[LoRARequest] = None
-    ) -> "PreTrainedTokenizer":
+        self,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> AnyTokenizer:
         if not lora_request or not self.enable_lora:
             return self.tokenizer
         if lora_request.lora_int_id not in self.lora_tokenizers:
@@ -91,4 +105,4 @@ class TokenizerGroup(BaseTokenizerGroup):
             self.lora_tokenizers.put(lora_request.lora_int_id, tokenizer)
             return tokenizer
         else:
-            return self.lora_tokenizers.get(lora_request.lora_int_id)
+            return self.lora_tokenizers[lora_request.lora_int_id]

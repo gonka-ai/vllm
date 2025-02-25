@@ -1,10 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionLayer,
+                                              AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import (CommonAttentionState,
+                                           CommonMetadataBuilder)
 from vllm.attention.ops.blocksparse_attention.interface import (
     LocalStridedBlockSparseAttn, get_head_sliding_step)
 from vllm.attention.ops.paged_attn import PagedAttention
@@ -86,12 +91,24 @@ class BlocksparseParams:
 class BlocksparseFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
+    def get_name() -> str:
+        return "BLOCK_SPARSE_FLASH_ATTN"
+
+    @staticmethod
     def get_impl_cls() -> Type["BlocksparseFlashAttentionImpl"]:
         return BlocksparseFlashAttentionImpl
 
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
         return BlocksparseFlashAttentionMetadata
+
+    @staticmethod
+    def get_builder_cls() -> Type["BlocksparseFlashAttentionMetadataBuilder"]:
+        return BlocksparseFlashAttentionMetadataBuilder
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
@@ -176,6 +193,9 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
 
+    # Max number of query tokens for among request in the batch.
+    max_decode_query_len: Optional[int] = None
+
     _cached_prefill_metadata: Optional[
         "BlocksparseFlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional[
@@ -202,6 +222,9 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
+            multi_modal_placeholder_index_maps=self.
+            multi_modal_placeholder_index_maps,
+            enable_kv_scales_calculation=self.enable_kv_scales_calculation,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
@@ -230,6 +253,8 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+            multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=False,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_query_len=None,
@@ -242,6 +267,12 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
+
+
+class BlocksparseFlashAttentionMetadataBuilder(
+        CommonMetadataBuilder[BlocksparseFlashAttentionMetadata]):
+
+    _metadata_cls = BlocksparseFlashAttentionMetadata
 
 
 class BlocksparseFlashAttentionImpl(AttentionImpl):
@@ -272,12 +303,16 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         assert blocksparse_params is not None
         assert alibi_slopes is None, ValueError(
             "Alibi not support for blocksparse flash attention.")
         assert sliding_window is None, ValueError(
             "sliding_window is invalid for blocksparse attention.")
+        assert logits_soft_cap is None, ValueError(
+            "logits_soft_cap is invalid for blocksparse attention.")
 
         if "num_heads" not in blocksparse_params:
             blocksparse_params["num_heads"] = num_heads
@@ -320,14 +355,21 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             active_head_range=self.blocksparse_params.active_head_range,
         )
 
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "BlocksparseFlashAttentionImpl")
+
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: BlocksparseFlashAttentionMetadata,
-        kv_scale: float = 1.0,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -336,6 +378,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
             kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+                NOTE: kv_cache will be an empty tensor with shape [0]
+                for profiling run.
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -346,7 +390,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        if kv_cache is not None:
+        if kv_cache.numel() > 0:
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
@@ -361,7 +405,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                kv_scale,
+                layer._k_scale,
+                layer._v_scale,
             )
 
         if prefill_meta := attn_metadata.prefill_metadata:
@@ -371,7 +416,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
 
-            assert kv_cache is None \
+            assert kv_cache.numel() == 0 \
                     or prefill_meta.block_tables is None \
                     or prefill_meta.block_tables.numel() == 0, \
                 "Does not support prefix-enabled attention."
@@ -398,7 +443,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                kv_scale,
+                layer._k_scale,
+                layer._v_scale,
                 tp_rank=self.tp_rank,
                 blocksparse_local_blocks=self.local_blocks,
                 blocksparse_vert_stride=self.vert_stride,
@@ -406,5 +452,6 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 blocksparse_head_sliding_step=self.head_sliding_step,
             )
 
+        assert output is not None
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 from typing import Dict, FrozenSet, List, Optional, Protocol, Tuple
 
@@ -30,6 +32,13 @@ class Block(ABC):
 
     @property
     @abstractmethod
+    def num_tokens_total(self) -> int:
+        """The number of tokens till the current block (inclusive)
+        """
+        pass
+
+    @property
+    @abstractmethod
     def num_empty_slots(self) -> int:
         pass
 
@@ -42,6 +51,11 @@ class Block(ABC):
     @abstractmethod
     def prev_block(self) -> Optional["Block"]:
         pass
+
+    @property
+    @abstractmethod
+    def extra_hash(self) -> Optional[int]:
+        return None
 
     @property
     @abstractmethod
@@ -74,6 +88,8 @@ class Block(ABC):
             block_size: int,
             allocator: "BlockAllocator",
             block_id: Optional[int] = None,
+            computed: bool = False,
+            extra_hash: Optional[int] = None,
         ) -> "Block":
             pass
 
@@ -92,12 +108,20 @@ class Block(ABC):
 class BlockAllocator(ABC):
 
     @abstractmethod
-    def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
+    def allocate_mutable_block(self, prev_block: Optional[Block],
+                               extra_hash: Optional[int]) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable(self, prev_block: Optional[Block],
-                           token_ids: List[int]) -> Block:
+    def allocate_immutable_block(self, prev_block: Optional[Block],
+                                 token_ids: List[int],
+                                 extra_hash: Optional[int]) -> Block:
+        pass
+
+    @abstractmethod
+    def allocate_immutable_blocks(self, prev_block: Optional[Block],
+                                  block_token_ids: List[List[int]],
+                                  extra_hash: Optional[int]) -> List[Block]:
         pass
 
     @abstractmethod
@@ -148,11 +172,11 @@ class BlockAllocator(ABC):
 
     @abstractmethod
     def get_common_computed_block_ids(
-            self, seq_block_ids: List[List[int]]) -> List[int]:
+            self, computed_seq_block_ids: List[List[int]]) -> List[int]:
         pass
 
     @abstractmethod
-    def cow_block_if_not_appendable(self, block: Block) -> Optional["BlockId"]:
+    def cow_block_if_not_appendable(self, block: Block) -> BlockId:
         """NOTE: This should not be used besides Block"""
         pass
 
@@ -162,25 +186,55 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_num_blocks_touched(self,
-                               blocks: List[Block],
-                               num_lookahead_slots: int = 0) -> int:
+    def get_num_full_blocks_touched(self, blocks: List[Block]) -> int:
+        pass
+
+    @abstractmethod
+    def get_prefix_cache_hit_rate(self) -> float:
+        """Prefix cache hit rate. -1 means not supported or disabled."""
+        pass
+
+    @abstractmethod
+    def reset_prefix_cache(self) -> bool:
+        """Reset prefix cache."""
         pass
 
     class NoFreeBlocksError(ValueError):
+        pass
+
+    @abstractmethod
+    def find_cached_blocks_prefix(
+        self,
+        block_hashes: List[int],
+    ) -> List[int]:
         pass
 
 
 class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
-    def allocate_mutable(self, prev_block: Optional[Block],
-                         device: Device) -> Block:
+    def allocate_mutable_block(self,
+                               prev_block: Optional[Block],
+                               device: Device,
+                               extra_hash: Optional[int] = None) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable(self, prev_block: Optional[Block],
-                           token_ids: List[int], device: Device) -> Block:
+    def allocate_immutable_block(self,
+                                 prev_block: Optional[Block],
+                                 token_ids: List[int],
+                                 device: Device,
+                                 extra_hash: Optional[int] = None) -> Block:
+        pass
+
+    @abstractmethod
+    def allocate_immutable_blocks(
+        self,
+        prev_block: Optional[Block],
+        block_token_ids: List[List[int]],
+        device: Device,
+        extra_hash: Optional[int] = None,
+    ) -> List[Block]:
         pass
 
     @abstractmethod
@@ -219,19 +273,17 @@ class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
     def get_common_computed_block_ids(
-            self, seq_block_ids: List[List[int]]) -> List[int]:
+            self, computed_seq_block_ids: List[List[int]]) -> List[int]:
         pass
 
     @abstractmethod
-    def get_num_blocks_touched(self,
-                               blocks: List[Block],
-                               device: Device,
-                               num_lookahead_slots: int = 0) -> int:
+    def get_num_full_blocks_touched(self, blocks: List[Block],
+                                    device: Device) -> int:
         pass
 
     @abstractmethod
-    def swap(self, blocks: List[Block], source_device: Device,
-             dest_device: Device) -> Dict[int, int]:
+    def swap(self, blocks: List[Block], src_device: Device,
+             dst_device: Device) -> Dict[int, int]:
         pass
 
     @abstractmethod
@@ -245,4 +297,22 @@ class DeviceAwareBlockAllocator(ABC):
         been dropped due to sliding window.
         There is at most one null block per allocator.
         """
+        pass
+
+    @abstractmethod
+    def get_prefix_cache_hit_rate(self, device: Device) -> float:
+        """Prefix cache hit rate. -1 means not supported or disabled."""
+        pass
+
+    @abstractmethod
+    def reset_prefix_cache(self) -> bool:
+        """Reset prefix cache."""
+        pass
+
+    @abstractmethod
+    def find_cached_blocks_prefix(
+        self,
+        block_hashes: List[int],
+        device: Device = Device.GPU,
+    ) -> List[int]:
         pass

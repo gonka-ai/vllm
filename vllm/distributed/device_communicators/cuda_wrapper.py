@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """This file is a pure Python wrapper for the cudart library.
 It avoids the need to compile a separate shared library, and is
 convenient for use when we just need to call a few functions.
@@ -10,6 +11,7 @@ from typing import Any, Dict, List, Optional
 # this line makes it possible to directly load `libcudart.so` using `ctypes`
 import torch  # noqa
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -31,6 +33,32 @@ class Function:
     name: str
     restype: Any
     argtypes: List[Any]
+
+
+def find_loaded_library(lib_name) -> Optional[str]:
+    """
+    According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
+    the file `/proc/self/maps` contains the memory maps of the process, which includes the
+    shared libraries loaded by the process. We can use this file to find the path of the
+    a loaded library.
+    """ # noqa
+    found = False
+    with open("/proc/self/maps") as f:
+        for line in f:
+            if lib_name in line:
+                found = True
+                break
+    if not found:
+        # the library is not loaded in the current process
+        return None
+    # if lib_name is libcudart, we need to match a line with:
+    # address /path/to/libcudart-hash.so.11.0
+    start = line.index("/")
+    path = line[start:].strip()
+    filename = path.split("/")[-1]
+    assert filename.rpartition(".so")[0].startswith(lib_name), \
+        f"Unexpected filename: {filename} for library {lib_name}"
+    return path
 
 
 class CudaRTLibrary:
@@ -77,9 +105,14 @@ class CudaRTLibrary:
 
     def __init__(self, so_file: Optional[str] = None):
         if so_file is None:
-            assert torch.version.cuda is not None
-            major_version = torch.version.cuda.split(".")[0]
-            so_file = f"libcudart.so.{major_version}"
+            so_file = find_loaded_library("libcudart")
+            if so_file is None:
+                so_file = envs.VLLM_CUDART_SO_PATH  # fallback to env var
+            assert so_file is not None, \
+                (
+                    "libcudart is not loaded in the current process, "
+                    "try setting VLLM_CUDART_SO_PATH"
+                )
         if so_file not in CudaRTLibrary.path_to_library_cache:
             lib = ctypes.CDLL(so_file)
             CudaRTLibrary.path_to_library_cache[so_file] = lib

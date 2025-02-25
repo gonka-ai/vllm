@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -23,6 +25,7 @@ class DeepSpeedFPConfig(QuantizationConfig):
         weight_bits: int = 8,
         group_size: int = 512,
     ) -> None:
+        super().__init__()
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.valid_types = [torch.bfloat16, torch.float16]
@@ -50,9 +53,6 @@ class DeepSpeedFPConfig(QuantizationConfig):
     def get_linear_method(self) -> "DeepSpeedFPLinearMethod":
         return DeepSpeedFPLinearMethod(self)
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
         return [torch.half, torch.bfloat16]
@@ -69,9 +69,8 @@ class DeepSpeedFPConfig(QuantizationConfig):
             "quantize_config.json",
         ]
 
-    def get_quant_method(
-            self,
-            layer: torch.nn.Module) -> Optional["DeepSpeedFPLinearMethod"]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["DeepSpeedFPLinearMethod"]:
         if isinstance(layer, LinearBase):
             return DeepSpeedFPLinearMethod(self)
         return None

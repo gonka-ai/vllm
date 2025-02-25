@@ -1,17 +1,26 @@
-from typing import List, Optional, Tuple
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import List, Optional, Set, Tuple
 
 import torch
+import torch.nn as nn
 
 from vllm.distributed.parallel_state import (get_tp_group,
                                              init_model_parallel_group,
                                              patch_tensor_parallel_group)
 from vllm.logger import init_logger
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 
 logger = init_logger(__name__)
+
+
+class _DummyModel(nn.Module):
+    pass
 
 
 class SmallerTpProposerWorker(ProposerWorkerBase):
@@ -83,6 +92,12 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         # Need include_gpu_probs_tensor for multi_step_worker
         self._worker.set_include_gpu_probs_tensor()
 
+    def set_should_modify_greedy_probs_inplace(self) -> None:
+        if self._is_dummy:
+            return
+
+        self._worker.set_should_modify_greedy_probs_inplace()
+
     def load_model(self) -> None:
         if self._is_dummy:
             return
@@ -110,13 +125,17 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> Tuple[List[SamplerOutput], bool]:
         # Do not check _is_dummy, as it's always called by get_spec_proposals
-        return self._worker.sampler_output(execute_model_req, sample_len)
+        return self._worker.sampler_output(
+            execute_model_req, sample_len,
+            seq_ids_with_bonus_token_in_last_step)
 
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> SpeculativeProposals:
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
@@ -125,7 +144,15 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
             return SpeculativeProposals(None, None, None)
 
         with self._patch_tensor_parallel_group():
-            return self._worker.get_spec_proposals(execute_model_req)
+            return self._worker.get_spec_proposals(
+                execute_model_req, seq_ids_with_bonus_token_in_last_step)
+
+    def get_model(self) -> nn.Module:
+        if self._is_dummy:
+            return _DummyModel()
+
+        with self._patch_tensor_parallel_group():
+            return self._worker.get_model()
 
     def execute_model(
         self,
@@ -147,3 +174,21 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
     @property
     def vocab_size(self) -> int:
         return self._worker.vocab_size
+
+    def maybe_load_lm_head_weight(
+        self,
+        lm_head_weight: torch.Tensor,
+    ) -> None:
+        if self._is_dummy:
+            return
+
+        with self._patch_tensor_parallel_group():
+            weight_loader = getattr(
+                self._worker.worker.model_runner.model_runner.model.\
+                    lm_head.weight,
+                "weight_loader",
+                default_weight_loader)
+            weight_loader(
+                self._worker.worker.model_runner.model_runner.model.\
+                    lm_head.weight,
+                lm_head_weight)

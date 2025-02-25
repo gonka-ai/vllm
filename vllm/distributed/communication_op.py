@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Dict, Optional, Union
 
 import torch
@@ -19,7 +21,7 @@ def tensor_model_parallel_all_gather(input_: torch.Tensor,
 
 def tensor_model_parallel_gather(input_: torch.Tensor,
                                  dst: int = 0,
-                                 dim: int = -1) -> torch.Tensor:
+                                 dim: int = -1) -> Optional[torch.Tensor]:
     """Gather the input tensor across model parallel group."""
     return get_tp_group().gather(input_, dst, dim)
 

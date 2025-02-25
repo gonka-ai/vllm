@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional
 
 from transformers import PretrainedConfig
@@ -17,6 +19,8 @@ class MLPSpeculatorConfig(PretrainedConfig):
                  n_predict: int = 3,
                  top_k_tokens_per_head: Optional[List[int]] = None,
                  n_candidates: int = 5,
+                 tie_weights: bool = False,
+                 scale_input: bool = False,
                  **kwargs):
         """
         Initialize an MLPSpeculatorConfig
@@ -38,6 +42,14 @@ class MLPSpeculatorConfig(PretrainedConfig):
                 NOTE: This parameter is currently unused.
             n_candidates: int
                 number of child candidates to create per sequence
+            tie_weights: bool
+                If true, use a single set of weights for every model
+                head/stage after the first. The initial projection
+                from the base model may have a different size, so that
+                stays separate.
+            scale_input: bool
+                if True, will scale the initial hidden states from
+                the base model.
         """
         if top_k_tokens_per_head is None:
             top_k_tokens_per_head = [5, 4, 3]
@@ -49,5 +61,7 @@ class MLPSpeculatorConfig(PretrainedConfig):
         self.top_k_tokens_per_head = top_k_tokens_per_head
         self.n_candidates = n_candidates
         self.num_lookahead_tokens = n_predict
+        self.tie_weights = tie_weights
+        self.scale_input = scale_input
 
         super().__init__(**kwargs)

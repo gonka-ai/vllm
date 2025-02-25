@@ -1,16 +1,33 @@
-from .base import MultiModalData, MultiModalPlugin
+# SPDX-License-Identifier: Apache-2.0
+
+from .base import MultiModalPlaceholderMap, MultiModalPlugin
+from .hasher import MultiModalHashDict, MultiModalHasher
+from .inputs import (BatchedTensorInputs, ModalityData, MultiModalDataBuiltins,
+                     MultiModalDataDict, MultiModalKwargs,
+                     MultiModalPlaceholderDict, NestedTensors)
 from .registry import MultiModalRegistry
 
 MULTIMODAL_REGISTRY = MultiModalRegistry()
 """
 The global :class:`~MultiModalRegistry` is used by model runners to
-dispatch data processing according to its modality and the target model.
+dispatch data processing according to the target model.
 
 See also:
-    :ref:`input_processing_pipeline`
+    :ref:`mm-processing`
 """
 
 __all__ = [
-    "MultiModalData", "MultiModalPlugin", "MULTIMODAL_REGISTRY",
-    "MultiModalRegistry"
+    "BatchedTensorInputs",
+    "ModalityData",
+    "MultiModalDataBuiltins",
+    "MultiModalDataDict",
+    "MultiModalHashDict",
+    "MultiModalHasher",
+    "MultiModalKwargs",
+    "MultiModalPlaceholderDict",
+    "MultiModalPlaceholderMap",
+    "MultiModalPlugin",
+    "NestedTensors",
+    "MULTIMODAL_REGISTRY",
+    "MultiModalRegistry",
 ]

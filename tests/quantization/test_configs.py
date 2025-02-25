@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests whether Marlin models can be loaded from the autogptq config.
 
 Run `pytest tests/quantization/test_configs.py --forked`.
@@ -44,9 +45,9 @@ MODEL_ARG_EXPTYPES = [
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "awq", "ERROR"),
 
     # AUTOAWQ
-    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", None, "awq"),
+    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", None, "awq_marlin"),
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "awq", "awq"),
-    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "marlin", "ERROR"),
+    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "marlin", "awq_marlin"),
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "gptq", "ERROR"),
 ]
 
@@ -57,7 +58,8 @@ def test_auto_gptq(model_arg_exptype: Tuple[str, None, str]) -> None:
 
     try:
         model_config = ModelConfig(model_path,
-                                   model_path,
+                                   task="auto",
+                                   tokenizer=model_path,
                                    tokenizer_mode="auto",
                                    trust_remote_code=False,
                                    seed=0,
