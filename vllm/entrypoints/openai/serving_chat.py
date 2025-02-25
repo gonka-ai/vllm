@@ -207,49 +207,28 @@ class OpenAIServingChat(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: List[AsyncGenerator[RequestOutput, None]] = []
         try:
-            for i, engine_prompt in enumerate(engine_prompts):
-                sampling_params: Union[SamplingParams, BeamSearchParams]
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"])
-                # Build default sampling params
-                default_sampling_params = (
-                    self.model_config.get_diff_sampling_param())
-                if request.use_beam_search:
-                    sampling_params = request.to_beam_search_params(
-                        default_max_tokens, default_sampling_params)
-                else:
-                    sampling_params = request.to_sampling_params(
-                        default_max_tokens,
-                        self.model_config.logits_processor_pattern,
-                        default_sampling_params)
-
-                self._log_inputs(request_id,
-                                 request_prompts[i],
-                                 params=sampling_params,
-                                 lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
-
-                trace_headers = (None if raw_request is None else await
-                                 self._get_trace_headers(raw_request.headers))
-
-                if isinstance(sampling_params, BeamSearchParams):
-                    generator = self.engine_client.beam_search(
-                        prompt=engine_prompt,
-                        request_id=request_id,
-                        params=sampling_params,
-                    )
-                else:
-                    generator = self.engine_client.generate(
-                        engine_prompt,
-                        sampling_params,
-                        request_id,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                        prompt_adapter_request=prompt_adapter_request,
-                        priority=request.priority,
-                    )
-
-                generators.append(generator)
+            # Tokenize/detokenize depending on prompt format (string/token list)
+            prompt_ids, prompt_text = self._validate_prompt_and_tokenize(
+                request,
+                prompt=prompt,
+                add_special_tokens=request.add_special_tokens)
+            sampling_params = request.to_sampling_params()
+            if request.enforced_str:
+                toks = self.tokenizer(request.enforced_str, add_special_tokens=False)
+                sampling_params.enforce_token_ids = toks.input_ids + [self.tokenizer.eos_token_id]
+            lora_request = self._maybe_get_lora(request)
+            decoding_config = await self.engine.get_decoding_config()
+            guided_decoding_backend = request.guided_decoding_backend \
+                or decoding_config.guided_decoding_backend
+            guided_decode_logits_processor = (
+                await get_guided_decoding_logits_processor(
+                    guided_decoding_backend, request, await
+                    self.engine.get_tokenizer()))
+            if guided_decode_logits_processor:
+                if sampling_params.logits_processors is None:
+                    sampling_params.logits_processors = []
+                sampling_params.logits_processors.append(
+                    guided_decode_logits_processor)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))

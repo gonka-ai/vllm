@@ -23,6 +23,8 @@ class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2
+    BEAM = 3
+    ENFORCED = 4
 
 
 # maybe make msgspec?
@@ -235,79 +237,19 @@ class SamplingParams(
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
-        truncate_prompt_tokens: Optional[Annotated[int,
-                                                   msgspec.Meta(ge=1)]] = None,
-        output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
-        guided_decoding: Optional[GuidedDecodingParams] = None,
-        logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]] = None,
-        allowed_token_ids: Optional[List[int]] = None,
-    ) -> "SamplingParams":
-        if logit_bias is not None:
-            # Convert token_id to integer
-            # Clamp the bias between -100 and 100 per OpenAI API spec
-            logit_bias = {
-                int(token): min(100.0, max(-100.0, bias))
-                for token, bias in logit_bias.items()
-            }
-
-        return SamplingParams(
-            n=1 if n is None else n,
-            best_of=best_of,
-            presence_penalty=0.0
-            if presence_penalty is None else presence_penalty,
-            frequency_penalty=0.0
-            if frequency_penalty is None else frequency_penalty,
-            repetition_penalty=1.0
-            if repetition_penalty is None else repetition_penalty,
-            temperature=1.0 if temperature is None else temperature,
-            top_p=1.0 if top_p is None else top_p,
-            top_k=top_k,
-            min_p=min_p,
-            seed=seed,
-            stop=stop,
-            stop_token_ids=stop_token_ids,
-            bad_words=bad_words,
-            include_stop_str_in_output=include_stop_str_in_output,
-            ignore_eos=ignore_eos,
-            max_tokens=max_tokens,
-            min_tokens=min_tokens,
-            logprobs=logprobs,
-            prompt_logprobs=prompt_logprobs,
-            detokenize=detokenize,
-            skip_special_tokens=skip_special_tokens,
-            spaces_between_special_tokens=spaces_between_special_tokens,
-            logits_processors=logits_processors,
-            truncate_prompt_tokens=truncate_prompt_tokens,
-            output_kind=output_kind,
-            guided_decoding=guided_decoding,
-            logit_bias=logit_bias,
-            allowed_token_ids=allowed_token_ids,
-        )
-
-    def __post_init__(self) -> None:
-        # how we deal with `best_of``:
-        # if `best_of`` is not set, we default to `n`;
-        # if `best_of`` is set, we set `n`` to `best_of`,
-        # and set `_real_n`` to the original `n`.
-        # when we return the result, we will check
-        # if we need to return `n` or `_real_n` results
-        if self.best_of:
-            if self.best_of < self.n:
-                raise ValueError(
-                    f"best_of must be greater than or equal to n, "
-                    f"got n={self.n} and best_of={self.best_of}.")
-            if not self._real_n:
-                self._real_n = self.n
-                self.n = self.best_of
-
-        if 0 < self.temperature < _MAX_TEMP:
-            logger.warning(
-                "temperature %s is less than %s, which may cause numerical "
-                "errors nan or inf in tensors. We have maxed it out to %s.",
-                self.temperature, _MAX_TEMP, _MAX_TEMP)
-            self.temperature = max(self.temperature, _MAX_TEMP)
-
-        if self.seed == -1:
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        enforce_sequence: Optional[List[int]] = None,
+    ) -> None:
+        self.n = n
+        self.best_of = best_of if best_of is not None else n
+        self.presence_penalty = presence_penalty
+        self.frequency_penalty = frequency_penalty
+        self.repetition_penalty = repetition_penalty
+        self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
+        self.min_p = min_p
+        if seed == -1:
             self.seed = None
         else:
             self.seed = self.seed
@@ -347,7 +289,8 @@ class SamplingParams(
             self.min_p = 0.0
             self._verify_greedy_sampling()
         # eos_token_id is added to this by the engine
-        self._all_stop_token_ids = set(self.stop_token_ids)
+        self.all_stop_token_ids = set(self.stop_token_ids)
+        self.enforce_token_ids = enforce_sequence
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
@@ -442,6 +385,10 @@ class SamplingParams(
 
     @cached_property
     def sampling_type(self) -> SamplingType:
+        if self.enforce_token_ids:
+            return SamplingType.ENFORCED
+        if self.use_beam_search:
+            return SamplingType.BEAM
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
         if self.seed is not None:
