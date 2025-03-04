@@ -23,8 +23,7 @@ class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2
-    BEAM = 3
-    ENFORCED = 4
+    ENFORCED = 3
 
 
 # maybe make msgspec?
@@ -450,8 +449,6 @@ class SamplingParams(
     def sampling_type(self) -> SamplingType:
         if self.enforce_token_ids:
             return SamplingType.ENFORCED
-        if self.use_beam_search:
-            return SamplingType.BEAM
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
         if self.seed is not None:
