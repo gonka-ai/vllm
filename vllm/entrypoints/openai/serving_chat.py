@@ -197,6 +197,7 @@ class OpenAIServingChat(OpenAIServing):
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
+
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
@@ -224,6 +225,7 @@ class OpenAIServingChat(OpenAIServing):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
                 default_max_tokens = self.max_model_len - len(
                     engine_prompt["prompt_token_ids"])
+
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
                         default_max_tokens, self.default_sampling_params)
@@ -232,6 +234,10 @@ class OpenAIServingChat(OpenAIServing):
                         default_max_tokens,
                         self.model_config.logits_processor_pattern,
                         self.default_sampling_params)
+                
+                if request.enforced_str:
+                    toks = tokenizer(request.enforced_str, add_special_tokens=False)
+                    sampling_params.enforce_token_ids = toks.input_ids + [tokenizer.eos_token_id]
 
                 self._log_inputs(request_id,
                                  request_prompts[i],

@@ -346,6 +346,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, will override the default whitespace pattern "
             "for guided json decoding."))
+    enforced_str: Optional[str] = Field(default=None)
     priority: int = Field(
         default=0,
         description=(
@@ -504,7 +505,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
-            logit_bias=self.logit_bias)
+            logit_bias=self.logit_bias,
+            enforce_token_ids=default_sampling_params.get("enforce_token_ids", None)
+        )
 
     def _get_guided_json_from_tool(
             self) -> Optional[Union[str, dict, BaseModel]]:
@@ -874,7 +877,9 @@ class CompletionRequest(OpenAIBaseModel):
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
-            allowed_token_ids=self.allowed_token_ids)
+            allowed_token_ids=self.allowed_token_ids,
+            enforce_token_ids=default_sampling_params.get("enforce_token_ids", None)
+        )
 
     @model_validator(mode="before")
     @classmethod
