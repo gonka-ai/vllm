@@ -352,7 +352,6 @@ class SamplingParams(
             self._verify_greedy_sampling()
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids = set(self.stop_token_ids)
-        self.enforce_token_ids = self.enforce_sequence
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
@@ -447,7 +446,7 @@ class SamplingParams(
 
     @cached_property
     def sampling_type(self) -> SamplingType:
-        if self.enforce_token_ids:
+        if self.enforce_sequence:
             return SamplingType.ENFORCED
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY

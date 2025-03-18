@@ -767,23 +767,17 @@ def _sample_with_torch(
             for seq_group in seq_groups:
                 sampling_params = seq_group.sampling_params
                 first_seq_id = seq_group.seq_ids[0]
-                output_token_ids = seq_group.seq_data[first_seq_id].output_token_ids
-                enforced_token_ids.append(
-                    sampling_params.enforce_token_ids[len(output_token_ids)]
-                )
+                output_token_ids = seq_group.seq_data[first_seq_id].output_token_ids                
+                if len(output_token_ids) < len(sampling_params.enforce_sequence):
+                    next_enforced_token = sampling_params.enforce_sequence[len(output_token_ids)]
+                else:
+                    next_enforced_token = sampling_params.enforce_sequence[-1]
+                enforced_token_ids.append(next_enforced_token)
             
             if sampled_token_ids_tensor is not None:
                 sampled_token_ids_tensor[
                     long_sample_indices] = torch.tensor(enforced_token_ids, device=logprobs.device).view(-1, 1)
 
-            num_samples = 1
-            for seq_group in seq_groups:
-                if seq_group.is_prompt:
-                    sampling_params = seq_group.sampling_params
-                    num_samples = max(
-                        num_samples,
-                        sampling_params.best_of
-                    )
         else:
             raise ValueError(f"Unsupported sampling type: {sampling_type}")
 

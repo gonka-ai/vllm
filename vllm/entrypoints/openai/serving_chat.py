@@ -215,9 +215,6 @@ class OpenAIServingChat(OpenAIServing):
                 # Build default sampling params
                 default_sampling_params = (
                     self.model_config.get_diff_sampling_param())
-                if request.enforced_str:
-                    toks = tokenizer(request.enforced_str, add_special_tokens=False)
-                    default_sampling_params['enforce_token_ids'] = toks.input_ids + [tokenizer.eos_token_id]
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
                         default_max_tokens, default_sampling_params)
@@ -226,7 +223,9 @@ class OpenAIServingChat(OpenAIServing):
                         default_max_tokens,
                         self.model_config.logits_processor_pattern,
                         default_sampling_params)
-
+                if request.enforced_str:
+                    toks = tokenizer(request.enforced_str, add_special_tokens=False)
+                    sampling_params.enforce_sequence = toks.input_ids + [tokenizer.eos_token_id]
                 self._log_inputs(request_id,
                                  request_prompts[i],
                                  params=sampling_params,
