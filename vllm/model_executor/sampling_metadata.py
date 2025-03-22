@@ -15,6 +15,10 @@ from vllm.utils import (PyObjectCache, async_tensor_h2d,
 _SAMPLING_EPS = 1e-5
 
 
+from vllm.logger import init_logger
+logger = init_logger(__name__)
+
+
 @dataclass
 class SequenceGroupToSample:
     # |---------- N-1 iteration --------|

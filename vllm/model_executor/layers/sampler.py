@@ -68,6 +68,7 @@ class SampleResultArgsType:
     sample_results_dict: SampleResultsDictType
     sampling_metadata: SamplingMetadata
     greedy_samples: Optional[torch.Tensor]
+    enforced_token_ids: Optional[List[int]]
 
 
 # Union of non-deferred (single-step scheduling)
@@ -236,6 +237,61 @@ class Sampler(nn.Module):
             logits: (num_tokens, vocab_size).
             sampling_metadata: Metadata for sampling.
         """
+        
+        probs, logprobs, sampling_tensors = self._prepare_lobprobs(
+            logits=logits,
+            sampling_metadata=sampling_metadata
+        )
+
+        maybe_deferred_sample_results, maybe_sampled_tokens_tensor = _sample(
+            probs,
+            logprobs,
+            sampling_metadata,
+            sampling_tensors,
+            include_gpu_probs_tensor=self.include_gpu_probs_tensor,
+            modify_greedy_probs=self._should_modify_greedy_probs_inplace,
+        )
+
+        if self.include_gpu_probs_tensor:
+            # Since we will defer sampler result Pythonization,
+            # preserve GPU-side tensors in support of later
+            # deferred pythonization of logprobs
+            assert maybe_sampled_tokens_tensor is not None
+            on_device_tensors = (probs, logprobs, maybe_sampled_tokens_tensor)
+        else:
+            # Since Pythonization has already happened, don't preserve
+            # GPU-side tensors.
+            on_device_tensors = None
+
+        # Get the logprobs query results.
+        prompt_logprobs = None
+        sample_logprobs = None
+        if not sampling_metadata.skip_sampler_cpu_output:
+            # Pythonize logprobs now (GPU -> CPU); do not defer.
+            assert not isinstance(maybe_deferred_sample_results,
+                                  SampleResultArgsType)
+            prompt_logprobs, sample_logprobs = get_logprobs(
+                logprobs, sampling_metadata, maybe_deferred_sample_results)
+
+        return _build_sampler_output(
+            maybe_deferred_sample_results,
+            sampling_metadata,
+            prompt_logprobs,
+            sample_logprobs,
+            on_device_tensors=on_device_tensors,
+            skip_sampler_cpu_output=sampling_metadata.skip_sampler_cpu_output)
+
+    def _prepare_lobprobs(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        """
+        Args:
+            logits: (num_tokens, vocab_size).
+            sampling_metadata: Metadata for sampling.
+        """
+
         assert logits is not None
         _, vocab_size = logits.shape
 
@@ -283,45 +339,9 @@ class Sampler(nn.Module):
         # Compute the log probabilities.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
-        # Sample the next tokens.
-        maybe_deferred_sample_results, maybe_sampled_tokens_tensor = _sample(
-            probs,
-            logprobs,
-            sampling_metadata,
-            sampling_tensors,
-            include_gpu_probs_tensor=self.include_gpu_probs_tensor,
-            modify_greedy_probs=self._should_modify_greedy_probs_inplace,
-        )
+        return probs, logprobs, sampling_tensors
 
-        if self.include_gpu_probs_tensor:
-            # Since we will defer sampler result Pythonization,
-            # preserve GPU-side tensors in support of later
-            # deferred pythonization of logprobs
-            assert maybe_sampled_tokens_tensor is not None
-            on_device_tensors = (probs, logprobs, maybe_sampled_tokens_tensor)
-        else:
-            # Since Pythonization has already happened, don't preserve
-            # GPU-side tensors.
-            on_device_tensors = None
-
-        # Get the logprobs query results.
-        prompt_logprobs = None
-        sample_logprobs = None
-        if not sampling_metadata.skip_sampler_cpu_output:
-            # Pythonize logprobs now (GPU -> CPU); do not defer.
-            assert not isinstance(maybe_deferred_sample_results,
-                                  SampleResultArgsType)
-            prompt_logprobs, sample_logprobs = get_logprobs(
-                logprobs, sampling_metadata, maybe_deferred_sample_results)
-
-        return _build_sampler_output(
-            maybe_deferred_sample_results,
-            sampling_metadata,
-            prompt_logprobs,
-            sample_logprobs,
-            on_device_tensors=on_device_tensors,
-            skip_sampler_cpu_output=sampling_metadata.skip_sampler_cpu_output)
-
+    
     @property
     def _should_modify_greedy_probs_inplace(self) -> bool:
         """Whether or not the sampler should modify the probability distribution
@@ -509,6 +529,16 @@ def _random_sample(
     return results
 
 
+def _enforced_sample(
+    enforced_token_ids: List[int]
+) -> SampleResultType:
+    results: SampleResultType = []
+    for next_token_id in enforced_token_ids:
+        results.append(([next_token_id], [0]))
+    
+    return results
+
+
 # torch.multinomial forces a GPU<->CPU sync.
 # Therefore, we use an optimized implementation instead.
 # Note that we always sample with replacement.
@@ -598,14 +628,16 @@ def get_pythonized_sample_results(
         greedy_samples,
         multinomial_samples,
         sample_results_dict,
+        enforced_token_ids,
     ) = (
         sample_result_args.sample_metadata,
         sample_result_args.sampling_metadata,
         sample_result_args.greedy_samples,
         sample_result_args.multinomial_samples,
         sample_result_args.sample_results_dict,
+        sample_result_args.enforced_token_ids,
     )
-
+    
     for sampling_type in SamplingType:
         if sampling_type not in sample_metadata:
             continue
@@ -615,6 +647,10 @@ def get_pythonized_sample_results(
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             sample_results = _random_sample(seq_groups,
                                             multinomial_samples[sampling_type])
+        elif sampling_type == SamplingType.ENFORCED:
+            sample_results = _enforced_sample(
+                enforced_token_ids
+            )
         sample_results_dict.update(zip(seq_group_id, sample_results))
 
     return [
@@ -657,7 +693,8 @@ def _sample_with_torch(
     sample_metadata: SampleMetadataType = {}
     multinomial_samples: MultinomialSamplesType = {}
     greedy_samples: Optional[torch.Tensor] = None
-
+    enforced_token_ids: Optional[List[int]] = None
+    
     # Create output tensor for sampled token ids.
     if include_gpu_probs_tensor:
         sampled_token_ids_tensor = torch.full((logprobs.shape[0], 1),
@@ -724,6 +761,22 @@ def _sample_with_torch(
                 # Store sampled tokens in output tensor.
                 sampled_token_ids_tensor[long_sample_indices] = \
                     multinomial_samples[sampling_type].to(torch.long)
+                    
+        elif sampling_type == SamplingType.ENFORCED:
+            enforced_token_ids = []
+            for seq_group in seq_groups:
+                sampling_params = seq_group.sampling_params
+                first_seq_id = seq_group.seq_ids[0]
+                output_token_ids = seq_group.seq_data[first_seq_id].output_token_ids                
+                if len(output_token_ids) < len(sampling_params.enforce_sequence):
+                    next_enforced_token = sampling_params.enforce_sequence[len(output_token_ids)]
+                else:
+                    next_enforced_token = sampling_params.stop_token_ids[0]
+                enforced_token_ids.append(next_enforced_token)
+            
+            if sampled_token_ids_tensor is not None:
+                sampled_token_ids_tensor[
+                    long_sample_indices] = torch.tensor(enforced_token_ids, device=logprobs.device).view(-1, 1)
 
         else:
             raise ValueError(f"Unsupported sampling type: {sampling_type}")
@@ -735,7 +788,8 @@ def _sample_with_torch(
         sample_metadata=sample_metadata,
         multinomial_samples=multinomial_samples,
         greedy_samples=greedy_samples,
-        sample_results_dict=sample_results_dict)
+        sample_results_dict=sample_results_dict,
+        enforced_token_ids=enforced_token_ids)
 
     if not sampling_metadata.skip_sampler_cpu_output:
         # GPU<->CPU sync happens here.
@@ -750,7 +804,6 @@ def _sample_with_torch(
             maybe_deferred_args,
             sampled_token_ids_tensor,
         )
-
 
 def _sample(
     probs: torch.Tensor,

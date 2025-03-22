@@ -24,6 +24,7 @@ class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2
+    ENFORCED = 3
 
 
 # maybe make msgspec?
@@ -220,6 +221,7 @@ class SamplingParams(
     logits_processors: Optional[Any] = None
     include_stop_str_in_output: bool = False
     truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
+    enforce_sequence: Optional[list[int]] = None
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
 
     # The below fields are not supposed to be used as an input.
@@ -264,6 +266,7 @@ class SamplingParams(
         logits_processors: Optional[list[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int,
                                                    msgspec.Meta(ge=1)]] = None,
+        enforce_sequence: Optional[list[int]] = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
         guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
@@ -306,6 +309,7 @@ class SamplingParams(
             spaces_between_special_tokens=spaces_between_special_tokens,
             logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
+            enforce_sequence=enforce_sequence,
             output_kind=output_kind,
             guided_decoding=guided_decoding,
             logit_bias=logit_bias,
@@ -506,6 +510,8 @@ class SamplingParams(
 
     @cached_property
     def sampling_type(self) -> SamplingType:
+        if self.enforce_sequence:
+            return SamplingType.ENFORCED
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
         if self.seed is not None:
