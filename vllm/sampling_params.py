@@ -568,7 +568,7 @@ class SamplingParams(
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"guided_decoding={self.guided_decoding}, "
             f"extra_args={self.extra_args}, "
-            f"enforce_token_ids={self.enforce_token_ids[:10] + ['...']})")
+            f"enforce_token_ids={self.enforce_token_ids[:10] + ['...'] if self.enforce_token_ids else None})")
 
 
 class BeamSearchParams(
