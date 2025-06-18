@@ -230,10 +230,10 @@ class OpenAIServingChat(OpenAIServing):
                     sampling_params.enforced_token_ids = toks.input_ids 
                     if sampling_params.enforced_token_ids[-1] != tokenizer.eos_token_id:
                         sampling_params.enforced_token_ids.append(tokenizer.eos_token_id)
-                        
-                if request.enforced_tokens:
+                elif request.enforced_tokens:
                     request.enforced_tokens.encode(tokenizer)
                     sampling_params.enforced_tokens = request.enforced_tokens
+                    sampling_params.enforced_token_ids = request.enforced_tokens.get_enforced_token_ids()
                     if request.enforced_tokens.tokens[-1].token_ids[0] != tokenizer.eos_token_id:
                         sampling_params.enforced_tokens.tokens.append(EnforcedToken(
                             token=tokenizer.eos_token,

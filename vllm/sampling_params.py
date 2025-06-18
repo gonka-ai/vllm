@@ -538,7 +538,7 @@ class SamplingParams(
 
     @cached_property
     def sampling_type(self) -> SamplingType:
-        if self.enforced_token_ids:
+        if self.enforced_token_ids or self.enforced_tokens:
             return SamplingType.ENFORCED
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
