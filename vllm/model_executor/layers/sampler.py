@@ -615,7 +615,8 @@ def get_pythonized_sample_results(
                     generated_token_id = enforced_token_ids[len(output_token_ids)]
                 else:
                     generated_token_id = enforced_token_ids[-1]
-                sample_results.append(([generated_token_id], [first_seq_id]))
+                
+                sample_results.append(([generated_token_id], [0]))
 
         sample_results_dict.update(zip(seq_group_id, sample_results))
 
@@ -732,7 +733,7 @@ def _sample_with_torch(
                     generated_token_id = enforced_token_ids[len(output_token_ids)]
                 else:
                     generated_token_id = enforced_token_ids[-1]
-                sample_results.append(([generated_token_id], [first_seq_id]))
+                sample_results.append(([generated_token_id], [0]))
             
             if sampled_token_ids_tensor is not None:
                 sampled_token_ids_tensor[
