@@ -25,6 +25,7 @@ class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2
+    ENFORCED = 3
 
 
 # maybe make msgspec?
@@ -247,6 +248,7 @@ class SamplingParams(
     # Fields used for bad words
     bad_words: Optional[list[str]] = None
     _bad_words_token_ids: Optional[list[list[int]]] = None
+    enforced_token_ids: Optional[list[int]] = None
 
     @staticmethod
     def from_optional(
@@ -280,6 +282,7 @@ class SamplingParams(
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
         extra_args: Optional[dict[str, Any]] = None,
+        enforced_token_ids: Optional[list[int]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -322,6 +325,7 @@ class SamplingParams(
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
+            enforced_token_ids=enforced_token_ids,
         )
 
     def __post_init__(self) -> None:
@@ -530,6 +534,8 @@ class SamplingParams(
 
     @cached_property
     def sampling_type(self) -> SamplingType:
+        if self.enforced_token_ids:
+            return SamplingType.ENFORCED
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
         if self.seed is not None:
@@ -585,7 +591,8 @@ class SamplingParams(
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"guided_decoding={self.guided_decoding}, "
-            f"extra_args={self.extra_args})")
+            f"extra_args={self.extra_args}, "
+            f"enforced_token_ids={self.enforced_token_ids})")
 
 
 class BeamSearchParams(

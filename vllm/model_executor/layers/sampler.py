@@ -603,6 +603,20 @@ def get_pythonized_sample_results(
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             sample_results = _random_sample(seq_groups,
                                             multinomial_samples[sampling_type])
+        elif sampling_type == SamplingType.ENFORCED:
+            _, sample_metadata_seq_groups = sample_metadata[SamplingType.ENFORCED]
+            sample_results = []
+            for seq_group, seq_group_metadata in zip(seq_groups, sample_metadata_seq_groups):
+                enforced_token_ids = seq_group_metadata.sampling_params.enforced_token_ids
+                first_seq_id = seq_group.seq_ids[0]
+                output_token_ids = seq_group.seq_data[first_seq_id].output_token_ids_array
+                generated_token_id = None
+                if len(output_token_ids) < len(enforced_token_ids):
+                    generated_token_id = enforced_token_ids[len(output_token_ids)]
+                else:
+                    generated_token_id = enforced_token_ids[-1]
+                sample_results.append(([generated_token_id], [first_seq_id]))
+
         sample_results_dict.update(zip(seq_group_id, sample_results))
 
     return [
@@ -707,6 +721,31 @@ def _sample_with_torch(
                 # Store sampled tokens in output tensor.
                 sampled_token_ids_tensor[long_sample_indices] = \
                     multinomial_samples[sampling_type].to(torch.long)
+        elif sampling_type == SamplingType.ENFORCED:
+            sample_results = []
+            for seq_group in seq_groups:
+                enforced_token_ids = seq_group.sampling_params.enforced_token_ids
+                first_seq_id = seq_group.seq_ids[0]
+                output_token_ids = seq_group.seq_data[first_seq_id].output_token_ids
+                generated_token_id = None
+                if len(output_token_ids) < len(enforced_token_ids):
+                    generated_token_id = enforced_token_ids[len(output_token_ids)]
+                else:
+                    generated_token_id = enforced_token_ids[-1]
+                sample_results.append(([generated_token_id], [first_seq_id]))
+            
+            if sampled_token_ids_tensor is not None:
+                sampled_token_ids_tensor[
+                    long_sample_indices] = torch.tensor(enforced_token_ids, device=logprobs.device).view(-1, 1)
+
+            num_samples = 1
+            for seq_group in seq_groups:
+                if seq_group.is_prompt:
+                    sampling_params = seq_group.sampling_params
+                    num_samples = max(
+                        num_samples,
+                        sampling_params.best_of if sampling_params.best_of is not None else 1
+                    )
 
         else:
             raise ValueError(f"Unsupported sampling type: {sampling_type}")

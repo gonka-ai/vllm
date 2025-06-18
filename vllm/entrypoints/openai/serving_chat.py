@@ -223,6 +223,12 @@ class OpenAIServingChat(OpenAIServing):
                         self.model_config.logits_processor_pattern,
                         self.default_sampling_params)
 
+                if request.enforced_str:
+                    toks = tokenizer(request.enforced_str,
+                                     add_special_tokens=False)
+                    sampling_params.enforced_token_ids = (
+                        toks.input_ids + [tokenizer.eos_token_id])
+
                 self._log_inputs(request_id,
                                  request_prompts[i],
                                  params=sampling_params,
