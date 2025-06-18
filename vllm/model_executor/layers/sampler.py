@@ -880,6 +880,7 @@ def get_logprobs(
                                        sampling_params.prompt_logprobs)
             next_prompt_tokens = _get_next_prompt_tokens(seq_group)
             query_indices.extend(seq_group.prompt_logprob_indices)
+            print(f"query_indices1: {query_indices} {next_prompt_tokens}")
             next_token_ids.extend(next_prompt_tokens)
 
         # Update indices and next tokenes for sample logprob.
@@ -892,6 +893,7 @@ def get_logprobs(
             query_idx = seq_group.sample_indices[0]
             query_indices.extend(
                 [query_idx + parent_id for parent_id in parent_seq_ids])
+            print(f"query_indices2: {query_indices} {token_ids}")
             next_token_ids.extend(token_ids)
 
             if sampling_params.logprobs is not None:
@@ -913,6 +915,8 @@ def get_logprobs(
     # If largest_num_logprobs == -1, i.e. no logprobs are requested, we can
     # skip the whole logprob calculation.
     if largest_num_logprobs >= 0:
+        print(f"query_indices: {query_indices}")
+        print(f"next_token_ids: {next_token_ids}")
         query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
         next_token_ids_gpu = torch.tensor(next_token_ids,
                                           device=logprobs.device)

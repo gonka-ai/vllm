@@ -24,6 +24,8 @@ from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid, resolve_obj_by_qualname
+from vllm.validation import EnforcedTokens
+
 
 logger = init_logger(__name__)
 
@@ -413,6 +415,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.")
 
+    enforced_tokens: Optional[EnforcedTokens] = Field(default=None)
     enforced_str: Optional[str] = Field(default=None)
 
     # --8<-- [end:chat-completion-extra-params]

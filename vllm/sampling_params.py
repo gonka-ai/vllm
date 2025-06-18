@@ -13,6 +13,7 @@ from typing_extensions import deprecated
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
+from vllm.validation import EnforcedTokens
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
@@ -249,6 +250,7 @@ class SamplingParams(
     bad_words: Optional[list[str]] = None
     _bad_words_token_ids: Optional[list[list[int]]] = None
     enforced_token_ids: Optional[list[int]] = None
+    enforced_tokens: Optional[EnforcedTokens] = None
 
     @staticmethod
     def from_optional(
@@ -283,6 +285,7 @@ class SamplingParams(
         allowed_token_ids: Optional[list[int]] = None,
         extra_args: Optional[dict[str, Any]] = None,
         enforced_token_ids: Optional[list[int]] = None,
+        enforced_tokens: Optional[EnforcedTokens] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -326,6 +329,7 @@ class SamplingParams(
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
             enforced_token_ids=enforced_token_ids,
+            enforced_tokens=enforced_tokens,
         )
 
     def __post_init__(self) -> None:
@@ -592,7 +596,8 @@ class SamplingParams(
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"guided_decoding={self.guided_decoding}, "
             f"extra_args={self.extra_args}, "
-            f"enforced_token_ids={self.enforced_token_ids})")
+            f"enforced_token_ids={self.enforced_token_ids}, "
+            f"enforced_tokens={self.enforced_tokens})")
 
 
 class BeamSearchParams(

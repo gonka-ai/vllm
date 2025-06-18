@@ -43,6 +43,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
                                                 truncate_tool_call_ids,
                                                 validate_request_params)
+from vllm.validation import EnforcedToken
 
 logger = init_logger(__name__)
 
@@ -228,7 +229,18 @@ class OpenAIServingChat(OpenAIServing):
                                      add_special_tokens=False)
                     sampling_params.enforced_token_ids = toks.input_ids 
                     if sampling_params.enforced_token_ids[-1] != tokenizer.eos_token_id:
-                        sampling_params.enforced_token_ids.append(toks.input_ids[-1])
+                        sampling_params.enforced_token_ids.append(tokenizer.eos_token_id)
+                        
+                if request.enforced_tokens:
+                    request.enforced_tokens.encode(tokenizer)
+                    sampling_params.enforced_tokens = request.enforced_tokens
+                    if request.enforced_tokens.tokens[-1].token_ids[0] != tokenizer.eos_token_id:
+                        sampling_params.enforced_tokens.tokens.append(EnforcedToken(
+                            token=tokenizer.eos_token,
+                            top_tokens=[str(tokenizer.eos_token_id)],
+                            token_ids=[tokenizer.eos_token_id],
+                            top_token_ids=[tokenizer.eos_token_id]
+                        ))
 
                 self._log_inputs(request_id,
                                  request_prompts[i],
@@ -1154,6 +1166,7 @@ class OpenAIServingChat(OpenAIServing):
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
         logprobs_content: list[ChatCompletionLogProbsContent] = []
+
 
         should_return_as_token_id = return_as_token_id if \
             return_as_token_id is not None else self.return_tokens_as_token_ids
