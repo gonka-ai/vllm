@@ -226,8 +226,9 @@ class OpenAIServingChat(OpenAIServing):
                 if request.enforced_str:
                     toks = tokenizer(request.enforced_str,
                                      add_special_tokens=False)
-                    sampling_params.enforced_token_ids = (
-                        toks.input_ids + [tokenizer.eos_token_id])
+                    sampling_params.enforced_token_ids = toks.input_ids 
+                    if sampling_params.enforced_token_ids[-1] != tokenizer.eos_token_id:
+                        sampling_params.enforced_token_ids.append(toks.input_ids[-1])
 
                 self._log_inputs(request_id,
                                  request_prompts[i],
