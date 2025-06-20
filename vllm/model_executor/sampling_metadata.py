@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from uuid import uuid4, UUID
 from array import array
 from dataclasses import dataclass
 from typing import Optional
@@ -49,11 +50,16 @@ class SequenceGroupToSample:
     # Sample token indices from logits. Empty if sampling is not required.
     sample_indices: list[int]
 
+
+    id: UUID = None
+
     @property
     def do_sample(self):
         return len(self.sample_indices) > 0
 
     def __post_init__(self):
+        if self.id is None:
+            self.id = uuid4()
         if len(self.prompt_logprob_indices) > 0:
             assert self.sampling_params.prompt_logprobs is not None
         if self.is_prompt:

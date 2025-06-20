@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from importlib.util import find_spec
 from math import inf
+from uuid import UUID
 from typing import Optional, Union
 
 import msgspec
@@ -867,6 +868,11 @@ def get_logprobs(
     # set to -1.
     largest_num_logprobs = -1
 
+    enforced_query_indices: list[int] = []
+    enforced_token_ids: list[int] = []
+    enforced_starts: dict[UUID, int] = dict()
+    enforced_ends: dict[UUID, int] = dict()
+
     # Select indices to compute logprob from, ranks of token ids, and the top
     # k token ids from logprobs.
     for (seq_group, sample_result) in zip(sampling_metadata.seq_groups,
@@ -880,7 +886,6 @@ def get_logprobs(
                                        sampling_params.prompt_logprobs)
             next_prompt_tokens = _get_next_prompt_tokens(seq_group)
             query_indices.extend(seq_group.prompt_logprob_indices)
-            print(f"query_indices1: {query_indices} {next_prompt_tokens}")
             next_token_ids.extend(next_prompt_tokens)
 
         # Update indices and next tokenes for sample logprob.
@@ -893,8 +898,22 @@ def get_logprobs(
             query_idx = seq_group.sample_indices[0]
             query_indices.extend(
                 [query_idx + parent_id for parent_id in parent_seq_ids])
-            print(f"query_indices2: {query_indices} {token_ids}")
             next_token_ids.extend(token_ids)
+
+            if sampling_params.enforced_tokens:
+                first_seq_id = seq_group.seq_ids[0]
+                enforced_starts[seq_group.id] = len(enforced_query_indices)
+                output_token_ids = seq_group.seq_data[first_seq_id].output_token_ids
+                if len(output_token_ids) < len(sampling_params.enforced_tokens.tokens):
+                    enforced_token = sampling_params.enforced_tokens.tokens[len(output_token_ids)] 
+                else:
+                    enforced_token = sampling_params.enforced_tokens.tokens[-1]
+                
+                for parent_id in parent_seq_ids:
+                    for token_id in enforced_token.top_token_ids:
+                        enforced_query_indices.append(query_idx + parent_id)
+                        enforced_token_ids.append(token_id)
+                enforced_ends[seq_group.id] = len(enforced_query_indices)
 
             if sampling_params.logprobs is not None:
                 largest_num_logprobs = max(largest_num_logprobs,
@@ -911,12 +930,20 @@ def get_logprobs(
 
     selected_logprobs, ranks = None, None
     top_logprobs, top_token_ids = None, None
+    enforced_logprobs, enforced_ranks = None, None
+
+    if len(enforced_query_indices) > 0:
+        enforced_query_indices_gpu = torch.tensor(enforced_query_indices, device=logprobs.device)
+        enforced_token_ids_gpu = torch.tensor(enforced_token_ids, device=logprobs.device)
+        enforced_logprobs = logprobs[[
+            enforced_query_indices_gpu,
+            enforced_token_ids_gpu,
+        ]]
+        enforced_ranks = _get_ranks(logprobs[enforced_query_indices_gpu], enforced_token_ids_gpu)
 
     # If largest_num_logprobs == -1, i.e. no logprobs are requested, we can
     # skip the whole logprob calculation.
     if largest_num_logprobs >= 0:
-        print(f"query_indices: {query_indices}")
-        print(f"next_token_ids: {next_token_ids}")
         query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
         next_token_ids_gpu = torch.tensor(next_token_ids,
                                           device=logprobs.device)
@@ -945,6 +972,9 @@ def get_logprobs(
 
         selected_logprobs = selected_logprobs.to('cpu')
         ranks = ranks.to('cpu')
+        if enforced_logprobs is not None:
+            enforced_logprobs = enforced_logprobs.to('cpu')
+            enforced_ranks = enforced_ranks.to('cpu')
 
     # Find prompt/sample logprobs.
     prompt_logprobs_per_seq_group: list[Optional[PromptLogprobs]] = []
@@ -965,6 +995,21 @@ def get_logprobs(
              seq_group, sample_result, selected_logprobs, ranks, top_token_ids,
              top_logprobs, selected_logprobs_idx, top_logprob_idx)
         sample_logprobs_per_seq_group.append(sampled_logprobs)
+
+        if seq_group.id in enforced_starts:
+            enforced_group_token_ids = enforced_token_ids[
+                enforced_starts[seq_group.id]:enforced_ends[seq_group.id]
+            ]
+            enforced_group_logprobs = enforced_logprobs[
+                enforced_starts[seq_group.id]:enforced_ends[seq_group.id]
+            ].tolist()
+            enforced_group_ranks = enforced_ranks[
+                enforced_starts[seq_group.id]:enforced_ends[seq_group.id]
+            ].tolist()
+            for token_id, logprob, rank in zip(enforced_group_token_ids, enforced_group_logprobs, enforced_group_ranks):
+                if token_id in sampled_logprobs[0]:
+                    continue
+                sampled_logprobs[0][token_id] = Logprob(logprob=logprob, rank=rank)
 
     return prompt_logprobs_per_seq_group, sample_logprobs_per_seq_group
 
