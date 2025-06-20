@@ -3,4 +3,4 @@ FROM vllm/vllm-openai:v0.9.1
 
 ENV VLLM_USE_V1=0
 
-COPY ./vllm /opt/venv/lib/python3.12/site-packages/vllm
+COPY ./vllm /usr/local/lib/python3.12/dist-packages/vllm
