@@ -1,0 +1,20 @@
+# Use the official vLLM base image
+FROM vllm/vllm-openai:v0.6.4.post1
+
+# Set working directory
+WORKDIR /workspace/vllm
+
+# Copy only the modified Python files with deterministic sampling
+COPY vllm/sampling_params.py /workspace/vllm/vllm/sampling_params.py
+COPY vllm/model_executor/layers/sampler.py /workspace/vllm/vllm/model_executor/layers/sampler.py
+COPY vllm/entrypoints/openai/protocol.py /workspace/vllm/vllm/entrypoints/openai/protocol.py
+
+# Copy documentation and examples (optional but helpful)
+COPY docs/deterministic_hash_sampling.md /workspace/vllm/docs/deterministic_hash_sampling.md
+COPY examples/deterministic_hash_sampling_example.py /workspace/vllm/examples/deterministic_hash_sampling_example.py
+
+# Ensure Python can find the modules
+ENV PYTHONPATH=/workspace/vllm:$PYTHONPATH
+
+# Keep the same entrypoint as the base image
+# The base image already has the correct entrypoint configured
