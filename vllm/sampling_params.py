@@ -27,6 +27,7 @@ class SamplingType(IntEnum):
     RANDOM = 1
     RANDOM_SEED = 2
     ENFORCED = 3
+    DETERMINISTIC_HASH = 4
 
 
 # maybe make msgspec?
@@ -157,6 +158,9 @@ class SamplingParams(
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
         seed: Random seed to use for the generation.
+        use_deterministic_hash: If True, uses deterministic hash-based sampling
+            that respects the probability distribution. Requires a seed to be set.
+            This provides reproducible sampling across different runs.
         stop: list of strings that stop the generation when they are generated.
             The returned output will not contain the stop strings.
         stop_token_ids: list of tokens that stop the generation when they are
@@ -215,6 +219,7 @@ class SamplingParams(
     top_k: int = 0
     min_p: float = 0.0
     seed: Optional[int] = None
+    use_deterministic_hash: bool = False
     stop: Optional[Union[str, list[str]]] = None
     stop_token_ids: Optional[list[int]] = None
     ignore_eos: bool = False
@@ -264,6 +269,7 @@ class SamplingParams(
         top_k: int = 0,
         min_p: float = 0.0,
         seed: Optional[int] = None,
+        use_deterministic_hash: bool = False,
         stop: Optional[Union[str, list[str]]] = None,
         stop_token_ids: Optional[list[int]] = None,
         bad_words: Optional[list[str]] = None,
@@ -309,6 +315,7 @@ class SamplingParams(
             top_k=top_k,
             min_p=min_p,
             seed=seed,
+            use_deterministic_hash=use_deterministic_hash,
             stop=stop,
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
@@ -542,6 +549,8 @@ class SamplingParams(
             return SamplingType.ENFORCED
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
+        if self.use_deterministic_hash:
+            return SamplingType.DETERMINISTIC_HASH
         if self.seed is not None:
             return SamplingType.RANDOM_SEED
         return SamplingType.RANDOM

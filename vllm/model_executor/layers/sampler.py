@@ -35,8 +35,16 @@ else:
 
 from vllm.logger import init_logger
 
+import hashlib
+
 logger = init_logger(__name__)
 
+def deterministic_rng(seed: str, step: int, n: int) -> int:
+    """Return deterministic index in range [0, n)
+    using SHA256(seed + step) → fully integer, bit-reproducible.
+    """
+    h = hashlib.sha256(f"{seed}:{step}".encode()).digest()
+    return int.from_bytes(h, "big") % n
 
 def get_sampler() -> torch.nn.Module:
     if envs.VLLM_USE_V1:
@@ -521,6 +529,49 @@ def _random_sample(
     return results
 
 
+def _deterministic_hash_sample(
+    selected_seq_groups: list[SequenceGroupToSample],
+    deterministic_samples: torch.Tensor,
+) -> SampleResultType:
+    """Run deterministic hash sampling on given samples.
+
+    Args:
+        selected_seq_groups: A list of sequence groups batched.
+        deterministic_samples: (num_selected_samples,) A tensor of samples. The
+            length of samples could be smaller than selected_seq_groups if
+            seq_group.do_sample is False.
+    Returns:
+        Tuple of (next_token_ids, parent_ids). The length of returned list is
+        same as the length of selected_seq_groups. If the corresponding
+        seq_group has do_sample=False, tuple contains ([], [])
+    """
+    deterministic_samples = deterministic_samples.cpu()
+    sample_idx = 0
+    results: SampleResultType = []
+    for seq_group in selected_seq_groups:
+        if not seq_group.do_sample:
+            results.append(([], []))
+            continue
+
+        seq_ids = seq_group.seq_ids
+        sampling_params = seq_group.sampling_params
+        is_prompt = seq_group.is_prompt
+        num_parent_seqs = len(seq_ids)
+        if is_prompt:
+            # Prompt phase.
+            parent_ids = [0] * sampling_params.n
+            next_token_ids = deterministic_samples[
+                sample_idx, :sampling_params.n].tolist()
+        else:
+            # Generation phase.
+            parent_ids = list(range(num_parent_seqs))
+            next_token_ids = deterministic_samples[sample_idx:sample_idx +
+                                            num_parent_seqs, 0].tolist()
+        results.append((next_token_ids, parent_ids))
+        sample_idx += num_parent_seqs
+    return results
+
+
 # torch.multinomial forces a GPU<->CPU sync.
 # Therefore, we use an optimized implementation instead.
 # Note that we always sample with replacement.
@@ -546,6 +597,69 @@ def _multinomial(
               stride].exponential_(generator=seq_group.generator)
             sample_idx += stride
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
+
+
+def _deterministic_hash_multinomial(
+    probs: torch.Tensor,
+    num_samples: int,
+    seq_groups: list[SequenceGroupToSample],
+) -> torch.Tensor:
+    """Deterministic hash-based sampling that respects probability distribution.
+    
+    Uses inverse transform sampling with hash-based RNG to generate deterministic
+    samples from the probability distribution.
+    
+    Args:
+        probs: (batch_size, vocab_size) probability distributions
+        num_samples: number of samples per sequence
+        seq_groups: sequence groups with sampling parameters
+        
+    Returns:
+        (batch_size, num_samples) tensor of sampled token indices
+    """
+    batch_size = probs.shape[0]
+    vocab_size = probs.shape[1]
+    
+    # Create output tensor for deterministic samples
+    deterministic_samples = torch.zeros(
+        (batch_size, num_samples),
+        dtype=torch.long,
+        device=probs.device
+    )
+    
+    # For each sequence, use deterministic hash to select token
+    for idx, seq_group in enumerate(seq_groups):
+        sampling_params = seq_group.sampling_params
+        seed = str(sampling_params.seed) if sampling_params.seed is not None else "0"
+        
+        # Get the current step number from sequence data
+        seq_ids = seq_group.seq_ids
+        seq_data = seq_group.seq_data[seq_ids[0]]
+        step = len(seq_data.output_token_ids_array)
+        
+        # Determine how many samples to generate
+        n_samples = sampling_params.n if seq_group.is_prompt else len(seq_ids)
+        
+        # Get probability distribution for this sequence
+        prob_dist = probs[idx].cpu()
+        
+        # Compute cumulative distribution function (CDF)
+        cumulative_probs = torch.cumsum(prob_dist, dim=0)
+        
+        for n_idx in range(n_samples):
+            # Use hash-based RNG to generate deterministic value in [0, 1)
+            # Using 2^64 as denominator for high precision
+            hash_int = deterministic_rng(seed, step + n_idx, 2**64)
+            uniform_value = hash_int / (2**64)
+            
+            # Find token index using CDF (inverse transform sampling)
+            # This ensures we sample according to the model's distribution
+            token_idx = torch.searchsorted(cumulative_probs, uniform_value, right=True)
+            token_idx = min(token_idx.item(), vocab_size - 1)  # Clamp to vocab size
+            
+            deterministic_samples[idx, n_idx] = token_idx
+    
+    return deterministic_samples
 
 
 def _top_k_top_p_multinomial_with_flashinfer(
@@ -603,6 +717,9 @@ def get_pythonized_sample_results(
             sample_results = _greedy_sample(seq_groups, greedy_samples)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             sample_results = _random_sample(seq_groups,
+                                            multinomial_samples[sampling_type])
+        elif sampling_type == SamplingType.DETERMINISTIC_HASH:
+            sample_results = _deterministic_hash_sample(seq_groups,
                                             multinomial_samples[sampling_type])
         elif sampling_type == SamplingType.ENFORCED:
             _, sample_metadata_seq_groups = sample_metadata[SamplingType.ENFORCED]
@@ -723,6 +840,24 @@ def _sample_with_torch(
                 # Store sampled tokens in output tensor.
                 sampled_token_ids_tensor[long_sample_indices] = \
                     multinomial_samples[sampling_type].to(torch.long)
+
+        elif sampling_type == SamplingType.DETERMINISTIC_HASH:
+            max_n_in_batch = 1
+            for seq_group in seq_groups:
+                if seq_group.is_prompt:
+                    sampling_params = seq_group.sampling_params
+                    max_n_in_batch = max(max_n_in_batch, sampling_params.n)
+
+            multinomial_samples[sampling_type] = _deterministic_hash_multinomial(
+                probs[long_sample_indices],
+                max_n_in_batch,
+                seq_groups=seq_groups)
+
+            if sampled_token_ids_tensor is not None:
+                # Store sampled tokens in output tensor.
+                sampled_token_ids_tensor[long_sample_indices] = \
+                    multinomial_samples[sampling_type][:, 0:1].to(torch.long)
+
         elif sampling_type == SamplingType.ENFORCED:
             sample_results = []
             for seq_group in seq_groups:
