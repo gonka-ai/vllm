@@ -8,32 +8,27 @@ import sys
 import hashlib
 
 def test_deterministic_rng():
-    """Test the deterministic RNG function."""
     print("Testing deterministic_rng function...")
     
     def deterministic_rng(seed: str, step: int, n: int) -> int:
         h = hashlib.sha256(f"{seed}:{step}".encode()).digest()
         return int.from_bytes(h, "big") % n
     
-    # Test 1: Same inputs produce same outputs
     result1 = deterministic_rng("42", 0, 1000)
     result2 = deterministic_rng("42", 0, 1000)
     assert result1 == result2, "Same inputs should produce same outputs"
     print(f"  ✓ Reproducibility: seed='42', step=0 → {result1}")
     
-    # Test 2: Different seeds produce different outputs
     result_seed1 = deterministic_rng("42", 0, 1000)
     result_seed2 = deterministic_rng("43", 0, 1000)
     assert result_seed1 != result_seed2, "Different seeds should produce different outputs"
     print(f"  ✓ Seed variation: '42'→{result_seed1}, '43'→{result_seed2}")
     
-    # Test 3: Different steps produce different outputs
     result_step1 = deterministic_rng("42", 0, 1000)
     result_step2 = deterministic_rng("42", 1, 1000)
     assert result_step1 != result_step2, "Different steps should produce different outputs"
     print(f"  ✓ Step variation: step=0→{result_step1}, step=1→{result_step2}")
     
-    # Test 4: Output is within range
     for _ in range(100):
         result = deterministic_rng("test", _, 50)
         assert 0 <= result < 50, f"Output {result} not in range [0, 50)"
@@ -43,18 +38,15 @@ def test_deterministic_rng():
 
 
 def test_sampling_params():
-    """Test SamplingParams integration."""
     print("Testing SamplingParams integration...")
     
     try:
         from vllm.sampling_params import SamplingParams, SamplingType
         
-        # Test 1: Default behavior (no deterministic hash)
         params1 = SamplingParams(temperature=1.0, seed=42)
         assert params1.sampling_type == SamplingType.RANDOM_SEED
         print(f"  ✓ Default with seed: {params1.sampling_type}")
         
-        # Test 2: Enable deterministic hash
         params2 = SamplingParams(
             temperature=1.0, 
             seed=42, 
@@ -63,7 +55,6 @@ def test_sampling_params():
         assert params2.sampling_type == SamplingType.DETERMINISTIC_HASH
         print(f"  ✓ Deterministic hash enabled: {params2.sampling_type}")
         
-        # Test 3: Greedy takes precedence
         params3 = SamplingParams(
             temperature=0.0,
             seed=42,
@@ -72,7 +63,6 @@ def test_sampling_params():
         assert params3.sampling_type == SamplingType.GREEDY
         print(f"  ✓ Greedy precedence (temp=0): {params3.sampling_type}")
         
-        # Test 4: from_optional method
         params4 = SamplingParams.from_optional(
             temperature=1.0,
             seed=42,
@@ -88,25 +78,22 @@ def test_sampling_params():
 
 
 def test_inverse_transform_sampling():
-    """Test inverse transform sampling logic."""
     print("Testing inverse transform sampling logic...")
     
     try:
         import torch
         
-        # Create a simple probability distribution
         probs = torch.tensor([0.1, 0.2, 0.3, 0.4])
         cumulative = torch.cumsum(probs, dim=0)
         print(f"  Probabilities: {probs.tolist()}")
         print(f"  Cumulative:    {cumulative.tolist()}")
         
-        # Test sampling with different uniform values
         test_cases = [
-            (0.05, 0),   # Should select first token
-            (0.15, 1),   # Should select second token
-            (0.35, 2),   # Should select third token
-            (0.75, 3),   # Should select fourth token
-            (0.99, 3),   # Should select last token
+            (0.05, 0),
+            (0.15, 1),
+            (0.35, 2),
+            (0.75, 3),
+            (0.99, 3),
         ]
         
         for uniform_val, expected_idx in test_cases:

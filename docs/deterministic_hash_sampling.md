@@ -2,21 +2,17 @@
 
 ## Overview
 
-This implementation adds a new sampling mode `SamplingType.DETERMINISTIC_HASH` to vLLM that provides **bit-level reproducibility** for token generation across different machines and hardware configurations.
+This implementation adds `SamplingType.DETERMINISTIC_HASH` to vLLM that provides bit-level reproducibility for token generation across different machines and hardware configurations.
 
 ## Why Deterministic Hash Sampling?
 
-Traditional random sampling methods (even with fixed seeds) use floating-point random number generators that can produce slightly different results across:
-- Different hardware architectures
-- Different CUDA versions
-- Different PyTorch versions
-- Different numerical precision settings
+Traditional random sampling methods (even with fixed seeds) use floating-point random number generators that can produce slightly different results across different hardware architectures, CUDA versions, PyTorch versions, and numerical precision settings.
 
-Deterministic hash sampling solves this by using **integer-only hash-based RNG** that guarantees identical results regardless of the execution environment.
+Deterministic hash sampling solves this by using integer-only hash-based RNG that guarantees identical results regardless of the execution environment.
 
 ## Key Features
 
-1. **Bit-level reproducibility**: Same input + same seed = identical output, always
+1. **Bit-level reproducibility**: Same input + same seed = identical output
 2. **Hardware agnostic**: Works identically across different GPUs, CPUs, and platforms
 3. **Validator-friendly**: Enables trustless verification of LLM outputs
 4. **On-chain compatible**: Integer-only operations suitable for blockchain verification
@@ -29,25 +25,86 @@ Deterministic hash sampling solves this by using **integer-only hash-based RNG**
 
 ```python
 def deterministic_rng(seed: str, step: int, n: int) -> int:
-    """Return deterministic index in range [0, n)
-    using SHA256(seed + step) → fully integer, bit-reproducible.
-    """
     h = hashlib.sha256(f"{seed}:{step}".encode()).digest()
     return int.from_bytes(h, "big") % n
 ```
 
-This function:
-- Takes a seed string and step number
-- Computes SHA256 hash
-- Converts hash to integer
-- Returns index in range [0, n) via modulo operation
-
 #### 2. Sampling Type Enumeration
-
-Added `DETERMINISTIC_HASH = 3` to `SamplingType` enum:
 
 ```python
 class SamplingType(IntEnum):
+    GREEDY = 0
+    RANDOM = 1
+    RANDOM_SEED = 2
+    DETERMINISTIC_HASH = 4
+```
+
+#### 3. Sampling Parameters
+
+```python
+class SamplingParams:
+    seed: Optional[int] = None
+    use_deterministic_hash: bool = False
+```
+
+When `use_deterministic_hash=True` and `temperature > 0`, the sampling type is automatically set to `DETERMINISTIC_HASH`.
+
+## Usage
+
+### Basic Usage
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(model="your-model")
+
+sampling_params = SamplingParams(
+    temperature=1.0,
+    seed=42,
+    use_deterministic_hash=True,
+    max_tokens=100
+)
+
+outputs = llm.generate(["Your prompt"], sampling_params)
+```
+
+### Reproducibility Test
+
+```python
+outputs1 = llm.generate(prompts, sampling_params)
+outputs2 = llm.generate(prompts, sampling_params)
+
+assert outputs1[0].outputs[0].text == outputs2[0].outputs[0].text
+```
+
+## How It Works
+
+The implementation uses inverse transform sampling with the model's probability distribution:
+
+1. Compute hash: `hash = SHA256(seed:step)`
+2. Convert to uniform value: `u = hash / 2^64`
+3. Use CDF for inverse transform: `token = CDF^-1(u)`
+
+This samples from the model's distribution deterministically while respecting temperature, top-k, and top-p parameters.
+
+## Comparison with Other Sampling Methods
+
+| Method | Reproducible | Hardware Agnostic | Respects Model Probs |
+|--------|--------------|-------------------|---------------------|
+| GREEDY | ✅ | ✅ | ✅ |
+| RANDOM | ❌ | ❌ | ✅ |
+| RANDOM_SEED | ⚠️ | ❌ | ✅ |
+| DETERMINISTIC_HASH | ✅ | ✅ | ✅ |
+
+## Modified Files
+
+1. **vllm/sampling_params.py** - Added `use_deterministic_hash` parameter
+2. **vllm/model_executor/layers/sampler.py** - Added deterministic sampling functions
+3. **vllm/entrypoints/openai/protocol.py** - Added API parameter
+
+## License
+
+Apache 2.0 (same as vLLM project)
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2
@@ -124,7 +181,7 @@ assert outputs1[0].outputs[0].text == outputs2[0].outputs[0].text
 
 ### 1. Probability Distribution Aware
 
-✅ **Improvement**: The implementation now uses **inverse transform sampling** with the model's probability distribution.
+**Improvement**: The implementation now uses **inverse transform sampling** with the model's probability distribution.
 
 This means:
 - Temperature, top-k, top-p are applied to logits and used for selection
@@ -160,12 +217,12 @@ Potential enhancements:
 ### 3. Use Cases
 
 Current implementation is suitable for:
-- ✅ Production text generation with reproducibility
-- ✅ Quality-sensitive applications (respects model distribution)
-- ✅ Deterministic artifact generation
-- ✅ Validator cross-checking
-- ✅ Blockchain verification
-- ✅ A/B testing with consistent outputs
+- Production text generation with reproducibility
+- Quality-sensitive applications (respects model distribution)
+- Deterministic artifact generation
+- Validator cross-checking
+- Blockchain verification
+- A/B testing with consistent outputs
 
 ## Comparison with Other Sampling Methods
 

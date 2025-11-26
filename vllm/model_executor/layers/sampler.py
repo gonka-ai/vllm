@@ -40,9 +40,6 @@ import hashlib
 logger = init_logger(__name__)
 
 def deterministic_rng(seed: str, step: int, n: int) -> int:
-    """Return deterministic index in range [0, n)
-    using SHA256(seed + step) → fully integer, bit-reproducible.
-    """
     h = hashlib.sha256(f"{seed}:{step}".encode()).digest()
     return int.from_bytes(h, "big") % n
 
@@ -533,18 +530,6 @@ def _deterministic_hash_sample(
     selected_seq_groups: list[SequenceGroupToSample],
     deterministic_samples: torch.Tensor,
 ) -> SampleResultType:
-    """Run deterministic hash sampling on given samples.
-
-    Args:
-        selected_seq_groups: A list of sequence groups batched.
-        deterministic_samples: (num_selected_samples,) A tensor of samples. The
-            length of samples could be smaller than selected_seq_groups if
-            seq_group.do_sample is False.
-    Returns:
-        Tuple of (next_token_ids, parent_ids). The length of returned list is
-        same as the length of selected_seq_groups. If the corresponding
-        seq_group has do_sample=False, tuple contains ([], [])
-    """
     deterministic_samples = deterministic_samples.cpu()
     sample_idx = 0
     results: SampleResultType = []
@@ -558,12 +543,10 @@ def _deterministic_hash_sample(
         is_prompt = seq_group.is_prompt
         num_parent_seqs = len(seq_ids)
         if is_prompt:
-            # Prompt phase.
             parent_ids = [0] * sampling_params.n
             next_token_ids = deterministic_samples[
                 sample_idx, :sampling_params.n].tolist()
         else:
-            # Generation phase.
             parent_ids = list(range(num_parent_seqs))
             next_token_ids = deterministic_samples[sample_idx:sample_idx +
                                             num_parent_seqs, 0].tolist()
@@ -604,40 +587,23 @@ def _deterministic_hash_multinomial(
     num_samples: int,
     seq_groups: list[SequenceGroupToSample],
 ) -> torch.Tensor:
-    """Deterministic hash-based sampling that respects probability distribution.
-    
-    Uses inverse transform sampling with hash-based RNG to generate deterministic
-    samples from the probability distribution.
-    
-    Args:
-        probs: (batch_size, vocab_size) probability distributions
-        num_samples: number of samples per sequence
-        seq_groups: sequence groups with sampling parameters
-        
-    Returns:
-        (batch_size, num_samples) tensor of sampled token indices
-    """
     batch_size = probs.shape[0]
     vocab_size = probs.shape[1]
     
-    # Create output tensor for deterministic samples
     deterministic_samples = torch.zeros(
         (batch_size, num_samples),
         dtype=torch.long,
         device=probs.device
     )
     
-    # For each sequence, use deterministic hash to select token
     for idx, seq_group in enumerate(seq_groups):
         sampling_params = seq_group.sampling_params
         seed = str(sampling_params.seed) if sampling_params.seed is not None else "0"
         
-        # Get the current step number from sequence data
         seq_ids = seq_group.seq_ids
         seq_data = seq_group.seq_data[seq_ids[0]]
         step = len(seq_data.output_token_ids_array)
         
-        # Determine how many samples to generate
         n_samples = sampling_params.n if seq_group.is_prompt else len(seq_ids)
         
         # Get probability distribution for this sequence
@@ -679,21 +645,6 @@ def _top_k_top_p_multinomial_with_flashinfer(
 
 def get_pythonized_sample_results(
         sample_result_args: SampleResultArgsType) -> SampleResultType:
-    '''This function consumes GPU-side sampler results and computes
-    Pythonized CPU-side sampler results (GPU -> CPU sync.)
-
-    Single-step scheduling: this function is invoked at sampling-time
-    for immediate Pythonization.
-
-    Multi-step scheduling: Pythonization is deferred until after multiple
-    GPU-side steps have been completed.
-
-    Args:
-      sample_result_args: GPU-side inputs to the Pythonization process
-
-    Returns:
-      Pythonized sampler results
-    '''
 
     (
         sample_metadata,
@@ -752,17 +703,6 @@ def _sample_with_torch(
     include_gpu_probs_tensor: bool,
     modify_greedy_probs: bool,
 ) -> SampleReturnType:
-    '''Torch-oriented _sample() implementation.
-
-    Single-step scheduling:
-    * Perform GPU-side sampling computation
-    * Immediately Pythonize sampling result
-
-    Multi-step scheduling:
-    * Perform GPU-side sampling computation
-    * Defer Pythonization & preserve GPU-side
-      tensors required for Pythonization
-    '''
 
     categorized_seq_group_ids: dict[SamplingType, list[int]] = {
         t: []

@@ -7,14 +7,12 @@ This script tests the API parameter integration.
 import json
 
 def test_api_parameter_acceptance():
-    """Test that ChatCompletionRequest accepts use_deterministic_hash parameter."""
     print("Testing API Parameter Acceptance...")
     print("=" * 70)
     
     try:
         from vllm.entrypoints.openai.protocol import ChatCompletionRequest
         
-        # Test 1: Default value (should be False)
         request1 = ChatCompletionRequest(
             model="test-model",
             messages=[{"role": "user", "content": "test"}]
@@ -22,7 +20,6 @@ def test_api_parameter_acceptance():
         assert request1.use_deterministic_hash == False, "Default should be False"
         print("✓ Default value is False")
         
-        # Test 2: Explicit True
         request2 = ChatCompletionRequest(
             model="test-model",
             messages=[{"role": "user", "content": "test"}],
@@ -31,7 +28,6 @@ def test_api_parameter_acceptance():
         assert request2.use_deterministic_hash == True
         print("✓ Can set to True")
         
-        # Test 3: With seed
         request3 = ChatCompletionRequest(
             model="test-model",
             messages=[{"role": "user", "content": "test"}],
@@ -43,7 +39,6 @@ def test_api_parameter_acceptance():
         assert request3.use_deterministic_hash == True
         print("✓ Works with seed parameter")
         
-        # Test 4: JSON serialization
         request_dict = {
             "model": "test-model",
             "messages": [{"role": "user", "content": "test"}],
@@ -66,7 +61,6 @@ def test_api_parameter_acceptance():
 
 
 def test_sampling_params_conversion():
-    """Test that use_deterministic_hash is passed to SamplingParams."""
     print("\n" + "=" * 70)
     print("Testing SamplingParams Conversion...")
     print("=" * 70)
@@ -75,7 +69,6 @@ def test_sampling_params_conversion():
         from vllm.entrypoints.openai.protocol import ChatCompletionRequest
         from vllm.sampling_params import SamplingType
         
-        # Test conversion to SamplingParams
         request = ChatCompletionRequest(
             model="test-model",
             messages=[{"role": "user", "content": "test"}],
@@ -85,13 +78,11 @@ def test_sampling_params_conversion():
             max_tokens=100
         )
         
-        # Convert to SamplingParams
         sampling_params = request.to_sampling_params(
             default_max_tokens=512,
             logits_processor_pattern=None
         )
         
-        # Verify the parameter was passed through
         assert sampling_params.use_deterministic_hash == True
         print("✓ use_deterministic_hash passed to SamplingParams")
         
@@ -133,7 +124,6 @@ def test_sampling_params_conversion():
 
 
 def test_completion_request():
-    """Test CompletionRequest also accepts use_deterministic_hash."""
     print("\n" + "=" * 70)
     print("Testing CompletionRequest...")
     print("=" * 70)
@@ -142,7 +132,6 @@ def test_completion_request():
         from vllm.entrypoints.openai.protocol import CompletionRequest
         from vllm.sampling_params import SamplingType
         
-        # Test CompletionRequest
         request = CompletionRequest(
             model="test-model",
             prompt="Test prompt",
@@ -155,7 +144,6 @@ def test_completion_request():
         assert request.use_deterministic_hash == True
         print("✓ CompletionRequest accepts use_deterministic_hash")
         
-        # Convert to SamplingParams
         sampling_params = request.to_sampling_params(
             default_max_tokens=512,
             logits_processor_pattern=None
@@ -176,7 +164,6 @@ def test_completion_request():
 
 
 def test_json_examples():
-    """Test with JSON payloads similar to what the API would receive."""
     print("\n" + "=" * 70)
     print("Testing JSON API Payloads...")
     print("=" * 70)
@@ -184,7 +171,6 @@ def test_json_examples():
     try:
         from vllm.entrypoints.openai.protocol import ChatCompletionRequest
         
-        # Example 1: Chat completion with deterministic sampling
         json_payload = {
             "model": "meta-llama/Llama-3.2-3B-Instruct",
             "messages": [
@@ -204,7 +190,6 @@ def test_json_examples():
         assert request.logprobs == True
         print("✓ Chat completion JSON payload accepted")
         
-        # Example 2: Without deterministic sampling (backward compatibility)
         json_payload2 = {
             "model": "meta-llama/Llama-3.2-3B-Instruct",
             "messages": [

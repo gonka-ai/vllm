@@ -9,22 +9,18 @@ relying on floating-point randomness.
 from vllm import LLM, SamplingParams
 
 def main():
-    # Initialize the LLM
-    llm = LLM(model="facebook/opt-125m")  # Use a small model for demo
+    llm = LLM(model="facebook/opt-125m")
     
-    # Example prompts
     prompts = [
         "The capital of France is",
         "Once upon a time",
     ]
     
-    # Create sampling params with deterministic hash sampling
-    # Set use_deterministic_hash=True and provide a seed
     sampling_params = SamplingParams(
-        temperature=1.0,  # Must be > 0 for non-greedy sampling
+        temperature=1.0,
         max_tokens=20,
-        seed=42,  # Seed is used for the hash function
-        use_deterministic_hash=True,  # Enable deterministic hash sampling
+        seed=42,
+        use_deterministic_hash=True
     )
     
     print("=" * 80)
@@ -37,10 +33,8 @@ def main():
     print(f"  - Sampling Type: {sampling_params.sampling_type}")
     print()
     
-    # Generate outputs
     outputs = llm.generate(prompts, sampling_params)
     
-    # Print results
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
@@ -59,10 +53,8 @@ def main():
     print("Demonstrating Reproducibility")
     print("=" * 80)
     
-    # Run the same generation again
     outputs2 = llm.generate(prompts, sampling_params)
     
-    # Check if outputs are identical
     all_identical = True
     for out1, out2 in zip(outputs, outputs2):
         if out1.outputs[0].text != out2.outputs[0].text:
@@ -74,7 +66,6 @@ def main():
     else:
         print("\n✗ WARNING: Outputs differ (this should not happen)")
     
-    # Compare with regular random sampling
     print("\n" + "=" * 80)
     print("Comparison with Regular Random Sampling")
     print("=" * 80)
@@ -82,8 +73,8 @@ def main():
     regular_sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=20,
-        seed=42,  # Same seed
-        use_deterministic_hash=False,  # Use regular random sampling
+        seed=42,
+        use_deterministic_hash=False
     )
     
     print(f"\nRegular Sampling Type: {regular_sampling_params.sampling_type}")
