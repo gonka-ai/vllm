@@ -6,8 +6,11 @@
 import json
 import time
 from http import HTTPStatus
-from typing import Annotated, Any, ClassVar, Generic, Literal, TypeAlias, TypeVar
+from typing import (
+    Annotated, Any, ClassVar, Generic, Literal, TypeAlias, TypeVar, Optional
+)
 
+import msgspec
 import regex as re
 import torch
 from fastapi import HTTPException, UploadFile
@@ -56,6 +59,9 @@ from vllm.utils.serial_utils import (
     EncodingFormat,
     Endianness,
 )
+
+from vllm.validation import EnforcedToken, EnforcedTokens
+
 
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
@@ -780,6 +786,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    enforced_str: Optional[str] = Field(default=None)
+    enforced_tokens: Optional[EnforcedTokens] = Field(default=None)
+
     # --8<-- [end:chat-completion-extra-params]
 
     # Default sampling parameters for chat completion requests
@@ -814,6 +823,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         max_tokens: int,
         logits_processor_pattern: str | None,
         default_sampling_params: dict,
+        tokenizer,
     ) -> SamplingParams:
         # Default parameters
         if (repetition_penalty := self.repetition_penalty) is None:
@@ -887,6 +897,29 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+
+        enforced_token_ids: list[int] | None = None
+        if self.enforced_str:
+            enforced_token_ids = tokenizer.encode(self.enforced_str, add_special_tokens=False)
+            if enforced_token_ids[-1] != tokenizer.eos_token_id:
+                enforced_token_ids.append(tokenizer.eos_token_id)
+        
+        enforced_top_tokens: dict | None = None
+        if self.enforced_tokens:
+            self.enforced_tokens.encode(tokenizer)
+            if self.enforced_tokens.tokens[-1].token_id != tokenizer.eos_token_id:
+                self.enforced_tokens.tokens.append(EnforcedToken(
+                    token=tokenizer.eos_token,
+                    top_tokens=[str(tokenizer.eos_token_id)],
+                    token_id=tokenizer.eos_token_id,
+                    top_token_ids=[tokenizer.eos_token_id]
+                ))
+            enforced_top_tokens = self.enforced_tokens.get_top_tokens()
+            enforced_token_ids = self.enforced_tokens.get_enforced_token_ids()
+
+            
+
+
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -920,6 +953,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             bad_words=self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
+            enforced_token_ids=enforced_token_ids,
+            enforced_tokens=enforced_top_tokens
         )
 
     @model_validator(mode="before")

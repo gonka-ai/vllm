@@ -3701,6 +3701,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             temperature=dummy_tensors(0.5),
             all_greedy=False,
             all_random=False,
+            all_enforced=False,
             top_p=dummy_tensors(0.9),
             top_k=dummy_tensors(logits.size(1) - 1),
             generators={},
@@ -3715,6 +3716,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
             logitsprocs=LogitsProcessors(),
+            enforced_token_ids=None,
+            enforced_tokens=None,
+            enforced_req_ids=None,
+            mixed_enforced=None
         )
         try:
             sampler_output = self.sampler(

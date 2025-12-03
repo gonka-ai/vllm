@@ -85,9 +85,10 @@ class Sampler(nn.Module):
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
-
+        
         logits = self.apply_logits_processors(
-            logits, sampling_metadata, predict_bonus_token
+            logits, sampling_metadata, predict_bonus_token,
+            # sampling_metadata.output_token_ids_len_cpu
         )
         # Sample the next token.
         sampled, processed_logprobs = self.sample(logits, sampling_metadata)
@@ -109,7 +110,7 @@ class Sampler(nn.Module):
         else:
             # Gather the logprobs and ranks of the topk and sampled token.
             logprobs_tensors = self.gather_logprobs(
-                raw_logprobs, num_logprobs, token_ids=sampled
+                raw_logprobs, num_logprobs, token_ids=sampled, sampling_metadata=sampling_metadata
             )
 
         # Use int32 to reduce the tensor size.
@@ -152,10 +153,35 @@ class Sampler(nn.Module):
         The various logits processing functions called in this method
         may update the logits tensor in-place.
         """
-
+        
         logprobs_mode = logprobs_mode_override or self.logprobs_mode
         assert not (sampling_metadata.all_greedy and sampling_metadata.all_random)
-        if sampling_metadata.all_random:
+        assert not (sampling_metadata.all_greedy and sampling_metadata.all_enforced)
+        assert not (sampling_metadata.all_random and sampling_metadata.all_enforced)
+
+        if sampling_metadata.enforced_token_ids:
+            enforced_sampled = torch.empty((len(sampling_metadata.enforced_req_ids),), dtype=torch.int64, device=logits.device)
+            enforced_map = sampling_metadata.enforced_token_ids
+            for i, req_index in enumerate(sampling_metadata.enforced_req_ids):
+                seq = enforced_map[req_index]
+                out = sampling_metadata.output_token_ids[req_index]
+
+                step = len(out)
+
+                if step < len(seq):
+                    next_tok = seq[step]
+                else:
+                    next_tok = seq[-1]
+
+                enforced_sampled[i] = next_tok
+            if sampling_metadata.all_enforced:
+                # Reorder so result[pos] = token for batch position pos
+                # (enforced_req_ids may be out of order after condense)
+                result = torch.empty((logits.size(0),), dtype=torch.int64, device=logits.device)
+                for i, req_index in enumerate(sampling_metadata.enforced_req_ids):
+                    result[req_index] = enforced_sampled[i]
+                return result, None                   
+        if sampling_metadata.all_random or sampling_metadata.mixed_enforced:
             greedy_sampled = None
         else:
             greedy_sampled = self.greedy_sample(logits)
@@ -172,7 +198,7 @@ class Sampler(nn.Module):
 
         # Apply temperature.
         logits = self.apply_temperature(
-            logits, sampling_metadata.temperature, sampling_metadata.all_random
+            logits, sampling_metadata.temperature, sampling_metadata.all_random or sampling_metadata.mixed_enforced
         )
 
         # Apply logits processors that only apply to random sampling
@@ -189,6 +215,9 @@ class Sampler(nn.Module):
         )
 
         if greedy_sampled is None:
+            if sampling_metadata.enforced_token_ids:
+                for i, req_index in enumerate(sampling_metadata.enforced_req_ids):
+                    random_sampled[int(req_index)] = enforced_sampled[i]
             return random_sampled, processed_logprobs
 
         sampled = torch.where(
@@ -197,6 +226,12 @@ class Sampler(nn.Module):
             random_sampled,
             out=greedy_sampled,  # Reuse tensor
         )
+       
+
+        if sampling_metadata.enforced_token_ids:
+            for i, req_index in enumerate(sampling_metadata.enforced_req_ids):
+                sampled[int(req_index)] = enforced_sampled[i]
+
         return sampled, processed_logprobs
 
     @staticmethod
@@ -208,6 +243,7 @@ class Sampler(nn.Module):
         logprobs: torch.Tensor,
         num_logprobs: int,
         token_ids: torch.Tensor,
+        sampling_metadata: SamplingMetadata
     ) -> LogprobsTensors:
         """
         Gather logprobs for topk and sampled/prompt token.
@@ -228,8 +264,63 @@ class Sampler(nn.Module):
           Sampled token rank tensor, (num tokens)
         """
         assert token_ids.dtype == torch.int64
-        # Find the topK values.
-        topk_logprobs, topk_indices = torch.topk(logprobs, num_logprobs, dim=-1)
+        if sampling_metadata.enforced_tokens:
+            enforced_top_map = sampling_metadata.enforced_tokens
+            enforced_map = sampling_metadata.enforced_token_ids
+            
+            topk_indices_enforced = torch.empty((len(sampling_metadata.enforced_req_ids), num_logprobs), dtype=torch.int64, device=logprobs.device)
+
+            for i, req_index in enumerate(sampling_metadata.enforced_req_ids):
+                seq = enforced_map[req_index]
+                seq_top_tokens = enforced_top_map[req_index]
+                out = sampling_metadata.output_token_ids[req_index]
+
+                step = len(out)
+
+                if step < len(seq):
+                    next_tok = seq[step]
+                    next_top_tok = seq_top_tokens[step][next_tok]
+
+                else:
+                    next_tok = seq[-1]
+                    step = len(seq) - 1
+                    next_top_tok = seq_top_tokens[step][next_tok]
+
+                topk_indices_enforced[i] = torch.tensor(next_top_tok, device=logprobs.device)
+            
+
+            topk_logprobs_enforced = torch.gather(
+                logprobs[sampling_metadata.enforced_req_ids],
+                dim=1,
+                index=topk_indices_enforced
+            )
+
+            if sampling_metadata.all_enforced:
+                topk_indices = torch.empty((logprobs.size(0), num_logprobs), dtype=torch.int64, device=logprobs.device)
+                topk_logprobs = torch.empty((logprobs.size(0), num_logprobs), device=logprobs.device)
+                for i, req_index in enumerate(sampling_metadata.enforced_req_ids):
+                    topk_indices[req_index] = topk_indices_enforced[i]
+                    topk_logprobs[req_index] = topk_logprobs_enforced[i]
+            elif sampling_metadata.mixed_enforced:
+                all_ids = torch.arange(logprobs.size(0), device=logprobs.device)
+                mask_normal = torch.ones_like(all_ids, dtype=torch.bool)
+                mask_normal[sampling_metadata.enforced_req_ids] = False
+
+                topk_logprobs_normal, topk_indices_normal = torch.topk(
+                    logprobs[mask_normal], num_logprobs, dim=-1
+                )
+
+                topk_indices = torch.empty_like(logprobs, device=logprobs.device, dtype=torch.int64)[:, :num_logprobs]
+                topk_logprobs = torch.empty_like(logprobs, device=logprobs.device)[:, :num_logprobs]
+
+                topk_indices[mask_normal] = topk_indices_normal
+                topk_logprobs[mask_normal] = topk_logprobs_normal
+
+                topk_indices[sampling_metadata.enforced_req_ids] = topk_indices_enforced
+                topk_logprobs[sampling_metadata.enforced_req_ids] = topk_logprobs_enforced
+        else:
+            # Find the topK values.
+            topk_logprobs, topk_indices = torch.topk(logprobs, num_logprobs, dim=-1)
 
         # Get with the logprob of the prompt or sampled token.
         token_ids = token_ids.unsqueeze(-1)
@@ -238,13 +329,13 @@ class Sampler(nn.Module):
         # Compute the ranks of the actual token.
         token_ranks = batched_count_greater_than(logprobs, token_logprobs)
 
+    
         # Concatenate together with the topk.
         indices = torch.cat((token_ids, topk_indices), dim=1)
         logprobs = torch.cat((token_logprobs, topk_logprobs), dim=1)
 
         # Use int32 to reduce the tensor size.
         indices = indices.to(torch.int32)
-
         return LogprobsTensors(indices, logprobs, token_ranks)
 
     @staticmethod
@@ -265,13 +356,17 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         predict_bonus_token: bool,
+        # output_token_ids_len: torch.Tensor,
     ) -> torch.Tensor:
         bad_words_token_ids = sampling_metadata.bad_words_token_ids
         any_penalties_or_bad_words = (
             bool(bad_words_token_ids) or not sampling_metadata.no_penalties
         )
 
+        # output_token_ids: list[list[int]] | torch.Tensor = sampling_metadata.output_token_ids
+        # if sampling_metadata.output_token_ids_tensor is not None:
         output_token_ids = sampling_metadata.output_token_ids
+
         if predict_bonus_token and any_penalties_or_bad_words:
             # Combine base outputs with spec tokens when speculative decoding
             # is enabled.

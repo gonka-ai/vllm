@@ -6,13 +6,19 @@ from dataclasses import dataclass
 import torch
 
 from vllm.v1.sample.logits_processor import LogitsProcessors
-
+from vllm.validation import EnforcedTokens
 
 @dataclass
 class SamplingMetadata:
     temperature: torch.Tensor | None
     all_greedy: bool
     all_random: bool
+    all_enforced: bool
+    mixed_enforced: bool
+
+    enforced_token_ids: dict[list[int]]
+    enforced_tokens: dict[EnforcedTokens]
+    enforced_req_ids: list[int]
 
     top_p: torch.Tensor | None
     top_k: torch.Tensor | None

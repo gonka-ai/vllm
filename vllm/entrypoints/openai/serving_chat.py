@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Final
+from typing import Final, Optional
 
 import jinja2
 import partial_json_parser
@@ -69,7 +69,7 @@ from vllm.transformers_utils.tokenizers import (
 )
 from vllm.utils.collection_utils import as_list
 from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
-
+from vllm.validation import EnforcedTokens
 logger = init_logger(__name__)
 
 
@@ -289,11 +289,21 @@ class OpenAIServingChat(OpenAIServing):
                     sampling_params = request.to_beam_search_params(
                         max_tokens, self.default_sampling_params
                     )
+                elif request.enforced_str or request.enforced_tokens:
+                    sampling_params = request.to_sampling_params(
+                        max_tokens,
+                        self.model_config.logits_processor_pattern,
+                        self.default_sampling_params,
+                        tokenizer,
+                    )
+
+                    request.return_tokens_as_token_ids = True
                 else:
                     sampling_params = request.to_sampling_params(
                         max_tokens,
                         self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
+                        tokenizer,
                     )
                     validate_logits_processors_parameters(
                         self.logits_processors,
@@ -713,6 +723,7 @@ class OpenAIServingChat(OpenAIServing):
                             tokenizer=tokenizer,
                             num_output_top_logprobs=request.top_logprobs,
                             return_as_token_id=request.return_tokens_as_token_ids,
+                            enforced_tokens=request.enforced_tokens
                         )
                     else:
                         logprobs = None
@@ -1199,7 +1210,6 @@ class OpenAIServingChat(OpenAIServing):
                         )
 
                         finish_reason_sent[i] = True
-
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
@@ -1325,6 +1335,7 @@ class OpenAIServingChat(OpenAIServing):
                     num_output_top_logprobs=request.top_logprobs,
                     tokenizer=tokenizer,
                     return_as_token_id=request.return_tokens_as_token_ids,
+                    enforced_tokens=request.enforced_tokens
                 )
             else:
                 logprobs = None
@@ -1617,7 +1628,12 @@ class OpenAIServingChat(OpenAIServing):
         top_logprobs: int | None,
         tokenizer: AnyTokenizer,
         should_return_as_token_id: bool,
+        enforced_tokens: Optional[EnforcedTokens] = None
     ) -> list[ChatCompletionLogProb]:
+        
+        if enforced_tokens:
+            top_logprobs = len(logprobs)
+
         return [
             ChatCompletionLogProb(
                 token=(
@@ -1626,6 +1642,7 @@ class OpenAIServingChat(OpenAIServing):
                         p[0],
                         tokenizer,
                         return_as_token_id=should_return_as_token_id,
+                        enforced_tokens=enforced_tokens
                     )
                 ),
                 logprob=max(p[1].logprob, -9999.0),
@@ -1642,6 +1659,7 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: AnyTokenizer,
         num_output_top_logprobs: int | None = None,
         return_as_token_id: bool | None = None,
+        enforced_tokens: Optional[EnforcedTokens] = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
         logprobs_content: list[ChatCompletionLogProbsContent] = []
@@ -1676,6 +1694,7 @@ class OpenAIServingChat(OpenAIServing):
                             token_id,
                             tokenizer,
                             should_return_as_token_id,
+                            enforced_tokens
                         ),
                         logprob=max(step_token.logprob, -9999.0),
                         bytes=(
@@ -1688,6 +1707,7 @@ class OpenAIServingChat(OpenAIServing):
                             num_output_top_logprobs,
                             tokenizer,
                             should_return_as_token_id,
+                            enforced_tokens
                         ),
                     )
                 )

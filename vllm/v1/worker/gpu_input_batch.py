@@ -25,7 +25,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
-
+from vllm.validation import EnforcedTokens
 
 @dataclass
 class CachedRequestState:
@@ -151,6 +151,7 @@ class InputBatch:
         self.temperature_cpu = self.temperature_cpu_tensor.numpy()
         self.greedy_reqs: set[str] = set()
         self.random_reqs: set[str] = set()
+        self.enforced_reqs: set[str] = set()
 
         self.top_p = torch.empty((max_num_reqs,), dtype=torch.float32, device=device)
         self.top_p_cpu_tensor = torch.empty(
@@ -199,6 +200,9 @@ class InputBatch:
         self.repetition_penalties_cpu = self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: set[str] = set()
 
+        self.enforced_token_ids: dict[int, list[int]] = {}
+        self.enforced_tokens: dict[int, dict[int, list[int]]] = {} 
+        self.enforced_req_ids: list[int] = []
         # Speculative decoding
         self.num_accepted_tokens_cpu_tensor = torch.ones(
             (max_num_reqs,), dtype=torch.int64, device="cpu", pin_memory=pin_memory
@@ -346,6 +350,9 @@ class InputBatch:
                 # Should avoid division by zero later when apply_temperature.
                 self.temperature_cpu[req_index] = 0.0
                 self.greedy_reqs.add(req_id)
+            elif sampling_params.sampling_type == SamplingType.ENFORCED:
+                self.temperature_cpu[req_index] = 0.0
+                self.enforced_reqs.add(req_id)
             else:
                 self.temperature_cpu[req_index] = sampling_params.temperature
                 self.random_reqs.add(req_id)
@@ -416,6 +423,16 @@ class InputBatch:
                 self.bad_words_token_ids[req_index] = (
                     sampling_params.bad_words_token_ids
                 )
+            if sampling_params.enforced_token_ids:
+                self.enforced_token_ids[req_index] = (
+                    sampling_params.enforced_token_ids
+                )
+                if req_index not in self.enforced_req_ids:
+                    self.enforced_req_ids.append(req_index)
+            if sampling_params.enforced_tokens:
+                self.enforced_tokens[req_index] = (
+                    sampling_params.enforced_tokens
+                )
         elif pooling_params := request.pooling_params:
             self.pooling_params[req_id] = pooling_params
             self.logits_processing_needs_token_ids[req_index] = (
@@ -451,7 +468,6 @@ class InputBatch:
         Returns:
           Removed request index, or `None` if `req_id` not recognized
         """
-
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
             return None
@@ -474,9 +490,9 @@ class InputBatch:
         if self.is_pooling_model:
             self.pooling_params.pop(req_id, None)
             return req_index
-
         self.greedy_reqs.discard(req_id)
         self.random_reqs.discard(req_id)
+        self.enforced_reqs.discard(req_id)
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
         self.spec_decode_unsupported_reqs.discard(req_id)
@@ -493,6 +509,11 @@ class InputBatch:
             # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
+        self.enforced_token_ids.pop(req_index, None)
+        self.enforced_tokens.pop(req_index, None)
+        if req_index in self.enforced_req_ids:
+            self.enforced_req_ids.remove(req_index)
+
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
@@ -592,6 +613,19 @@ class InputBatch:
 
         swap_dict_values(self.generators, i1, i2)
         swap_dict_values(self.bad_words_token_ids, i1, i2)
+        swap_dict_values(self.enforced_token_ids, i1, i2)
+        swap_dict_values(self.enforced_tokens, i1, i2)
+
+
+        has_i1 = i1 in self.enforced_req_ids
+        has_i2 = i2 in self.enforced_req_ids
+        if has_i1 and not has_i2:
+            self.enforced_req_ids.remove(i1)
+            self.enforced_req_ids.append(i2)
+        elif has_i2 and not has_i1:
+            self.enforced_req_ids.remove(i2)
+            self.enforced_req_ids.append(i1)
+
 
         if self.allowed_token_ids_mask_cpu_tensor is not None:
             (
@@ -720,6 +754,17 @@ class InputBatch:
             if bad_words_token_ids is not None:
                 self.bad_words_token_ids[empty_index] = bad_words_token_ids
 
+            enforced_token_ids = self.enforced_token_ids.pop(last_req_index, None)
+            if enforced_token_ids is not None:
+                self.enforced_token_ids[empty_index] = enforced_token_ids
+
+            enforced_tokens = self.enforced_tokens.pop(last_req_index, None)
+            if enforced_tokens is not None:
+                self.enforced_tokens[empty_index] = enforced_tokens
+
+            if last_req_index in self.enforced_req_ids:
+                self.enforced_req_ids.remove(last_req_index)
+                self.enforced_req_ids.append(empty_index)
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
@@ -793,12 +838,16 @@ class InputBatch:
             not self.no_penalties
             or bool(self.bad_words_token_ids)
             or self.logitsprocs_need_output_token_ids
+            or self.enforced_token_ids
+            or self.enforced_tokens
         )
         output_token_ids = (
             cast(list[list[int]], self.req_output_token_ids)
             if needs_output_token_ids
             else []
         )
+
+
 
         allowed_token_ids_mask: torch.Tensor | None = None
         if not self.no_allowed_token_ids:
@@ -809,11 +858,12 @@ class InputBatch:
                 num_reqs,
             )
             allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
-
         return SamplingMetadata(
             temperature=temperature,
             all_greedy=self.all_greedy,
             all_random=self.all_random,
+            all_enforced=self.all_enforced,
+            mixed_enforced=self.mixed_enforced,
             top_p=None if self.no_top_p else self.top_p[:num_reqs],
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
             generators=self.generators,
@@ -828,6 +878,9 @@ class InputBatch:
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
+            enforced_token_ids=self.enforced_token_ids,
+            enforced_tokens=self.enforced_tokens,
+            enforced_req_ids=self.enforced_req_ids
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:
@@ -937,11 +990,19 @@ class InputBatch:
 
     @property
     def all_greedy(self) -> bool:
-        return len(self.random_reqs) == 0
+        return len(self.random_reqs) == 0 and len(self.enforced_reqs) == 0
 
     @property
     def all_random(self) -> bool:
-        return len(self.greedy_reqs) == 0
+        return len(self.greedy_reqs) == 0 and len(self.enforced_reqs) == 0
+
+    @property
+    def all_enforced(self) -> bool:
+        return len(self.enforced_reqs) > 0 and len(self.greedy_reqs) == 0 and len(self.random_reqs) == 0
+
+    @property
+    def mixed_enforced(self) -> bool:
+        return len(self.enforced_reqs) != 0 and (len(self.random_reqs) != 0 or len(self.greedy_reqs) != 0)
 
     @property
     def no_top_p(self) -> bool:
