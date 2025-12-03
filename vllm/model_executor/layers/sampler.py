@@ -40,8 +40,15 @@ import hashlib
 logger = init_logger(__name__)
 
 def deterministic_rng(seed: str, step: int, n: int) -> int:
-    h = hashlib.sha256(f"{seed}:{step}".encode()).digest()
-    return int.from_bytes(h, "big") % n
+    """
+    Deterministic RNG using SHA256 for reproducible sampling.
+    Compatible with gonka inference-chain sequence_check.go:
+    SHA256(seed_bytes || step_uint64_be) % n
+    """
+    h = hashlib.sha256()
+    h.update(bytes.fromhex(seed))
+    h.update(step.to_bytes(8, 'big'))
+    return int.from_bytes(h.digest(), "big") % n
 
 def get_sampler() -> torch.nn.Module:
     if envs.VLLM_USE_V1:
@@ -602,9 +609,9 @@ def _deterministic_hash_multinomial(
         if sampling_params.deterministic_seed is not None:
             seed = str(sampling_params.deterministic_seed)
         elif sampling_params.seed is not None:
-            seed = str(sampling_params.seed)
+            seed = format(sampling_params.seed, '064x')
         else:
-            seed = "0"
+            seed = "0" * 64
         
         seq_ids = seq_group.seq_ids
         seq_data = seq_group.seq_data[seq_ids[0]]
