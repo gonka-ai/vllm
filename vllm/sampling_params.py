@@ -161,6 +161,10 @@ class SamplingParams(
         use_deterministic_hash: If True, uses deterministic hash-based sampling
             that respects the probability distribution. Requires a seed to be set.
             This provides reproducible sampling across different runs.
+        deterministic_seed: Optional pre-hashed seed for deterministic sampling.
+            If provided and use_deterministic_hash is True, this seed will be used
+            instead of the regular seed. This is useful for validators who want to
+            use a pre-computed hash as the seed.
         stop: list of strings that stop the generation when they are generated.
             The returned output will not contain the stop strings.
         stop_token_ids: list of tokens that stop the generation when they are
@@ -220,6 +224,7 @@ class SamplingParams(
     min_p: float = 0.0
     seed: Optional[int] = None
     use_deterministic_hash: bool = False
+    deterministic_seed: Optional[int] = None
     stop: Optional[Union[str, list[str]]] = None
     stop_token_ids: Optional[list[int]] = None
     ignore_eos: bool = False
@@ -270,6 +275,7 @@ class SamplingParams(
         min_p: float = 0.0,
         seed: Optional[int] = None,
         use_deterministic_hash: bool = False,
+        deterministic_seed: Optional[int] = None,
         stop: Optional[Union[str, list[str]]] = None,
         stop_token_ids: Optional[list[int]] = None,
         bad_words: Optional[list[str]] = None,
@@ -316,6 +322,7 @@ class SamplingParams(
             min_p=min_p,
             seed=seed,
             use_deterministic_hash=use_deterministic_hash,
+            deterministic_seed=deterministic_seed,
             stop=stop,
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,

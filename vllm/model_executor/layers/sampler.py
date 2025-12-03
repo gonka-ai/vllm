@@ -598,7 +598,13 @@ def _deterministic_hash_multinomial(
     
     for idx, seq_group in enumerate(seq_groups):
         sampling_params = seq_group.sampling_params
-        seed = str(sampling_params.seed) if sampling_params.seed is not None else "0"
+        
+        if sampling_params.deterministic_seed is not None:
+            seed = str(sampling_params.deterministic_seed)
+        elif sampling_params.seed is not None:
+            seed = str(sampling_params.seed)
+        else:
+            seed = "0"
         
         seq_ids = seq_group.seq_ids
         seq_data = seq_group.seq_data[seq_ids[0]]
