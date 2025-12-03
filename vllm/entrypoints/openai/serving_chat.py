@@ -34,6 +34,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall)
+from vllm.entrypoints.openai.validation_utils import generate_run_seed, compute_derived_seed
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -207,6 +208,12 @@ class OpenAIServingChat(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
+        original_seed = request.seed
+        run_seed_str = ""
+        if request.seed is not None:
+            derived_seed, run_seed_str = compute_derived_seed(request.seed, request_id)
+            request.seed = derived_seed
+
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
@@ -259,18 +266,20 @@ class OpenAIServingChat(OpenAIServing):
         result_generator, = generators
 
         # Streaming response
-        if request.stream:
-            return self.chat_completion_stream_generator(
-                request, result_generator, request_id, model_name,
-                conversation, tokenizer, request_metadata)
-
         try:
+            if request.stream:
+                return self.chat_completion_stream_generator(
+                    request, result_generator, request_id, model_name,
+                    conversation, tokenizer, request_metadata)
+
             return await self.chat_completion_full_generator(
                 request, result_generator, request_id, model_name,
                 conversation, tokenizer, request_metadata)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
+        finally:
+            request.seed = original_seed
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
         if request.add_generation_prompt:
@@ -572,6 +581,7 @@ class OpenAIServingChat(OpenAIServing):
                             num_output_top_logprobs=request.top_logprobs,
                             return_as_token_id=request.
                             return_tokens_as_token_ids,
+                            run_seed=run_seed_str,
                         )
                     else:
                         logprobs = None
@@ -954,6 +964,7 @@ class OpenAIServingChat(OpenAIServing):
                     num_output_top_logprobs=request.top_logprobs,
                     tokenizer=tokenizer,
                     return_as_token_id=request.return_tokens_as_token_ids,
+                    run_seed=run_seed_str,
                 )
             else:
                 logprobs = None
@@ -1144,6 +1155,7 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: AnyTokenizer,
         num_output_top_logprobs: Optional[int] = None,
         return_as_token_id: Optional[bool] = None,
+        run_seed: Optional[str] = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
         logprobs_content: list[ChatCompletionLogProbsContent] = []
@@ -1183,7 +1195,7 @@ class OpenAIServingChat(OpenAIServing):
                             tokenizer, should_return_as_token_id),
                     ))
 
-        return ChatCompletionLogProbs(content=logprobs_content)
+        return ChatCompletionLogProbs(content=logprobs_content, run_seed=run_seed)
 
     def _should_stream_with_auto_tool_parsing(self,
                                               request: ChatCompletionRequest):

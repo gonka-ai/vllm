@@ -1421,6 +1421,7 @@ class ChatCompletionLogProbsContent(ChatCompletionLogProb):
 
 class ChatCompletionLogProbs(OpenAIBaseModel):
     content: Optional[list[ChatCompletionLogProbsContent]] = None
+    run_seed: Optional[str] = None
 
 
 class ChatCompletionResponseChoice(OpenAIBaseModel):
