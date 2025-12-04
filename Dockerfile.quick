@@ -1,0 +1,5 @@
+FROM vllm/vllm-openai:v0.9.1
+RUN python3 -m pip uninstall nvidia-nccl-cu12 -y && python3 -m pip install nvidia-nccl-cu12==2.26.2.post1
+ENV VLLM_USE_V1=0
+
+COPY ./vllm /usr/local/lib/python3.12/dist-packages/vllm
