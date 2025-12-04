@@ -27,7 +27,6 @@ class SamplingType(IntEnum):
     RANDOM = 1
     RANDOM_SEED = 2
     ENFORCED = 3
-    DETERMINISTIC_HASH = 4
 
 
 # maybe make msgspec?
@@ -158,11 +157,10 @@ class SamplingParams(
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
         seed: Random seed to use for the generation.
-        use_deterministic_hash: If True, uses deterministic hash-based sampling
             that respects the probability distribution. Requires a seed to be set.
             This provides reproducible sampling across different runs.
         deterministic_seed: Optional pre-hashed seed for deterministic sampling.
-            If provided and use_deterministic_hash is True, this seed will be used
+            If provided, this seed will be used
             instead of the regular seed. This is useful for validators who want to
             use a pre-computed hash as the seed.
         stop: list of strings that stop the generation when they are generated.
@@ -223,7 +221,6 @@ class SamplingParams(
     top_k: int = 0
     min_p: float = 0.0
     seed: Optional[int] = None
-    use_deterministic_hash: bool = False
     deterministic_seed: Optional[int] = None
     stop: Optional[Union[str, list[str]]] = None
     stop_token_ids: Optional[list[int]] = None
@@ -274,7 +271,6 @@ class SamplingParams(
         top_k: int = 0,
         min_p: float = 0.0,
         seed: Optional[int] = None,
-        use_deterministic_hash: bool = False,
         deterministic_seed: Optional[int] = None,
         stop: Optional[Union[str, list[str]]] = None,
         stop_token_ids: Optional[list[int]] = None,
@@ -321,7 +317,6 @@ class SamplingParams(
             top_k=top_k,
             min_p=min_p,
             seed=seed,
-            use_deterministic_hash=use_deterministic_hash,
             deterministic_seed=deterministic_seed,
             stop=stop,
             stop_token_ids=stop_token_ids,
@@ -556,8 +551,6 @@ class SamplingParams(
             return SamplingType.ENFORCED
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
-        if self.use_deterministic_hash:
-            return SamplingType.DETERMINISTIC_HASH
         if self.seed is not None:
             return SamplingType.RANDOM_SEED
         return SamplingType.RANDOM

@@ -274,7 +274,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     prompt_logprobs: Optional[int] = None
     allowed_token_ids: Optional[list[int]] = None
-    use_deterministic_hash: bool = False
     deterministic_seed: Optional[int] = None
     # --8<-- [end:chat-completion-sampling-params]
 
@@ -558,7 +557,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
-            use_deterministic_hash=self.use_deterministic_hash,
             deterministic_seed=self.deterministic_seed,
             extra_args=({"kv_transfer_params": self.kv_transfer_params}
                         if self.kv_transfer_params else None))
@@ -795,7 +793,6 @@ class CompletionRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     allowed_token_ids: Optional[list[int]] = None
     prompt_logprobs: Optional[int] = None
-    use_deterministic_hash: bool = False
     deterministic_seed: Optional[int] = None
     # --8<-- [end:completion-sampling-params]
 
@@ -1002,7 +999,6 @@ class CompletionRequest(OpenAIBaseModel):
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
-            use_deterministic_hash=self.use_deterministic_hash,
             deterministic_seed=self.deterministic_seed,
             extra_args=({"kv_transfer_params": self.kv_transfer_params}
                         if self.kv_transfer_params else None))
