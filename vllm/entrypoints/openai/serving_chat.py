@@ -274,7 +274,7 @@ class OpenAIServingChat(OpenAIServing):
 
             return await self.chat_completion_full_generator(
                 request, result_generator, request_id, model_name,
-                conversation, tokenizer, request_metadata)
+                conversation, tokenizer, request_metadata, run_seed_str)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -933,6 +933,7 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
+        run_seed_str: str,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         created_time = int(time.time())
