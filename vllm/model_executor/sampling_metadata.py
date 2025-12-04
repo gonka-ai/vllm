@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
+import hashlib
 
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData,
@@ -279,7 +280,19 @@ def _prepare_seq_groups(
         do_sample = seq_group_metadata.do_sample
 
         if seq_group_metadata.is_prompt:
-            if sampling_params.seed is not None:
+            if sampling_params.deterministic_seed is not None:
+                # Use deterministic_seed with position concatenation for gonka
+                # seed_i = SHA256(deterministic_seed_hex || position_uint64_be)
+                seed_hex = str(sampling_params.deterministic_seed)
+                position = 0  # First token for prompt
+                h = hashlib.sha256()
+                h.update(bytes.fromhex(seed_hex))
+                h.update(position.to_bytes(8, 'big'))
+                seed_int = int.from_bytes(h.digest()[:8], 'big')  # Use first 64 bits as seed
+                generator = torch.Generator(device=device).manual_seed(seed_int)
+                if generators is not None:
+                    generators[seq_group_metadata.request_id] = generator
+            elif sampling_params.seed is not None:
                 generator = torch.Generator(device=device).manual_seed(
                     sampling_params.seed)
                 if generators is not None:
@@ -302,7 +315,19 @@ def _prepare_seq_groups(
                 query_lens) > 0 else 1
             sample_len = len(seq_ids) * query_len if do_sample else 0
 
-            if sampling_params.seed is not None and generators is not None:
+            if sampling_params.deterministic_seed is not None:
+                # For decode, compute position-specific seed
+                first_seq_id = list(seq_ids)[0]
+                seq_data = seq_group_metadata.seq_data[first_seq_id]
+                position = len(seq_data.output_token_ids_array)  # Current position
+                
+                seed_hex = str(sampling_params.deterministic_seed)
+                h = hashlib.sha256()
+                h.update(bytes.fromhex(seed_hex))
+                h.update(position.to_bytes(8, 'big'))
+                seed_int = int.from_bytes(h.digest()[:8], 'big')
+                generator = torch.Generator(device=device).manual_seed(seed_int)
+            elif sampling_params.seed is not None and generators is not None:
                 generator = generators.get(seq_group_metadata.request_id)
 
         # Update indices to select from the model output.

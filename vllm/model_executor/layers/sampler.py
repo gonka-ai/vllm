@@ -35,6 +35,8 @@ else:
 
 from vllm.logger import init_logger
 
+import hashlib
+
 logger = init_logger(__name__)
 
 
@@ -521,11 +523,6 @@ def _random_sample(
     return results
 
 
-# torch.multinomial forces a GPU<->CPU sync.
-# Therefore, we use an optimized implementation instead.
-# Note that we always sample with replacement.
-# probs will be modified in place, but this is fine, as we pass
-# in a copy already.
 def _multinomial(
     probs: torch.Tensor,
     num_samples: int,
@@ -565,21 +562,6 @@ def _top_k_top_p_multinomial_with_flashinfer(
 
 def get_pythonized_sample_results(
         sample_result_args: SampleResultArgsType) -> SampleResultType:
-    '''This function consumes GPU-side sampler results and computes
-    Pythonized CPU-side sampler results (GPU -> CPU sync.)
-
-    Single-step scheduling: this function is invoked at sampling-time
-    for immediate Pythonization.
-
-    Multi-step scheduling: Pythonization is deferred until after multiple
-    GPU-side steps have been completed.
-
-    Args:
-      sample_result_args: GPU-side inputs to the Pythonization process
-
-    Returns:
-      Pythonized sampler results
-    '''
 
     (
         sample_metadata,
@@ -635,17 +617,6 @@ def _sample_with_torch(
     include_gpu_probs_tensor: bool,
     modify_greedy_probs: bool,
 ) -> SampleReturnType:
-    '''Torch-oriented _sample() implementation.
-
-    Single-step scheduling:
-    * Perform GPU-side sampling computation
-    * Immediately Pythonize sampling result
-
-    Multi-step scheduling:
-    * Perform GPU-side sampling computation
-    * Defer Pythonization & preserve GPU-side
-      tensors required for Pythonization
-    '''
 
     categorized_seq_group_ids: dict[SamplingType, list[int]] = {
         t: []
@@ -723,6 +694,7 @@ def _sample_with_torch(
                 # Store sampled tokens in output tensor.
                 sampled_token_ids_tensor[long_sample_indices] = \
                     multinomial_samples[sampling_type].to(torch.long)
+
         elif sampling_type == SamplingType.ENFORCED:
             sample_results = []
             for seq_group in seq_groups:

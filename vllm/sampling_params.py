@@ -157,6 +157,12 @@ class SamplingParams(
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
         seed: Random seed to use for the generation.
+            that respects the probability distribution. Requires a seed to be set.
+            This provides reproducible sampling across different runs.
+        deterministic_seed: Optional pre-hashed seed for deterministic sampling.
+            If provided, this seed will be used
+            instead of the regular seed. This is useful for validators who want to
+            use a pre-computed hash as the seed.
         stop: list of strings that stop the generation when they are generated.
             The returned output will not contain the stop strings.
         stop_token_ids: list of tokens that stop the generation when they are
@@ -215,6 +221,7 @@ class SamplingParams(
     top_k: int = 0
     min_p: float = 0.0
     seed: Optional[int] = None
+    deterministic_seed: Optional[int] = None
     stop: Optional[Union[str, list[str]]] = None
     stop_token_ids: Optional[list[int]] = None
     ignore_eos: bool = False
@@ -264,6 +271,7 @@ class SamplingParams(
         top_k: int = 0,
         min_p: float = 0.0,
         seed: Optional[int] = None,
+        deterministic_seed: Optional[int] = None,
         stop: Optional[Union[str, list[str]]] = None,
         stop_token_ids: Optional[list[int]] = None,
         bad_words: Optional[list[str]] = None,
@@ -309,6 +317,7 @@ class SamplingParams(
             top_k=top_k,
             min_p=min_p,
             seed=seed,
+            deterministic_seed=deterministic_seed,
             stop=stop,
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
