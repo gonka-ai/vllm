@@ -3,7 +3,7 @@ name: Build Docker Image with Deterministic Sampling
 on:
   push:
     branches:
-      - deterministic-sampler-0.9.1
+      - feat/sequence-check-vllm
   workflow_dispatch:  # Allows manual trigger
 
 jobs:
