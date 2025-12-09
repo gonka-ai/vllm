@@ -239,6 +239,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[AnyResponseFormat] = None
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
+    run_seed: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, use this run_seed directly instead of computing "
+            "it from seed + inference_id. Used for validation replays."),
+    )
     stop: Optional[Union[str, list[str]]] = []
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None

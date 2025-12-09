@@ -210,8 +210,9 @@ class OpenAIServingChat(OpenAIServing):
 
         original_seed = request.seed
         run_seed_str = ""
-        if request.seed is not None:
-            derived_seed, run_seed_str = compute_derived_seed(request.seed, request_id)
+        if request.seed is not None or request.run_seed:
+            derived_seed, run_seed_str = compute_derived_seed(
+                request.seed, request_id, request.run_seed)
             request.seed = derived_seed
 
         # Schedule the request and get the result generator.
