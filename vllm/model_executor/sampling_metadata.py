@@ -257,6 +257,13 @@ def _prepare_seq_groups(
     for i, seq_group_metadata in enumerate(seq_group_metadata_list):
         seq_ids = seq_group_metadata.seq_data.keys()
 
+        # Skip PoC sequences - they don't need sampling
+        if seq_group_metadata.poc_params is not None:
+            # Advance model_output_idx to account for PoC tokens
+            query_len = query_lens[i] if query_lens is not None and i < len(query_lens) else 0
+            model_output_idx += query_len
+            continue
+
         if cache is not None:
             sample_obj = cache.get_cached_seq_group_to_sample(len(seq_ids))
 

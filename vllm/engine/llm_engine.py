@@ -43,6 +43,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
+from vllm.poc.poc_params import PoCParams
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -550,7 +551,7 @@ class LLMEngine:
         self,
         request_id: str,
         processed_inputs: ProcessorInputs,
-        params: Union[SamplingParams, PoolingParams],
+        params: Union[SamplingParams, PoolingParams, PoCParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
@@ -611,9 +612,19 @@ class LLMEngine:
                 prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq,
                 priority=priority)
+        elif isinstance(params, PoCParams):
+            seq_group = self._create_sequence_group_with_poc(
+                request_id,
+                seq,
+                params,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                prompt_adapter_request=prompt_adapter_request,
+                encoder_seq=encoder_seq,
+                priority=priority)
         else:
             raise ValueError(
-                "Either SamplingParams or PoolingParams must be provided.")
+                "SamplingParams, PoolingParams, or PoCParams must be provided.")
 
         # Add the sequence group to the scheduler with least unfinished seqs.
         costs = [
@@ -632,7 +643,7 @@ class LLMEngine:
         self,
         request_id: str,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: Union[SamplingParams, PoolingParams, PoCParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
@@ -710,6 +721,11 @@ class LLMEngine:
                 and not prompt.get("prompt_token_ids", None)):
             seq_len = prompt["prompt_embeds"].shape[0]
             prompt["prompt_token_ids"] = [0] * seq_len
+
+        # For PoC requests, create dummy prompt_token_ids based on seq_len.
+        # The actual embeddings are generated on GPU in the worker.
+        if isinstance(params, PoCParams):
+            prompt = {"prompt_token_ids": [0] * params.seq_len}
 
         processed_inputs = self.input_preprocessor.preprocess(
             prompt,
@@ -805,6 +821,36 @@ class LLMEngine:
             priority=priority)
         return seq_group
 
+    def _create_sequence_group_with_poc(
+        self,
+        request_id: str,
+        seq: Sequence,
+        poc_params: PoCParams,
+        arrival_time: float,
+        lora_request: Optional[LoRARequest],
+        prompt_adapter_request: Optional[PromptAdapterRequest],
+        encoder_seq: Optional[Sequence] = None,
+        priority: int = 0,
+    ) -> SequenceGroup:
+        """Creates a SequenceGroup with PoCParams.
+
+        PoC sequences use GPU-generated embeddings and bypass KV cache.
+        They are prefill-only and finish after a single forward pass.
+        """
+        # Defensive copy of PoCParams.
+        poc_params = poc_params.clone()
+        # Create the sequence group with PoC params.
+        seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=[seq],
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
+            encoder_seq=encoder_seq,
+            priority=priority,
+            poc_params=poc_params)
+        return seq_group
+
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a request(s) with the given ID.
 
@@ -884,6 +930,28 @@ class LLMEngine:
     ) -> None:
         seq_group.pooled_data = outputs[0].data
 
+        for seq in seq_group.get_seqs():
+            seq.status = SequenceStatus.FINISHED_STOPPED
+
+        return
+
+    @staticmethod
+    def _process_poc_outputs(
+        seq_group: SequenceGroup,
+        outputs: List,
+    ) -> None:
+        """Process PoC outputs and store results in seq_group.poc_data."""
+        from vllm.model_executor.layers.sampler import SamplerOutput
+
+        # Find the SamplerOutput with poc_outputs for this request.
+        for output in outputs:
+            if isinstance(output, SamplerOutput) and output.poc_outputs:
+                poc_data = output.poc_outputs.get(seq_group.request_id)
+                if poc_data:
+                    seq_group.poc_data = poc_data
+                    break
+
+        # Mark PoC sequences as finished after processing.
         for seq in seq_group.get_seqs():
             seq.status = SequenceStatus.FINISHED_STOPPED
 
@@ -1007,6 +1075,8 @@ class LLMEngine:
 
         finished_before: List[int] = []
         finished_now: List[int] = []
+        # Track output index separately since PoC sequences don't have sampler outputs
+        output_idx = 0
         for i in indices:
             if i in skip:
                 continue
@@ -1020,11 +1090,19 @@ class LLMEngine:
                 finished_before.append(i)
                 continue
 
+            # PoC sequences don't have sampler outputs - process directly
+            if seq_group.poc_params is not None:
+                self._process_poc_outputs(seq_group, outputs)
+                if seq_group.is_finished():
+                    finished_now.append(i)
+                continue
+
             output: List[SequenceGroupOutput]
             if has_multiple_outputs:
-                output = outputs_by_sequence_group[i]
+                output = outputs_by_sequence_group[output_idx]
             else:
-                output = [outputs_by_sequence_group[0][i]]
+                output = [outputs_by_sequence_group[0][output_idx]]
+            output_idx += 1
 
             if not is_async:
                 if self.scheduler_config.is_multi_step:

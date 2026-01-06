@@ -228,7 +228,8 @@ def generate_haar_orthogonal_matrices(
         seed = _seed_from_string(
             f"{block_hash}_{public_key}_nonce_{nonce}_haar_qr_{k}"
         )
-        A = _normal(seed, k * k, device).view(k, k).to(dtype)
+        # QR decomposition requires float32, convert to target dtype after.
+        A = _normal(seed, k * k, device).view(k, k).to(torch.float32)
 
         Q, R = torch.linalg.qr(A, mode="reduced")
 
@@ -238,6 +239,6 @@ def generate_haar_orthogonal_matrices(
         signs = torch.where(signs == 0, torch.ones_like(signs), signs)
         Q = Q * signs.unsqueeze(0)
 
-        Qs.append(Q)
+        Qs.append(Q.to(dtype))
 
     return torch.stack(Qs, dim=0)

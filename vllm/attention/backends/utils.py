@@ -86,15 +86,21 @@ def _compute_slot_mapping_numpy(slot_mapping: List[int],
 def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
                          seq_id: int, seq_len: int, context_len: int,
                          start_idx: int, block_size: int,
-                         block_tables: Dict[int, List[int]]):
+                         block_tables: Dict[int, List[int]],
+                         disable_kv_cache: bool = False):
     """
     Compute slot mapping.
+    
+    Args:
+        disable_kv_cache: If True, fill all slots with PAD_SLOT_ID.
+            Used for PoC sequences that don't write to KV cache.
     """
-    if is_profile_run:
+    if is_profile_run or disable_kv_cache:
         # During memory profiling, the block tables are not
         # initialized yet. In this case, we just use a dummy
         # slot mapping.
         # In embeddings, the block tables are {seq_id: None}.
+        # For PoC sequences, we use PAD_SLOT_ID to avoid KV cache writes.
         slot_mapping.extend([PAD_SLOT_ID] * seq_len)
         return
 
@@ -200,9 +206,12 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
                                                        context_len,
                                                        self.sliding_window)
+            # PoC sequences use PAD_SLOT_ID to skip KV cache writes.
+            disable_kv_cache = inter_data.poc_params is not None
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
-                                 self.block_size, inter_data.block_tables)
+                                 self.block_size, inter_data.block_tables,
+                                 disable_kv_cache)
 
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):

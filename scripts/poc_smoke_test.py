@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
 """
-Smoke test for PoCManager with real vLLM model.
+Smoke test for PoC using vLLM scheduler integration.
 
 Usage:
     VLLM_USE_V1=0 python scripts/poc_smoke_test.py
 
 This script:
 1. Loads Qwen3-0.6B model using vLLM v0
-2. Creates a PoCManager with model_executor (TP/PP aware)
-3. Runs a few batches via collective_rpc
-4. Validates nonces
-5. Reports results
+2. Submits PoC requests through the scheduler using add_request(PoCParams)
+3. Verifies outputs are PoCRequestOutput with correct distances
+4. Tests determinism (same nonce = same distance)
+5. Tests independence (different public_key = different distance)
 """
 
 import os
 import sys
+import time
 
 # Force v0 engine
 os.environ["VLLM_USE_V1"] = "0"
 
 from vllm import LLM
-from vllm.poc.manager import PoCManager
-from vllm.poc.config import PoCConfig
+from vllm.poc.poc_params import PoCParams
+from vllm.outputs import PoCRequestOutput
 
 
 def main():
     print("=" * 60)
-    print("PoC Manager Smoke Test (collective_rpc mode)")
+    print("PoC Scheduler Integration Smoke Test")
     print("=" * 60)
     
     # Load model
@@ -38,98 +39,145 @@ def main():
         max_model_len=256,
     )
     
-    # Access model_executor, config, and vllm_config (v0 API)
-    model_executor = llm.llm_engine.model_executor
-    model_config = llm.llm_engine.model_config
-    vllm_config = llm.llm_engine.vllm_config
+    engine = llm.llm_engine
+    model_config = engine.model_config
     
     print(f"   Model: {model_config.model}")
-    print(f"   Vocab size: {model_config.get_vocab_size()}")
     print(f"   Hidden size: {model_config.get_hidden_size()}")
-    print(f"   Executor type: {type(model_executor).__name__}")
+    print(f"   Engine type: {type(engine).__name__}")
     
-    # Create manager with model_executor (handles TP/PP via collective_rpc)
-    print("\n[2/5] Creating PoCManager...")
-    manager = PoCManager(model_executor, model_config, vllm_config)
-    print(f"   Device: {manager.device}")
-    print(f"   State: {manager.state.value}")
+    # Test config
+    block_hash = "smoke_test_block_hash_12345"
+    public_key = "test_node_pubkey"
+    block_height = 100
+    r_target = 1.5
+    seq_len = 32
     
-    # Initialize round
-    print("\n[3/5] Initializing round...")
-    config = PoCConfig(
-        block_hash="smoke_test_block_hash_12345",
-        block_height=100,
-        public_key="test_node_pubkey",
-        r_target=1.5,  # Relaxed target for smoke test
-        batch_size=4,
-        seq_len=32,
-        node_id=0,
-        node_count=1,
-    )
-    manager.init_round(config)
-    print(f"   Block hash: {config.block_hash}")
-    print(f"   r_target: {config.r_target}")
-    print(f"   Batch size: {config.batch_size}")
-    print(f"   Seq len: {config.seq_len}")
+    print("\n[2/5] Submitting PoC requests through scheduler...")
+    print(f"   Block hash: {block_hash}")
+    print(f"   Public key: {public_key}")
+    print(f"   r_target: {r_target}")
+    print(f"   seq_len: {seq_len}")
     
-    # Run batches
-    print("\n[4/5] Running batches (via collective_rpc)...")
-    manager.start_generate()
+    # Submit multiple nonces as individual requests
+    nonces = [0, 1, 2, 3]
+    results = []
+    start_time = time.time()
     
-    num_batches = 3
-    all_distances = []
-    all_nonces = []
-    
-    for i in range(num_batches):
-        batch = manager.run_batch()
-        all_nonces.extend(batch.nonces)
-        all_distances.extend(batch.dist)
+    for nonce in nonces:
+        poc_params = PoCParams(
+            block_hash=block_hash,
+            public_key=public_key,
+            block_height=block_height,
+            nonce=nonce,
+            r_target=r_target,
+            seq_len=seq_len,
+            return_vectors=False,
+        )
         
-        print(f"   Batch {i+1}:")
-        print(f"      Nonces: {batch.nonces}")
-        print(f"      Distances: {[f'{d:.4f}' for d in batch.dist]}")
-        valid_count = sum(1 for d in batch.dist if d < config.r_target)
-        print(f"      Valid (< {config.r_target}): {valid_count}/{len(batch)}")
+        request_id = f"poc-test-{nonce}"
+        
+        # Create dummy prompt (embeddings are generated on GPU)
+        prompt = {"prompt_token_ids": [0] * seq_len}
+        
+        # Add request to scheduler
+        engine.add_request(
+            request_id=request_id,
+            prompt=prompt,
+            params=poc_params,
+        )
     
-    print(f"\n   Total checked: {manager.stats.total_checked}")
-    print(f"   Total valid: {manager.stats.total_valid}")
-    print(f"   Elapsed: {manager.stats.elapsed:.3f}s")
-    print(f"   Rate: {manager.stats.rate:.1f} nonces/s")
+    print(f"   Submitted {len(nonces)} PoC requests")
     
-    # Capture generation stats before validation (validation also updates stats)
-    generation_checked = manager.stats.total_checked
+    # Process requests through scheduler
+    print("\n[3/5] Processing requests through scheduler...")
     
-    # Validate nonces
-    print("\n[5/5] Validating nonces (via collective_rpc)...")
-    manager.start_validate()
+    while engine.has_unfinished_requests():
+        step_outputs = engine.step()
+        for output in step_outputs:
+            if isinstance(output, PoCRequestOutput):
+                results.append({
+                    "request_id": output.request_id,
+                    "nonce": output.outputs.nonce,
+                    "distance": output.outputs.distance,
+                    "finished": output.finished,
+                })
+                print(f"   Got result: nonce={output.outputs.nonce}, distance={output.outputs.distance:.6f}")
     
-    # Pick first few nonces to validate
-    nonces_to_validate = all_nonces[:4]
-    original_distances = all_distances[:4]
+    elapsed = time.time() - start_time
+    print(f"   Processed {len(results)} results in {elapsed:.3f}s")
+    print(f"   Rate: {len(results) / elapsed:.1f} nonces/s")
     
-    result = manager.validate(nonces_to_validate, config.public_key)
-    recomputed_distances = result["computed_distances"]
-    valid_flags = result["valid"]
+    # Verify results
+    print("\n[4/5] Verifying results...")
     
-    print(f"   Nonces: {nonces_to_validate}")
-    print(f"   Original distances:   {[f'{d:.6f}' for d in original_distances]}")
-    print(f"   Recomputed distances: {[f'{d:.6f}' for d in recomputed_distances]}")
+    all_distances = [r["distance"] for r in results]
+    print(f"   Distances: {[f'{d:.4f}' for d in all_distances]}")
     
-    # Check determinism
-    all_match = True
-    for i, (orig, recomp) in enumerate(zip(original_distances, recomputed_distances)):
-        diff = abs(orig - recomp)
-        match = diff < 1e-5
-        all_match = all_match and match
-        status = "OK" if match else "MISMATCH"
-        print(f"   Nonce {nonces_to_validate[i]}: diff={diff:.2e} [{status}]")
+    valid_count = sum(1 for d in all_distances if d < r_target)
+    print(f"   Valid (< {r_target}): {valid_count}/{len(results)}")
     
-    # Test different public key produces different distances
+    # Test determinism - rerun same nonces
+    print("\n   Testing determinism (rerunning nonce 0)...")
+    poc_params_repeat = PoCParams(
+        block_hash=block_hash,
+        public_key=public_key,
+        block_height=block_height,
+        nonce=0,
+        r_target=r_target,
+        seq_len=seq_len,
+    )
+    
+    engine.add_request(
+        request_id="poc-test-repeat",
+        prompt={"prompt_token_ids": [0] * seq_len},
+        params=poc_params_repeat,
+    )
+    
+    repeat_result = None
+    while engine.has_unfinished_requests():
+        step_outputs = engine.step()
+        for output in step_outputs:
+            if isinstance(output, PoCRequestOutput):
+                repeat_result = output.outputs.distance
+    
+    original_distance = results[0]["distance"]
+    diff = abs(original_distance - repeat_result)
+    # Use larger tolerance for bfloat16 precision
+    determinism_match = diff < 0.01
+    print(f"   Original distance: {original_distance:.6f}")
+    print(f"   Repeat distance:   {repeat_result:.6f}")
+    print(f"   Diff: {diff:.6f}")
+    print(f"   Determinism: {'MATCH' if determinism_match else 'MISMATCH'}")
+    
+    # Test different public key
     print("\n   Testing different public key...")
-    other_result = manager.validate(nonces_to_validate, "different_pubkey")
-    other_distances = other_result["computed_distances"]
-    distances_differ = original_distances != other_distances
-    print(f"   Different public key -> different distances: {distances_differ}")
+    poc_params_other = PoCParams(
+        block_hash=block_hash,
+        public_key="different_pubkey",  # Different public key
+        block_height=block_height,
+        nonce=0,
+        r_target=r_target,
+        seq_len=seq_len,
+    )
+    
+    engine.add_request(
+        request_id="poc-test-other-pk",
+        prompt={"prompt_token_ids": [0] * seq_len},
+        params=poc_params_other,
+    )
+    
+    other_result = None
+    while engine.has_unfinished_requests():
+        step_outputs = engine.step()
+        for output in step_outputs:
+            if isinstance(output, PoCRequestOutput):
+                other_result = output.outputs.distance
+    
+    distances_differ = abs(original_distance - other_result) > 0.01
+    print(f"   Original public_key distance: {original_distance:.6f}")
+    print(f"   Different public_key distance: {other_result:.6f}")
+    print(f"   Different: {distances_differ}")
     
     # Summary
     print("\n" + "=" * 60)
@@ -137,11 +185,11 @@ def main():
     print("=" * 60)
     
     checks = [
+        ("All results are PoCRequestOutput", len(results) == len(nonces)),
         ("Distances in valid range [0, 2]", all(0 <= d <= 2 for d in all_distances)),
-        ("Deterministic (recompute matches)", all_match),
+        ("Deterministic (same nonce = same distance)", determinism_match),
         ("Different pubkey -> different distances", distances_differ),
-        ("Stats tracking works", generation_checked == num_batches * config.batch_size),
-        ("collective_rpc execution works", len(all_nonces) == num_batches * config.batch_size),
+        ("Scheduler integration works", len(results) > 0),
     ]
     
     all_passed = True

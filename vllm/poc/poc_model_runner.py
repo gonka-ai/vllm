@@ -5,6 +5,8 @@ This mimics vLLM's /chat/completion TP synchronization:
 - Non-driver TP workers block until they receive the broadcast
 - All TP ranks then enter model forward together (NCCL collectives align)
 """
+import time
+
 import torch
 import torch.distributed as dist
 from typing import List, Optional, Dict, Any
@@ -13,7 +15,10 @@ from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.forward_context import set_forward_context
+from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
+
+logger = init_logger(__name__)
 
 from .gpu_random import (
     generate_inputs,
@@ -168,6 +173,12 @@ def execute_poc_forward(
     
     pp_group = get_pp_group()
     
+    # =========================================================================
+    # TIMING: Phase 1 - Input Generation
+    # =========================================================================
+    torch.cuda.synchronize()
+    t_input_start = time.perf_counter()
+    
     if pp_group.is_first_rank:
         # Generate deterministic inputs on GPU (all TP ranks do this with same params)
         inputs_embeds = generate_inputs(
@@ -186,6 +197,9 @@ def execute_poc_forward(
     attn_backend = worker.model_runner.attn_backend
     attn_metadata = _create_prefill_attn_metadata(batch_size, seq_len, device, attn_backend)
     
+    torch.cuda.synchronize()
+    t_input_end = time.perf_counter()
+    
     # =========================================================================
     # TP SYNC: Pre-forward rendezvous (after PP recv, before model forward)
     # 
@@ -199,6 +213,11 @@ def execute_poc_forward(
     # Sync GPU before forward to ensure all CUDA ops complete
     torch.cuda.synchronize()
     
+    # =========================================================================
+    # TIMING: Phase 2 - Model Forward
+    # =========================================================================
+    t_fwd_start = time.perf_counter()
+    
     # Forward pass - all TP ranks now enter together
     with set_forward_context(attn_metadata, worker_vllm_config):
         hidden_states = model(
@@ -208,6 +227,9 @@ def execute_poc_forward(
             inputs_embeds=inputs_embeds.view(-1, hidden_size) if inputs_embeds is not None else None,
         )
     
+    torch.cuda.synchronize()
+    t_fwd_end = time.perf_counter()
+    
     # PP: send to next rank if not last
     if not pp_group.is_last_rank:
         if isinstance(hidden_states, IntermediateTensors):
@@ -215,6 +237,11 @@ def execute_poc_forward(
                 hidden_states.tensors, all_gather_group=get_tp_group()
             )
         return None
+    
+    # =========================================================================
+    # TIMING: Phase 3 - Post-processing
+    # =========================================================================
+    t_post_start = time.perf_counter()
     
     # Extract last token hidden state
     hidden_states = hidden_states.view(batch_size, seq_len, -1)
@@ -237,6 +264,20 @@ def execute_poc_forward(
     yk = yk / (yk.norm(dim=-1, keepdim=True) + 1e-8)
     target = target / (target.norm(dim=-1, keepdim=True) + 1e-8)
     distances = (yk - target).norm(dim=-1)
+    
+    torch.cuda.synchronize()
+    t_post_end = time.perf_counter()
+    
+    # Log timing results
+    t_input = t_input_end - t_input_start
+    t_fwd = t_fwd_end - t_fwd_start
+    t_post = t_post_end - t_post_start
+    t_total = t_input + t_fwd + t_post
+    logger.info(
+        f"POC Timing: batch={batch_size}, seq_len={seq_len} | "
+        f"input_gen={t_input:.4f}s, model_fwd={t_fwd:.4f}s, postproc={t_post:.4f}s, "
+        f"total={t_total:.4f}s"
+    )
     
     result = {
         "nonces": nonces,

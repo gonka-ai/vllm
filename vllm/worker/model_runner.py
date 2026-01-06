@@ -45,6 +45,7 @@ from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
                              MultiModalRegistry)
+from vllm.poc.poc_params import PoCParams
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
@@ -104,6 +105,8 @@ class ModelInputForGPU(ModelRunnerInputBase):
     async_callback: Optional[Callable] = None
     scheduler_outputs: Optional[SchedulerOutputs] = None
     previous_hidden_states: Optional[torch.Tensor] = None
+    # PoC: mapping of request_id -> PoCParams for PoC sequences in this batch
+    poc_params_map: Optional[Dict[str, "PoCParams"]] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -399,6 +402,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.multi_modal_kwargs = multi_modal_kwargs
             self.multi_modal_placeholder_maps = multi_modal_placeholder_maps
             self.prefix_cache_hit = prefix_cache_hit
+            self.poc_params: Optional[PoCParams] = None
 
             self.n_seqs = len(self.seq_ids)
 
@@ -798,6 +802,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             reinit_use_defaults=True,
             encoder_seq_len=encoder_seq_len)
 
+        # Store PoC params for GPU embedding generation in build().
+        inter_data.poc_params = seq_group_metadata.poc_params
+
         self.inter_data_list.append(inter_data)
 
         for seq_idx in range(n_seqs):
@@ -864,10 +871,40 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         assert graph_batch_size >= batch_size
         return graph_batch_size - batch_size
 
+    def _generate_poc_embeddings(self) -> None:
+        """Generate embeddings for PoC sequences on GPU.
+        
+        PoC sequences use deterministic GPU-generated embeddings based on
+        (block_hash, public_key, nonce) instead of tokenized inputs.
+        """
+        from vllm.poc.gpu_random import generate_inputs
+
+        for inter_data in self.inter_data_list:
+            if inter_data.poc_params is None:
+                continue
+
+            poc_params = inter_data.poc_params
+            # Generate embeddings for this PoC sequence on GPU.
+            # Each inter_data represents one sequence (one nonce).
+            embeddings = generate_inputs(
+                block_hash=poc_params.block_hash,
+                public_key=poc_params.public_key,
+                nonces=[poc_params.nonce],
+                dim=self.runner.model_config.get_hidden_size(),
+                seq_len=poc_params.seq_len,
+                device=self.runner.device,
+                dtype=self.runner.model_config.dtype,
+            )
+            # Shape: [1, seq_len, hidden_size] -> [seq_len, hidden_size]
+            inter_data.inputs_embeds = embeddings.squeeze(0)
+
     def build(self) -> ModelInputForGPU:
         """Finalize the builder intermediate data and
         create on-device tensors.
         """
+        # Generate PoC embeddings on GPU for sequences with poc_params.
+        self._generate_poc_embeddings()
+
         # Combine and flatten intermediate data.
         input_tokens = list[int]()
         inputs_embeds_list = list[torch.Tensor]()
@@ -1039,6 +1076,14 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         ]
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
+        # Build PoC params map for postprocessing in execute_model.
+        poc_params_map: Optional[Dict[str, PoCParams]] = None
+        for inter_data in self.inter_data_list:
+            if inter_data.poc_params is not None:
+                if poc_params_map is None:
+                    poc_params_map = {}
+                poc_params_map[inter_data.request_id] = inter_data.poc_params
+
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,
             inputs_embeds=inputs_embeds,
@@ -1053,7 +1098,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             request_ids_to_seq_ids=request_ids_to_seq_ids,
             finished_requests_ids=self.finished_requests_ids,
             prompt_adapter_mapping=prompt_adapter_mapping,
-            prompt_adapter_requests=prompt_adapter_requests)
+            prompt_adapter_requests=prompt_adapter_requests,
+            poc_params_map=poc_params_map)
 
 
 class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
@@ -1963,7 +2009,94 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
             output.hidden_states = hidden_states
 
+        # PoC postprocessing: compute distances for PoC sequences.
+        if model_input.poc_params_map:
+            output.poc_outputs = self._compute_poc_distances(
+                model_input, hidden_or_intermediate_states)
+
         return [output]
+
+    def _compute_poc_distances(
+        self,
+        model_input: ModelInputForGPUWithSamplingMetadata,
+        hidden_states: torch.Tensor,
+    ) -> dict[str, dict]:
+        """Compute PoC distances for sequences with poc_params.
+
+        Args:
+            model_input: The model input containing poc_params_map.
+            hidden_states: The hidden states from the model forward pass.
+
+        Returns:
+            Dict mapping request_id -> {"nonce": int, "distance": float}
+        """
+        from vllm.poc.gpu_random import (generate_haar_orthogonal_matrices,
+                                         generate_target, random_pick_indices)
+
+        POC_PICK_K_DIMS = 64  # Same as in poc_model_runner.py
+
+        poc_params_map = model_input.poc_params_map
+        if not poc_params_map:
+            return {}
+
+        # Build mapping of request_id to position in batch.
+        # seq_lens tells us how many tokens each sequence has.
+        request_ids_to_seq_ids = model_input.request_ids_to_seq_ids or {}
+        seq_lens = model_input.seq_lens or []
+
+        # Calculate start positions for each sequence in the flattened hidden states.
+        # hidden_states shape: [total_tokens, hidden_size]
+        seq_start_positions = [0]
+        for sl in seq_lens[:-1]:
+            seq_start_positions.append(seq_start_positions[-1] + sl)
+
+        poc_outputs: dict[str, dict] = {}
+        hidden_size = hidden_states.shape[-1]
+
+        # Process each PoC request.
+        for idx, (request_id, poc_params) in enumerate(poc_params_map.items()):
+            if idx >= len(seq_lens):
+                continue
+
+            # Get the last token's hidden state for this sequence.
+            start_pos = seq_start_positions[idx]
+            seq_len = seq_lens[idx]
+            # hidden_states is flattened: [total_tokens, hidden_size]
+            last_hidden = hidden_states[start_pos + seq_len - 1:start_pos + seq_len].float()  # [1, hidden_size]
+
+            # Normalize to unit sphere.
+            last_hidden = last_hidden / (last_hidden.norm(dim=-1, keepdim=True) + 1e-8)
+
+            # Per-nonce k-dim pick + Haar rotation.
+            nonces = [poc_params.nonce]
+            indices = random_pick_indices(
+                poc_params.block_hash, poc_params.public_key, nonces,
+                hidden_size, POC_PICK_K_DIMS, self.device)
+            xk = torch.gather(last_hidden, 1, indices)  # [1, k]
+
+            Q = generate_haar_orthogonal_matrices(
+                poc_params.block_hash, poc_params.public_key, nonces,
+                POC_PICK_K_DIMS, self.device, dtype=xk.dtype)
+            yk = torch.bmm(Q, xk.unsqueeze(-1)).squeeze(-1)  # [1, k]
+
+            # Target in k-dim space.
+            target = generate_target(
+                poc_params.block_hash, poc_params.public_key,
+                POC_PICK_K_DIMS, self.device)  # [k]
+
+            # Normalize and compute distance.
+            yk = yk / (yk.norm(dim=-1, keepdim=True) + 1e-8)
+            target = target / (target.norm(dim=-1, keepdim=True) + 1e-8)
+            distance = (yk - target).norm(dim=-1).item()
+
+            poc_outputs[request_id] = {
+                "nonce": poc_params.nonce,
+                "distance": distance,
+            }
+            if poc_params.return_vectors:
+                poc_outputs[request_id]["vector"] = yk[0].cpu().tolist()
+
+        return poc_outputs
 
     def need_recv_kv(self, model_input, kv_caches) -> bool:
         """Check if we need to receive kv-cache from the other worker.

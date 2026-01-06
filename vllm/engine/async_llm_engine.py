@@ -27,7 +27,8 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.outputs import PoolingRequestOutput, PoCRequestOutput, RequestOutput
+from vllm.poc.poc_params import PoCParams
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -431,7 +432,7 @@ class _AsyncLLMEngine(LLMEngine):
         self,
         request_id: str,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: Union[SamplingParams, PoolingParams, PoCParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -855,14 +856,14 @@ class AsyncLLMEngine(EngineClient):
         self,
         request_id: str,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: Union[SamplingParams, PoolingParams, PoCParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
-    ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
+    ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput, PoCRequestOutput], None]:
         if not self.is_running:
             if self.start_engine_loop:
                 self.start_background_loop()
@@ -1072,6 +1073,42 @@ class AsyncLLMEngine(EngineClient):
                     priority=priority,
             ):
                 yield LLMEngine.validate_output(output, PoolingRequestOutput)
+        except asyncio.CancelledError:
+            await self.abort(request_id)
+            raise
+
+    async def poc_compute(
+        self,
+        poc_params: PoCParams,
+        request_id: str,
+        priority: int = 0,
+    ) -> AsyncGenerator[PoCRequestOutput, None]:
+        """Compute PoC (Proof of Compute) for a nonce using the scheduler.
+
+        This method adds a PoC request to the scheduler queue, which will
+        batch it with other requests (PoC or chat) based on token budget.
+
+        Args:
+            poc_params: The PoC parameters including block_hash, public_key,
+                nonce, seq_len, etc.
+            request_id: The unique id of the request.
+            priority: The priority of the request. PoC requests typically
+                use priority=1 to yield to chat (priority=0).
+
+        Yields:
+            PoCRequestOutput containing the computed distance and optional vector.
+        """
+        # Create dummy prompt - actual embeddings are generated on GPU
+        prompt = {"prompt_token_ids": [0] * poc_params.seq_len}
+
+        try:
+            async for output in await self.add_request(
+                    request_id,
+                    prompt,
+                    poc_params,
+                    priority=priority,
+            ):
+                yield LLMEngine.validate_output(output, PoCRequestOutput)
         except asyncio.CancelledError:
             await self.abort(request_id)
             raise

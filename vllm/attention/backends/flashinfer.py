@@ -740,14 +740,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
                                                        context_len,
                                                        self.sliding_window)
+            # PoC sequences use PAD_SLOT_ID to skip KV cache writes.
+            disable_kv_cache = inter_data.poc_params is not None
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
-                                 self.block_size, inter_data.block_tables)
+                                 self.block_size, inter_data.block_tables,
+                                 disable_kv_cache)
 
             # It is not necessary to add paged_kv_indices, paged_kv_indptr,
-            # and paged_kv_last_page_len for profile run because we will
-            # create dummy inputs.
-            if is_profile_run:
+            # and paged_kv_last_page_len for profile run or PoC sequences
+            # because we will create dummy inputs.
+            if is_profile_run or disable_kv_cache:
                 self.is_profile_run = is_profile_run
                 return
 

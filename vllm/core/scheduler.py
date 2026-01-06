@@ -702,6 +702,13 @@ class Scheduler:
         assert len(self._async_stopped) == 0
         while running_queue:
             seq_group = running_queue[0]
+
+            # PoC sequences are prefill-only - skip them in running scheduling.
+            # They will be removed from running by free_finished_seq_groups().
+            if seq_group.skip_kv_cache:
+                running_queue.popleft()
+                continue
+
             # We discard the cached tokens info here because we don't need it
             # for running sequence:
             #   1. If a sequence is running with chunked prefill, the cached
@@ -787,7 +794,9 @@ class Scheduler:
                     break
             else:
                 self._append_slots(seq_group, blocks_to_copy, enable_chunking)
-                is_prefill = seq_group.is_prefill()
+                # PoC sequences are prefill-only but should be treated as decode
+                # in the running queue (they finish after one forward pass)
+                is_prefill = seq_group.is_prefill() and not seq_group.skip_kv_cache
 
                 scheduled_seq_group: ScheduledSequenceGroup = (
                     self._scheduled_seq_group_cache[
@@ -1123,8 +1132,12 @@ class Scheduler:
                     True, enable_chunking)
 
             # If the sequence group cannot be allocated, stop.
-            can_allocate = self.block_manager.can_allocate(
-                seq_group, num_lookahead_slots=num_lookahead_slots)
+            # PoC sequences with skip_kv_cache bypass block allocation entirely.
+            if seq_group.skip_kv_cache:
+                can_allocate = AllocStatus.OK
+            else:
+                can_allocate = self.block_manager.can_allocate(
+                    seq_group, num_lookahead_slots=num_lookahead_slots)
             if can_allocate == AllocStatus.LATER:
                 break
             elif can_allocate == AllocStatus.NEVER:
@@ -1497,6 +1510,10 @@ class Scheduler:
         """Determine whether or not we have enough space in the KV cache to
         continue generation of the sequence group.
         """
+        # PoC sequences don't use KV cache - always can append (they finish after prefill)
+        if seq_group.skip_kv_cache:
+            return True
+
         # It is True only for testing case to trigger artificial preemption.
         if (self.enable_artificial_preemption
                 and random.uniform(0, 1) < ARTIFICIAL_PREEMPTION_PROB
@@ -1573,10 +1590,15 @@ class Scheduler:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
-                block_tables[seq_id] = self.block_manager.get_block_table(seq)
-                self.block_manager.access_all_blocks_in_seq(seq, now)
+                # PoC sequences with skip_kv_cache have no block tables.
+                if seq_group.skip_kv_cache:
+                    block_tables[seq_id] = []
+                else:
+                    block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                    self.block_manager.access_all_blocks_in_seq(seq, now)
 
-            if self.cache_config.enable_prefix_caching:
+            # PoC sequences skip prefix caching.
+            if self.cache_config.enable_prefix_caching and not seq_group.skip_kv_cache:
                 common_computed_block_nums = (
                     self.block_manager.get_common_computed_block_ids(
                         seq_group.get_seqs(status=SequenceStatus.RUNNING)))
@@ -1630,6 +1652,7 @@ class Scheduler:
                         seq_group.multi_modal_placeholders
                         if scheduler_outputs.num_prefill_groups > 0 else None),
                     prompt_adapter_request=seq_group.prompt_adapter_request,
+                    poc_params=seq_group.poc_params,
                 )
             else:
                 # When SPMD mode is enabled, we only send delta data except for
@@ -1729,7 +1752,9 @@ class Scheduler:
             self._async_stopped.clear()
 
     def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
-        self.block_manager.allocate(seq_group)
+        # PoC sequences with skip_kv_cache bypass block allocation entirely.
+        if not seq_group.skip_kv_cache:
+            self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
 
@@ -1751,6 +1776,10 @@ class Scheduler:
                 slots.
             enable_chunking (bool): True if chunked prefill is enabled.
         """
+        # PoC sequences don't use KV cache - skip slot appending
+        if seq_group.skip_kv_cache:
+            return
+
         is_prefill: bool = seq_group.is_prefill()
         num_lookahead_slots: int = self._get_num_lookahead_slots(
             is_prefill, enable_chunking)

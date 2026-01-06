@@ -17,6 +17,7 @@ from zmq.asyncio import Socket
 
 from vllm import PoolingParams
 from vllm.config import DecodingConfig, ModelConfig, VllmConfig
+from vllm.poc.poc_params import PoCParams
 from vllm.core.scheduler import SchedulerOutputs
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -45,7 +46,7 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.outputs import PoolingRequestOutput, PoCRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
@@ -517,17 +518,44 @@ class MQLLMEngineClient(EngineClient):
                                   trace_headers,
                                   priority=priority))
 
+    def poc_compute(
+        self,
+        poc_params: PoCParams,
+        request_id: str,
+        priority: int = 0,
+    ) -> AsyncGenerator[PoCRequestOutput, None]:
+        """Compute PoC (Proof of Compute) for a nonce using the scheduler.
+
+        Args:
+            poc_params: The PoC parameters including block_hash, public_key,
+                nonce, seq_len, etc.
+            request_id: The unique id of the request.
+            priority: Priority of the request. PoC requests typically use
+                priority=1 to yield to chat (priority=0).
+
+        Yields:
+            PoCRequestOutput containing the computed distance and optional vector.
+        """
+        # Create dummy prompt - actual embeddings are generated on GPU
+        prompt = {"prompt_token_ids": [0] * poc_params.seq_len}
+        return cast(
+            AsyncGenerator[PoCRequestOutput, None],
+            self._process_request(prompt,
+                                  poc_params,
+                                  request_id,
+                                  priority=priority))
+
     async def _process_request(
         self,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: Union[SamplingParams, PoolingParams, PoCParams],
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
-            PoolingRequestOutput, None]]:
+            PoolingRequestOutput, None], AsyncGenerator[PoCRequestOutput, None]]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
         # If already dead, error out.

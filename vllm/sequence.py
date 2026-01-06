@@ -18,6 +18,7 @@ import torch
 from vllm.inputs import SingletonInputs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
+from vllm.poc.poc_params import PoCParams
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -735,7 +736,9 @@ class SequenceGroup:
                  trace_headers: Optional[Mapping[str, str]] = None,
                  prompt_adapter_request: Optional[PromptAdapterRequest] = None,
                  priority: int = 0,
-                 draft_size: int = 1) -> None:
+                 draft_size: int = 1,
+                 poc_params: Optional[PoCParams] = None,
+                 poc_data: Optional[dict] = None) -> None:
         self.request_id = request_id
         self.seqs = seqs
         self.first_seq = seqs[0]
@@ -761,6 +764,8 @@ class SequenceGroup:
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
         self.priority = priority
+        self.poc_params = poc_params
+        self.poc_data = poc_data
 
         self.cached_request_output = None
 
@@ -821,6 +826,15 @@ class SequenceGroup:
     def prompt_adapter_num_virtual_tokens(self) -> int:
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens\
                          if self.prompt_adapter_request else 0
+
+    @property
+    def skip_kv_cache(self) -> bool:
+        """Whether this sequence group should bypass KV cache allocation.
+        
+        PoC sequences don't need KV cache since they are prefill-only and
+        use PAD_SLOT_ID for all attention operations.
+        """
+        return self.poc_params is not None
 
     def init_multi_step(self, num_steps: int) -> None:
         self.state.num_steps = num_steps
@@ -962,7 +976,13 @@ class SequenceGroup:
                 f"num_seqs={len(self.seqs)})")
 
     def uses_prompt_embeds(self) -> bool:
-        """Returns True if the sequence group uses input embeds."""
+        """Returns True if the sequence group uses input embeds.
+        
+        PoC sequences also use embeddings (generated on GPU), so they're
+        treated as using prompt embeds for scheduling purposes.
+        """
+        if self.poc_params is not None:
+            return True
         return any(seq.data.prompt_embeds is not None for seq in self.seqs)
 
 
@@ -1042,6 +1062,7 @@ class SequenceGroupMetadata(
     cross_block_table: Optional[list[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
     token_chunk_size: Optional[int] = None
+    poc_params: Optional[PoCParams] = None
 
     ### Stateful fields that are lazily defined. ###
     # The number of speculative tokens adopted in this request.
@@ -1071,6 +1092,11 @@ class SequenceGroupMetadata(
     def prompt_adapter_num_virtual_tokens(self) -> int:
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens \
                         if self.prompt_adapter_request else 0
+
+    @property
+    def skip_kv_cache(self) -> bool:
+        """Whether this sequence group should bypass KV cache allocation."""
+        return self.poc_params is not None
 
     # Multi-Step Chunked-Prefill property
     @property

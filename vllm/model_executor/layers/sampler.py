@@ -133,6 +133,9 @@ class SamplerOutput(
     # Time taken in the forward pass for this across all workers
     model_forward_time: Optional[float] = None
 
+    # PoC (Proof of Compute) outputs: request_id -> {"nonce": int, "distance": float}
+    poc_outputs: Optional[dict[str, dict]] = None
+
     # Time taken in the model execute function. This will include model forward,
     # block/sync across workers, cpu-gpu sync time and sampling time.
     model_execute_time: Optional[float] = None

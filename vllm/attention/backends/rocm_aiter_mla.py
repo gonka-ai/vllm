@@ -191,10 +191,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
                                                        context_len,
                                                        self.sliding_window)
+            # PoC sequences use PAD_SLOT_ID to skip KV cache writes.
+            disable_kv_cache = inter_data.poc_params is not None
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
-                                 self.block_size, inter_data.block_tables)
-            if is_profile_run:
+                                 self.block_size, inter_data.block_tables,
+                                 disable_kv_cache)
+            if is_profile_run or disable_kv_cache:
                 return
 
             # Update paged_kv_* tensors only for non-profile run

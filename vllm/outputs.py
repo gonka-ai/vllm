@@ -78,6 +78,23 @@ class PoolingOutput:
             (self.data == other.data).all()))
 
 
+@dataclass
+class PoCOutput:
+    """The output data of one PoC (Proof of Compute) output.
+
+    Args:
+        nonce: The nonce value that was evaluated.
+        distance: The computed distance to the target.
+        vector: Optional output vector (only if return_vectors=True).
+    """
+    nonce: int
+    distance: float
+    vector: Optional[list[float]] = None
+
+    def __repr__(self) -> str:
+        return (f"PoCOutput(nonce={self.nonce}, distance={self.distance})")
+
+
 class RequestOutput:
     """The output data of a completion request to the LLM.
 
@@ -390,13 +407,49 @@ class PoolingRequestOutput(Generic[_O]):
                 f"finished={self.finished})")
 
 
+class PoCRequestOutput:
+    """The output data of a PoC (Proof of Compute) request.
+
+    Args:
+        request_id: A unique identifier for the PoC request.
+        outputs: The PoC result containing nonce, distance, and optional vector.
+        finished: A flag indicating whether the PoC computation is completed.
+    """
+
+    def __init__(self, request_id: str, outputs: PoCOutput, finished: bool):
+        self.request_id = request_id
+        self.outputs = outputs
+        self.finished = finished
+
+    @staticmethod
+    def from_seq_group(seq_group: SequenceGroup) -> "PoCRequestOutput":
+        poc_data = seq_group.poc_data
+        assert poc_data is not None
+
+        output = PoCOutput(
+            nonce=poc_data["nonce"],
+            distance=poc_data["distance"],
+            vector=poc_data.get("vector"),
+        )
+        finished = seq_group.is_finished()
+
+        return PoCRequestOutput(seq_group.request_id, output, finished)
+
+    def __repr__(self):
+        return (f"PoCRequestOutput(request_id={self.request_id!r}, "
+                f"outputs={self.outputs!r}, "
+                f"finished={self.finished})")
+
+
 class RequestOutputFactory:
 
     @staticmethod
     def create(seq_group: SequenceGroup,
                seq_id_to_seq_group: dict[str, SequenceGroupBase],
                use_cache: bool = False):
-        if seq_group.pooled_data is not None:
+        if seq_group.poc_data is not None:
+            return PoCRequestOutput.from_seq_group(seq_group)
+        elif seq_group.pooled_data is not None:
             return PoolingRequestOutput.from_seq_group(seq_group)
         else:
             return RequestOutput.from_seq_group(seq_group, use_cache,

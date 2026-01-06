@@ -224,27 +224,38 @@ def api_call(method: str, endpoint: str, json_data: dict = None) -> dict:
 # =============================================================================
 
 def run_seed_generation(block_hash: str, public_key: str, duration: int) -> SeedResult:
-    """Run generation for a single seed combination."""
+    """Run generation for a single seed combination using scheduler-based /generate.
+    
+    Instead of timed generation, we submit a batch of nonces and wait for results.
+    The number of nonces is calculated based on duration and expected throughput.
+    """
     result = SeedResult(block_hash=block_hash, public_key=public_key)
     
     try:
-        config = {
-            **BASE_CONFIG,
+        # Estimate nonces based on duration (assume ~100 nonces/sec throughput)
+        estimated_nonces = duration * 100
+        nonces = list(range(estimated_nonces))
+        
+        start_time = time.time()
+        
+        # Use new scheduler-based /generate endpoint with wait=True
+        response = api_call("POST", "/api/v1/pow/generate", {
             "block_hash": block_hash,
+            "block_height": BASE_CONFIG["block_height"],
             "public_key": public_key,
-        }
+            "r_target": BASE_CONFIG["r_target"],
+            "nonces": nonces,
+            "seq_len": BASE_CONFIG["seq_len"],
+            "wait": True,
+        })
         
-        api_call("POST", "/api/v1/pow/init/generate", config)
-        time.sleep(duration)
+        elapsed = time.time() - start_time
         
-        status = api_call("GET", "/api/v1/pow/status")
-        api_call("POST", "/api/v1/pow/stop")
-        
-        result.total_checked = status.get("total_checked", 0)
-        result.total_valid = status.get("total_valid", 0)
-        result.valid_nonces = status.get("valid_nonces", [])
-        result.valid_distances = status.get("valid_distances", [])
-        result.elapsed_seconds = status.get("elapsed_seconds", 0.0)
+        result.total_checked = response.get("total_checked", len(nonces))
+        result.total_valid = response.get("total_valid", 0)
+        result.valid_nonces = response.get("valid_nonces", [])
+        result.valid_distances = response.get("valid_distances", [])
+        result.elapsed_seconds = elapsed
         
         if result.total_checked > 0:
             result.valid_rate_percent = result.total_valid / result.total_checked * 100
@@ -287,25 +298,56 @@ def validate_nonces(
     public_key: str,
     r_target: float,
 ) -> Dict[str, Any]:
-    """Validate nonces and return result with computed distances."""
-    init_config = {
+    """Validate nonces by recomputing distances using scheduler-based /generate.
+    
+    Returns dict with:
+    - fraud_detected: True if any claimed distance doesn't match recomputed
+    - computed_distances: List of recomputed distances
+    """
+    # Recompute distances using scheduler
+    response = api_call("POST", "/api/v1/pow/generate", {
         "block_hash": block_hash,
         "block_height": BASE_CONFIG["block_height"],
         "public_key": public_key,
         "r_target": r_target,
-    }
-    api_call("POST", "/api/v1/pow/init/validate", init_config)
-    
-    validate_request = {
-        "public_key": public_key,
-        "block_hash": block_hash,
-        "block_height": BASE_CONFIG["block_height"],
         "nonces": nonces,
-        "dist": distances,
-        "node_id": 0,
-    }
+        "seq_len": BASE_CONFIG["seq_len"],
+        "wait": True,
+        "return_vectors": False,
+    })
     
-    return api_call("POST", "/api/v1/pow/validate", validate_request)
+    # Build computed distances map
+    valid_nonces = response.get("valid_nonces", [])
+    valid_distances = response.get("valid_distances", [])
+    
+    # For all requested nonces, get their distances from all_results if available
+    # Otherwise use a high distance (fraud detection threshold)
+    computed_map = dict(zip(valid_nonces, valid_distances))
+    computed_distances = []
+    
+    for nonce in nonces:
+        if nonce in computed_map:
+            computed_distances.append(computed_map[nonce])
+        else:
+            # Nonce not valid - use 2.0 as max distance
+            computed_distances.append(2.0)
+    
+    # Check for fraud: claimed valid but actually not
+    fraud_detected = False
+    for i, (claimed_dist, computed_dist) in enumerate(zip(distances, computed_distances)):
+        # If claimed distance is very low but computed is high -> fraud
+        if claimed_dist < r_target and computed_dist >= r_target:
+            fraud_detected = True
+            break
+        # If distances differ significantly -> fraud
+        if abs(claimed_dist - computed_dist) > 0.1:
+            fraud_detected = True
+            break
+    
+    return {
+        "fraud_detected": fraud_detected,
+        "computed_distances": computed_distances,
+    }
 
 
 def check_determinism(original: SeedResult, repeat: SeedResult) -> bool:

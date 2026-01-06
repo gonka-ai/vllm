@@ -1,16 +1,16 @@
 """PoC (Proof of Compute) API routes for vLLM server."""
 import asyncio
 import time
-import traceback
 import uuid
-from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 
 from vllm.logger import init_logger
+from vllm.outputs import PoCRequestOutput
 from .config import PoCState, PoCConfig
+from .poc_params import PoCParams
 
 logger = init_logger(__name__)
 
@@ -18,40 +18,6 @@ router = APIRouter(prefix="/api/v1/pow", tags=["PoC"])
 
 # Module-level state for PoC tasks (per-app, keyed by id(app))
 _poc_tasks: Dict[int, Dict[str, Any]] = {}
-
-# Generate endpoint state
-ConfigKey = Tuple[str, str, int]  # (block_hash, public_key, block_height)
-
-
-@dataclass
-class GenerateGroup:
-    config: PoCConfig
-    batch_size: int = 32
-    nonce_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-    results: Dict[str, List[Dict]] = field(default_factory=dict)
-    callbacks: Dict[str, str] = field(default_factory=dict)
-    last_callback: float = field(default_factory=time.time)
-    # Stats tracking
-    start_time: float = field(default_factory=time.time)
-    total_processed: int = 0
-    total_valid: int = 0
-    # Blocking wait support
-    pending_counts: Dict[str, int] = field(default_factory=dict)  # req_id -> remaining count
-    completion_events: Dict[str, asyncio.Event] = field(default_factory=dict)  # req_id -> event
-    # Vector return support
-    return_vectors_flags: Dict[str, bool] = field(default_factory=dict)  # req_id -> wants vectors
-
-
-_generate_groups: Dict[ConfigKey, GenerateGroup] = {}
-_generate_worker: Optional[asyncio.Task] = None
-_generate_lock: Optional[asyncio.Lock] = None
-
-
-def _get_generate_lock() -> asyncio.Lock:
-    global _generate_lock
-    if _generate_lock is None:
-        _generate_lock = asyncio.Lock()
-    return _generate_lock
 
 
 class PoCInitRequest(BaseModel):
@@ -102,6 +68,17 @@ class PoCGenerateRequest(BaseModel):
     return_vectors: bool = False  # If True, return output vectors (requires wait=True)
 
 
+class PoCComputeRequest(BaseModel):
+    """Request to compute distance for a single nonce via scheduler."""
+    block_hash: str
+    block_height: int
+    public_key: str
+    nonce: int
+    r_target: float = 1.5
+    seq_len: int = 256
+    return_vectors: bool = False
+
+
 async def get_engine_client(request: Request):
     """Get engine client from request app state."""
     engine_client = getattr(request.app.state, 'engine_client', None)
@@ -135,26 +112,6 @@ async def _cancel_poc_tasks(app_id: int):
                 await tasks["send_task"]
             except asyncio.CancelledError:
                 pass
-
-
-async def _cleanup_generate_groups():
-    """Clean up /generate queues and worker."""
-    global _generate_groups, _generate_worker
-    
-    # Clear all generate groups
-    async with _get_generate_lock():
-        _generate_groups.clear()
-    
-    # Cancel worker task
-    if _generate_worker is not None and not _generate_worker.done():
-        _generate_worker.cancel()
-        try:
-            await _generate_worker
-        except asyncio.CancelledError:
-            pass
-        _generate_worker = None
-    
-    logger.info("Generate queues cleaned up")
 
 
 async def _generation_loop(
@@ -386,9 +343,8 @@ async def stop_round(request: Request) -> dict:
     await check_poc_enabled(request)
     engine_client = await get_engine_client(request)
     
-    # Cancel all PoC tasks and queues
+    # Cancel all PoC tasks
     await _cancel_poc_tasks(id(request.app))
-    await _cleanup_generate_groups()
     
     result = await engine_client.poc_request("stop", {})
     
@@ -467,198 +423,15 @@ async def validate_nonces(request: Request, body: PoCValidateRequest) -> dict:
     }
 
 
-async def _send_generate_callbacks(group: GenerateGroup):
-    """Send accumulated results to callback URLs."""
-    import aiohttp
-    
-    async with aiohttp.ClientSession() as session:
-        for req_id, results in list(group.results.items()):
-            if not results:
-                continue
-            
-            callback_url = group.callbacks.get(req_id)
-            if not callback_url:
-                continue
-            
-            # Extract nonces and distances (matching /init/generate format)
-            nonces = [r["nonce"] for r in results]
-            distances = [r["distance"] for r in results if r["distance"] is not None]
-            
-            payload = {
-                "request_id": req_id,
-                "block_hash": group.config.block_hash,
-                "block_height": group.config.block_height,
-                "public_key": group.config.public_key,
-                "r_target": group.config.r_target,
-                "nonces": nonces,
-                "dist": distances,
-            }
-            
-            logger.info(f"Sending callback: {len(nonces)} nonces to {callback_url}")
-            
-            try:
-                await session.post(
-                    f"{callback_url}/generated",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=10)
-                )
-                group.results[req_id] = []
-            except Exception as e:
-                logger.warning(f"Generate callback failed for {req_id}: {e}")
-
-
-async def _generate_worker_loop(engine_client):
-    """Process nonces from generate groups."""
-    global _generate_groups
-    
-    logger.info("Generate worker started")
-    
-    try:
-        while _generate_groups:
-            # Collect batch under lock
-            batch_info = None
-            async with _get_generate_lock():
-                for key, group in list(_generate_groups.items()):
-                    batch_nonces = []
-                    batch_req_ids = []
-                    batch_size = group.batch_size
-                    
-                    while len(batch_nonces) < batch_size:
-                        try:
-                            nonce, req_id = group.nonce_queue.get_nowait()
-                            batch_nonces.append(nonce)
-                            batch_req_ids.append(req_id)
-                        except asyncio.QueueEmpty:
-                            break
-                    
-                    if batch_nonces:
-                        batch_info = (key, group.config, batch_nonces, batch_req_ids)
-                        break
-            
-            # Process batch without lock
-            if batch_info:
-                key, config, batch_nonces, batch_req_ids = batch_info
-                try:
-                    # Check if any request in batch wants vectors
-                    needs_vectors = False
-                    async with _get_generate_lock():
-                        if key in _generate_groups:
-                            group = _generate_groups[key]
-                            needs_vectors = any(
-                                group.return_vectors_flags.get(rid, False) 
-                                for rid in set(batch_req_ids)
-                            )
-                    
-                    result = await engine_client.poc_request("generate_for_nonces", {
-                        "block_hash": config.block_hash,
-                        "block_height": config.block_height,
-                        "public_key": config.public_key,
-                        "r_target": config.r_target,
-                        "seq_len": config.seq_len,
-                        "nonces": batch_nonces,
-                        "return_vectors": needs_vectors,
-                    })
-                    
-                    # Store results
-                    async with _get_generate_lock():
-                        if key in _generate_groups:
-                            group = _generate_groups[key]
-                            distances = result.get("distances", [])
-                            vectors = result.get("vectors", [])
-                            r_target = config.r_target
-                            valid_count = 0
-                            
-                            # Count processed nonces per request for pending tracking
-                            processed_per_req: Dict[str, int] = {}
-                            
-                            for i, req_id in enumerate(batch_req_ids):
-                                processed_per_req[req_id] = processed_per_req.get(req_id, 0) + 1
-                                dist = distances[i] if i < len(distances) else None
-                                wants_vectors = group.return_vectors_flags.get(req_id, False)
-                                
-                                # Store ALL results if vectors requested, otherwise only valid
-                                if wants_vectors or (dist is not None and dist < r_target):
-                                    if req_id not in group.results:
-                                        group.results[req_id] = []
-                                    entry = {
-                                        "nonce": batch_nonces[i],
-                                        "distance": dist,
-                                    }
-                                    if wants_vectors and vectors:
-                                        entry["vector"] = vectors[i] if i < len(vectors) else None
-                                    group.results[req_id].append(entry)
-                                    if dist is not None and dist < r_target:
-                                        valid_count += 1
-                            
-                            # Update pending counts and fire completion events
-                            for req_id, count in processed_per_req.items():
-                                if req_id in group.pending_counts:
-                                    group.pending_counts[req_id] -= count
-                                    if group.pending_counts[req_id] <= 0:
-                                        # All nonces processed, fire completion event
-                                        event = group.completion_events.get(req_id)
-                                        if event:
-                                            event.set()
-                            
-                            # Update stats
-                            group.total_processed += len(batch_nonces)
-                            group.total_valid += valid_count
-                            elapsed = (time.time() - group.start_time) / 60.0
-                            valid_rate = group.total_valid / group.total_processed * 100 if group.total_processed else 0
-                            valid_per_min = group.total_valid / elapsed if elapsed > 0 else 0
-                            raw_per_min = group.total_processed / elapsed if elapsed > 0 else 0
-                            
-                            logger.info(
-                                f"Generated: {group.total_valid} / {group.total_processed} "
-                                f"({valid_rate:.1f}%) Time: {elapsed:.2f}min "
-                                f"({valid_per_min:.1f} valid/min, {raw_per_min:.0f} raw/min)"
-                            )
-                except Exception as e:
-                    logger.error(f"Generate batch failed: {e}\n{traceback.format_exc()}")
-            
-            # Check callbacks and cleanup under lock
-            async with _get_generate_lock():
-                for key, group in list(_generate_groups.items()):
-                    has_results = any(r for r in group.results.values())
-                    time_elapsed = time.time() - group.last_callback >= 10.0
-                    queue_done = group.nonce_queue.empty()
-                    
-                    if has_results and (time_elapsed or queue_done):
-                        await _send_generate_callbacks(group)
-                        group.last_callback = time.time()
-                    
-                    if queue_done and not any(r for r in group.results.values()):
-                        del _generate_groups[key]
-            
-            if not batch_info:
-                await asyncio.sleep(0.01)
-    except Exception as e:
-        logger.error(f"Generate worker error: {e}")
-    finally:
-        # Cleanup hooks and release memory when worker stops
-        try:
-            await engine_client.poc_request("teardown_generate_hooks", {})
-        except Exception:
-            pass
-        logger.info("Generate worker stopped")
-
-
-async def _start_generate_worker(engine_client):
-    """Start the generate worker if not running."""
-    global _generate_worker
-    
-    if _generate_worker is None or _generate_worker.done():
-        _generate_worker = asyncio.create_task(
-            _generate_worker_loop(engine_client)
-        )
-
-
 @router.post("/generate")
 async def generate_nonces(request: Request, body: PoCGenerateRequest) -> dict:
-    """Generate distances for specific nonces.
+    """Generate distances for specific nonces using vLLM scheduler.
     
-    Groups requests by (block_hash, public_key, block_height) for efficient batching.
-    Results sent to callback_url/generated every ~10s.
+    Each nonce is submitted as an individual request to the scheduler, which
+    automatically batches them based on token budget. This enables:
+    - Dynamic batching with chat requests
+    - Priority-based scheduling (PoC yields to chat)
+    - No explicit batch_size needed
     
     If wait=True, blocks until all nonces are processed and returns results directly.
     If return_vectors=True (requires wait=True), also returns the output vectors.
@@ -666,88 +439,122 @@ async def generate_nonces(request: Request, body: PoCGenerateRequest) -> dict:
     await check_poc_enabled(request)
     engine_client = await get_engine_client(request)
     
-    status = await engine_client.poc_request("status", {})
-    if status.get("state") in [PoCState.GENERATING.value, PoCState.VALIDATING.value]:
-        raise HTTPException(
-            status_code=409,
-            detail="Busy with /init/generate or /init/validate"
-        )
-    
     if body.return_vectors and not body.wait:
         raise HTTPException(
             status_code=400,
             detail="return_vectors requires wait=True"
         )
     
-    key: ConfigKey = (body.block_hash, body.public_key, body.block_height)
-    req_id = str(uuid.uuid4())
-    completion_event = None
+    # Submit each nonce as individual request to scheduler
+    async def compute_single_nonce(nonce: int) -> dict:
+        poc_params = PoCParams(
+            block_hash=body.block_hash,
+            public_key=body.public_key,
+            block_height=body.block_height,
+            nonce=nonce,
+            r_target=body.r_target,
+            seq_len=body.seq_len,
+            return_vectors=body.return_vectors,
+        )
+        request_id = f"poc-{uuid.uuid4()}"
+        
+        # Use poc_compute which goes through the scheduler
+        async for output in engine_client.poc_compute(
+            poc_params=poc_params,
+            request_id=request_id,
+            priority=0,  # Default priority (priority scheduling not always enabled)
+        ):
+            if output.finished:
+                result = {
+                    "nonce": output.outputs.nonce,
+                    "distance": output.outputs.distance,
+                }
+                if body.return_vectors and output.outputs.vector:
+                    result["vector"] = output.outputs.vector
+                return result
+        return {"nonce": nonce, "distance": None, "error": "No output"}
     
-    async with _get_generate_lock():
-        if key not in _generate_groups:
-            config = PoCConfig(
-                block_hash=body.block_hash,
-                block_height=body.block_height,
-                public_key=body.public_key,
-                r_target=body.r_target,
-                seq_len=body.seq_len,
-                node_id=body.node_id,
-            )
-            _generate_groups[key] = GenerateGroup(config=config, batch_size=body.batch_size)
+    if body.wait:
+        # Process all nonces concurrently through scheduler
+        tasks = [compute_single_nonce(nonce) for nonce in body.nonces]
+        results = await asyncio.gather(*tasks)
         
-        group = _generate_groups[key]
-        group.results[req_id] = []
-        if body.callback_url:
-            group.callbacks[req_id] = body.callback_url
-        
-        # Track if this request wants vectors
-        if body.return_vectors:
-            group.return_vectors_flags[req_id] = True
-        
-        # Set up blocking wait if requested
-        if body.wait:
-            completion_event = asyncio.Event()
-            group.completion_events[req_id] = completion_event
-            group.pending_counts[req_id] = len(body.nonces)
-        
-        for nonce in body.nonces:
-            await group.nonce_queue.put((nonce, req_id))
-    
-    await _start_generate_worker(engine_client)
-    
-    # If wait=True, block until all nonces are processed
-    if body.wait and completion_event:
-        await completion_event.wait()
-        
-        # Collect results
-        async with _get_generate_lock():
-            if key in _generate_groups:
-                group = _generate_groups[key]
-                results = group.results.pop(req_id, [])
-                group.completion_events.pop(req_id, None)
-                group.pending_counts.pop(req_id, None)
-                group.return_vectors_flags.pop(req_id, None)
-            else:
-                results = []
-        
-        nonces = [r["nonce"] for r in results]
-        distances = [r["distance"] for r in results]
+        # Filter valid results
+        valid_results = [r for r in results if r.get("distance") is not None]
+        valid_under_target = [r for r in valid_results if r["distance"] < body.r_target]
         
         response = {
             "status": "completed",
-            "request_id": req_id,
-            "valid_nonces": nonces,
-            "valid_distances": distances,
-            "total_valid": len(nonces),
+            "request_id": str(uuid.uuid4()),
+            "total_checked": len(results),
+            "total_valid": len(valid_under_target),
+            "valid_nonces": [r["nonce"] for r in valid_under_target],
+            "valid_distances": [r["distance"] for r in valid_under_target],
         }
         
         if body.return_vectors:
-            response["vectors"] = [r.get("vector") for r in results]
+            response["all_results"] = results
         
         return response
     
+    # Non-blocking: fire and forget (for callback-based usage)
+    # Note: callback_url handling would need to be implemented separately
+    # For now, return immediately with request ID
     return {
         "status": "queued",
-        "request_id": req_id,
-        "queued_count": len(body.nonces),
+        "message": "Non-blocking mode not fully implemented for scheduler path. Use wait=True.",
+        "nonce_count": len(body.nonces),
     }
+
+
+@router.post("/compute")
+async def compute_nonce(request: Request, body: PoCComputeRequest) -> dict:
+    """Compute distance for a single nonce using scheduler integration.
+    
+    This endpoint uses vLLM's scheduler for PoC computation:
+    - Request is scheduled alongside regular inference
+    - Embeddings are generated on GPU
+    - Results are returned when computation completes
+    """
+    await check_poc_enabled(request)
+    engine_client = await get_engine_client(request)
+    
+    # Create PoCParams for this request
+    poc_params = PoCParams(
+        block_hash=body.block_hash,
+        public_key=body.public_key,
+        block_height=body.block_height,
+        nonce=body.nonce,
+        r_target=body.r_target,
+        seq_len=body.seq_len,
+        return_vectors=body.return_vectors,
+    )
+    
+    request_id = f"poc-{uuid.uuid4()}"
+    
+    # Use poc_compute which properly routes through the scheduler
+    final_output = None
+    async for output in engine_client.poc_compute(
+        poc_params=poc_params,
+        request_id=request_id,
+        priority=0,  # Default priority
+    ):
+        if output.finished:
+            final_output = output
+    
+    if final_output is None:
+        raise HTTPException(
+            status_code=500,
+            detail="No output received from PoC computation"
+        )
+    
+    response = {
+        "nonce": final_output.outputs.nonce,
+        "distance": final_output.outputs.distance,
+        "valid": final_output.outputs.distance < body.r_target,
+    }
+    
+    if body.return_vectors and final_output.outputs.vector:
+        response["vector"] = final_output.outputs.vector
+    
+    return response

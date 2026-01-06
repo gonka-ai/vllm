@@ -10,6 +10,7 @@ from vllm import PoolingParams
 from vllm.inputs import PromptType
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
+from vllm.poc.poc_params import PoCParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Device
@@ -29,7 +30,7 @@ class MQEngineDeadError(RuntimeError):
 @dataclass
 class RPCProcessRequest:
     prompt: PromptType
-    params: Union[SamplingParams, PoolingParams]
+    params: Union[SamplingParams, PoolingParams, PoCParams]
     request_id: str
     lora_request: Optional[LoRARequest] = None
     trace_headers: Optional[Mapping[str, str]] = None
@@ -39,7 +40,7 @@ class RPCProcessRequest:
     def __init__(
         self,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: Union[SamplingParams, PoolingParams, PoCParams],
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
