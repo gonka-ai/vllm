@@ -1,0 +1,13 @@
+FROM ghcr.io/axeltec-software/vllm:v0.11-gonka-candidate
+
+ENV VLLM_USE_V1=0
+
+# Copy local vLLM python sources to a temp location
+COPY ./vllm_axelt/vllm /tmp/vllm-src
+
+# Merge only .py files into the installed vllm package (preserves compiled .so files)
+RUN set -euo pipefail; \
+    VLLM_PKG_DIR="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent)')"; \
+    cd /tmp/vllm-src; \
+    find . -name "*.py" -print0 | tar --null -T - -cf - | tar -xf - -C "${VLLM_PKG_DIR}"; \
+    rm -rf /tmp/vllm-src

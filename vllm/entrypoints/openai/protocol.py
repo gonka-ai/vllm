@@ -748,8 +748,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=(
             "If specified with 'logprobs', tokens are represented "
-            " as strings of the form 'token_id:{token_id}' so that tokens "
-            "that are not JSON-encodable can be identified."
+            " as plain token-id strings (e.g. '641') for compatibility with"
+            " enforced-token validation utilities and older vLLM variants."
         ),
     )
     return_token_ids: bool | None = Field(
@@ -1264,8 +1264,8 @@ class CompletionRequest(OpenAIBaseModel):
         default=None,
         description=(
             "If specified with 'logprobs', tokens are represented "
-            " as strings of the form 'token_id:{token_id}' so that tokens "
-            "that are not JSON-encodable can be identified."
+            " as plain token-id strings (e.g. '641') for compatibility with"
+            " enforced-token validation utilities and older vLLM variants."
         ),
     )
     return_token_ids: bool | None = Field(

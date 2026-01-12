@@ -1673,7 +1673,7 @@ class OpenAIServingChat(OpenAIServing):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
                 if should_return_as_token_id:
-                    token = f"token_id:{token_id}"
+                    token = str(token_id)
                 else:
                     token = tokenizer.decode(token_id)
 

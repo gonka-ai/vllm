@@ -256,7 +256,7 @@ class OpenAIServing:
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
-        return_tokens_as_token_ids: bool = False,
+        return_tokens_as_token_ids: bool = True,
         log_error_stack: bool = False,
     ):
         super().__init__()
@@ -1393,9 +1393,10 @@ class OpenAIServing:
         enforced_tokens: EnforcedTokens = None
     ) -> str:
         if return_as_token_id:
-            if enforced_tokens:
-                return str(token_id)
-            return f"token_id:{token_id}"
+            # Return token ids as plain strings for compatibility with older
+            # OpenAI-compatible vLLM variants and enforced-token validation
+            # utilities that expect int(token).
+            return str(token_id)
 
         if logprob.decoded_token is not None:
             return logprob.decoded_token

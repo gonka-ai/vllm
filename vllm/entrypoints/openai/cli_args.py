@@ -134,10 +134,10 @@ class FrontendArgs:
     is provided, vLLM will add it to the server using
     `@app.middleware('http')`. If a class is provided, vLLM will
     add it to the server using `app.add_middleware()`."""
-    return_tokens_as_token_ids: bool = False
+    return_tokens_as_token_ids: bool = True
     """When `--max-logprobs` is specified, represents single tokens as
-    strings of the form 'token_id:{token_id}' so that tokens that are not
-    JSON-encodable can be identified."""
+    plain token-id strings (e.g. '641') for compatibility with enforced-token
+    validation utilities and older vLLM variants."""
     disable_frontend_multiprocessing: bool = False
     """If specified, will run the OpenAI frontend server in the same process as
     the model serving engine."""
