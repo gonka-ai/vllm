@@ -22,6 +22,14 @@ Murmur3-based generation solves this:
 - Box-Muller transform for normal distribution
 - Direct integer argsort for permutations (no float conversion, stable=True for CPU/GPU reproducibility)
 
+## Batch-Shape Invariance
+
+**Determinism includes shape invariance**: The vector for a given nonce must be identical regardless of what other nonces are in the same batch. This is critical for validation, where a validator may compute artifacts for a subset of nonces rather than the full batch.
+
+The model forward pass may use different attention kernels or accumulation paths based on batch size, causing numerically different outputs for the same nonce when batched differently.
+
+**Solution**: Fixed-shape padding (see `production-phase-1.md`). Each PoC forward pads the nonce list to a fixed `batch_size` using negative dummy nonces, then filters out dummy artifacts before returning. This ensures `vector(nonce)` is always computed with the same batch shape.
+
 ## Core Functions
 
 ### File: `vllm/poc/gpu_random.py`

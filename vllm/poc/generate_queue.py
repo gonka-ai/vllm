@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional
 from vllm.logger import init_logger
 from .validation import run_validation
 from .callbacks import send_oneshot_callback
-from .data import DEFAULT_DIST_THRESHOLD, DEFAULT_P_MISMATCH, DEFAULT_FRAUD_THRESHOLD
+from .data import DEFAULT_DIST_THRESHOLD, DEFAULT_P_MISMATCH, DEFAULT_FRAUD_THRESHOLD, pad_nonces, filter_artifacts
 
 logger = init_logger(__name__)
 
@@ -208,6 +208,10 @@ class GenerateQueue:
             chunk_idx = i // job.batch_size
             chunk_start_time = time.time()
             
+            # Fixed-shape padding for batch-shape invariance
+            original_nonces = set(chunk)
+            padded_chunk = pad_nonces(chunk, job.batch_size)
+            
             while True:
                 if self._stop_event.is_set():
                     raise RuntimeError("Job cancelled")
@@ -217,7 +221,7 @@ class GenerateQueue:
                     continue
                 
                 result = await job.engine_client.poc_request("generate_artifacts", {
-                    "nonces": chunk,
+                    "nonces": padded_chunk,
                     "block_hash": job.block_hash,
                     "public_key": job.public_key,
                     "seq_len": job.seq_len,
@@ -225,7 +229,9 @@ class GenerateQueue:
                 })
                 
                 if not result.get("skipped"):
-                    computed_artifacts.extend(result.get("artifacts", []))
+                    artifacts = result.get("artifacts", [])
+                    filtered = filter_artifacts(artifacts, original_nonces)
+                    computed_artifacts.extend(filtered)
                     logger.debug(f"PoC queue job {job.request_id[:8]}: chunk {chunk_idx+1}/{n_chunks} done ({len(chunk)} nonces)")
                     break
                 

@@ -46,6 +46,17 @@ Both modes use chat-priority gating:
 - `/api/v1/pow/generate` with `wait=true` waits inline for `/init/generate` to complete (no 409)
 - No changes to OpenAI endpoints
 
+## Batch-Shape Invariance Compatibility
+
+Phase 1 introduces **fixed-shape padding** to ensure artifact vectors are independent of request batch shape. This is fully compatible with Phase 2 chat-priority coexistence:
+
+- Padding happens within each PoC chunk processing (routes.py, generate_queue.py)
+- It does not affect scheduling, gating, or backoff logic
+- Chat priority checks occur before the model forward, padding is applied to the nonce list passed to the forward
+- The filtering of dummy nonces happens after the forward completes, before returning artifacts
+
+No additional changes needed for coexistence.
+
 ## Implementation Requirements
 
 ### 1) Chat-Priority Gate (MP Engine)

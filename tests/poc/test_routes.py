@@ -7,10 +7,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from vllm.poc.routes import (
-    router, _poc_tasks, _is_generation_active, _get_next_nonces,
+    router, _poc_tasks, _is_generation_active,
     POC_BATCH_SIZE_DEFAULT, PoCInitGenerateRequest, PoCGenerateRequest,
     NonceIterator,
 )
+from vllm.poc.data import pad_nonces, filter_artifacts
 from vllm.poc.generate_queue import GenerateJob, GenerateResult, get_queue, clear_queue, POC_MAX_QUEUED_NONCES
 from vllm.poc.config import PoCState
 
@@ -98,6 +99,18 @@ class TestPoCInitGenerate:
         })
         assert response.status_code == 422
 
+    def test_init_generate_rejects_batch_size_too_small(self, client):
+        response = client.post("/api/v1/pow/init/generate", json={
+            "block_hash": "abc123", "block_height": 100, "public_key": "pubkey123",
+            "node_id": 0, "node_count": 1, "batch_size": 2,
+            "params": {"model": "test-model", "seq_len": 256, "k_dim": 12},
+        })
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["error"] == "batch_size too small"
+        assert detail["batch_size"] == 2
+        assert detail["min_batch_size"] == 3
+
 
 class TestPoCGenerate:
     def test_generate_returns_artifacts(self, client, mock_engine_client):
@@ -122,6 +135,30 @@ class TestPoCGenerate:
         assert response.status_code == 200
         assert response.json()["status"] == "queued"
         assert response.json()["queued_count"] == 3
+
+    def test_generate_rejects_batch_size_too_small_wait_true(self, client):
+        response = client.post("/api/v1/pow/generate", json={
+            "block_hash": "abc123", "block_height": 100, "public_key": "pubkey123",
+            "node_id": 0, "node_count": 1, "nonces": [0], "batch_size": 1,
+            "params": {"model": "test-model", "seq_len": 256, "k_dim": 12}, "wait": True,
+        })
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["error"] == "batch_size too small"
+        assert detail["batch_size"] == 1
+        assert detail["min_batch_size"] == 3
+
+    def test_generate_rejects_batch_size_too_small_wait_false(self, client):
+        response = client.post("/api/v1/pow/generate", json={
+            "block_hash": "abc123", "block_height": 100, "public_key": "pubkey123",
+            "node_id": 0, "node_count": 1, "nonces": [0], "batch_size": 2,
+            "params": {"model": "test-model", "seq_len": 256, "k_dim": 12}, "wait": False,
+        })
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["error"] == "batch_size too small"
+        assert detail["batch_size"] == 2
+        assert detail["min_batch_size"] == 3
 
     def test_generate_with_validation_detects_mismatch(self, client, mock_engine_client):
         mock_engine_client.poc_request.return_value = {
@@ -204,11 +241,102 @@ class TestPoCDisabled:
         assert response.status_code == 503
 
 
-class TestGenerationLoop:
-    def test_nonce_generation_api_side(self):
-        nonces, counter = _get_next_nonces(0, 4, 3)
-        assert nonces == [0, 3, 6, 9]
-        assert counter == 12
+class TestBatchShapePadding:
+    """Tests for fixed-shape padding to ensure batch-shape invariance."""
+
+    def test_pad_nonces_no_padding_needed(self):
+        nonces = [0, 1, 2, 3, 4]
+        result = pad_nonces(nonces, 5)
+        assert result == [0, 1, 2, 3, 4]
+
+    def test_pad_nonces_pads_with_negative(self):
+        nonces = [0, 1]
+        result = pad_nonces(nonces, 5)
+        assert len(result) == 5
+        assert result[:2] == [0, 1]
+        assert result[2:] == [-1, -2, -3]
+
+    def test_pad_nonces_single_nonce(self):
+        nonces = [42]
+        result = pad_nonces(nonces, 3)
+        assert result == [42, -1, -2]
+
+    def test_pad_nonces_already_larger(self):
+        nonces = [0, 1, 2, 3, 4, 5]
+        result = pad_nonces(nonces, 3)
+        assert result == [0, 1, 2, 3, 4, 5]
+
+    def test_filter_artifacts_keeps_original(self):
+        artifacts = [
+            {"nonce": 0, "vector_b64": "AAAA"},
+            {"nonce": 1, "vector_b64": "BBBB"},
+            {"nonce": -1, "vector_b64": "XXXX"},
+            {"nonce": -2, "vector_b64": "YYYY"},
+        ]
+        result = filter_artifacts(artifacts, {0, 1})
+        assert len(result) == 2
+        assert result[0]["nonce"] == 0
+        assert result[1]["nonce"] == 1
+
+    def test_filter_artifacts_empty_original(self):
+        artifacts = [{"nonce": -1, "vector_b64": "X"}]
+        result = filter_artifacts(artifacts, set())
+        assert result == []
+
+    def test_filter_artifacts_preserves_order(self):
+        artifacts = [
+            {"nonce": 5, "vector_b64": "A"},
+            {"nonce": -1, "vector_b64": "X"},
+            {"nonce": 3, "vector_b64": "B"},
+            {"nonce": -2, "vector_b64": "Y"},
+        ]
+        result = filter_artifacts(artifacts, {3, 5})
+        assert len(result) == 2
+        assert result[0]["nonce"] == 5
+        assert result[1]["nonce"] == 3
+
+    def test_generate_pads_and_filters(self, client, mock_engine_client):
+        # Engine returns artifacts including dummy nonces
+        mock_engine_client.poc_request.return_value = {
+            "artifacts": [
+                {"nonce": 0, "vector_b64": "AAAA"},
+                {"nonce": -1, "vector_b64": "XXXX"},
+                {"nonce": -2, "vector_b64": "YYYY"},
+            ],
+        }
+        response = client.post("/api/v1/pow/generate", json={
+            "block_hash": "abc123", "block_height": 100, "public_key": "pubkey123",
+            "node_id": 0, "node_count": 1, "nonces": [0], "batch_size": 3,
+            "params": {"model": "test-model", "seq_len": 256, "k_dim": 12}, "wait": True,
+        })
+        assert response.status_code == 200
+        artifacts = response.json()["artifacts"]
+        # Only original nonce should be returned
+        assert len(artifacts) == 1
+        assert artifacts[0]["nonce"] == 0
+
+    def test_generate_dummy_nonces_never_in_response(self, client, mock_engine_client):
+        # Engine returns artifacts for padded nonces
+        mock_engine_client.poc_request.return_value = {
+            "artifacts": [
+                {"nonce": 10, "vector_b64": "A"},
+                {"nonce": 20, "vector_b64": "B"},
+                {"nonce": -1, "vector_b64": "X"},
+                {"nonce": -2, "vector_b64": "Y"},
+                {"nonce": -3, "vector_b64": "Z"},
+            ],
+        }
+        response = client.post("/api/v1/pow/generate", json={
+            "block_hash": "abc", "block_height": 100, "public_key": "pk",
+            "node_id": 0, "node_count": 1, "nonces": [10, 20], "batch_size": 5,
+            "params": {"model": "test-model", "seq_len": 256, "k_dim": 12}, "wait": True,
+        })
+        assert response.status_code == 200
+        artifacts = response.json()["artifacts"]
+        nonces_in_response = [a["nonce"] for a in artifacts]
+        assert nonces_in_response == [10, 20]
+        # No negative nonces in response
+        assert all(n >= 0 for n in nonces_in_response)
 
 
 class TestNonceIterator:

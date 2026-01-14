@@ -144,3 +144,25 @@ def compare_artifacts(
             mismatch_nonces.append(artifact.nonce)
     
     return n_mismatch, mismatch_nonces
+
+
+def pad_nonces(nonces: List[int], pad_to: int) -> List[int]:
+    """Pad nonce list with negative dummy nonces to reach pad_to length.
+    
+    Used for batch-shape invariance: ensures model forward runs with
+    a fixed batch size regardless of how many nonces were requested.
+    Dummy nonces are negative to avoid colliding with real nonce space.
+    """
+    if len(nonces) >= pad_to:
+        return nonces
+    dummy_count = pad_to - len(nonces)
+    dummy_nonces = [-(i + 1) for i in range(dummy_count)]
+    return nonces + dummy_nonces
+
+
+def filter_artifacts(artifacts: List[dict], original_nonces: set) -> List[dict]:
+    """Filter artifacts to only include those with nonces in original_nonces.
+    
+    Used after padded forward pass to remove artifacts for dummy nonces.
+    """
+    return [a for a in artifacts if a["nonce"] in original_nonces]

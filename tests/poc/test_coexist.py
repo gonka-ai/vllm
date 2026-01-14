@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from vllm.poc.routes import (
-    router, _generation_loop, _get_next_nonces,
+    router, _generation_loop,
     POC_CHAT_BUSY_BACKOFF_SEC,
 )
 from vllm.poc.config import PoCState
@@ -150,6 +150,8 @@ class TestGenerationLoopBackoff:
             "public_key": "key",
             "node_id": 0,
             "node_count": 1,
+            "group_id": 0,
+            "n_groups": 1,
             "batch_size": 4,
             "seq_len": 256,
             "k_dim": 12,
@@ -179,38 +181,6 @@ class TestGenerationLoopBackoff:
                 pass
         
         assert call_count >= 2
-
-
-class TestNonceGeneration:
-    """Tests for API-side nonce generation."""
-    
-    def test_single_node_nonces(self):
-        """Single node gets sequential nonces: 0, 1, 2, ..."""
-        nonces, counter = _get_next_nonces(nonce_counter=0, batch_size=4, node_count=1)
-        assert nonces == [0, 1, 2, 3]
-        assert counter == 4
-        
-        nonces2, counter2 = _get_next_nonces(nonce_counter=counter, batch_size=4, node_count=1)
-        assert nonces2 == [4, 5, 6, 7]
-        assert counter2 == 8
-    
-    def test_multi_node_nonces_node0(self):
-        """Node 0 of 3 gets: 0, 3, 6, 9, ..."""
-        nonces, counter = _get_next_nonces(nonce_counter=0, batch_size=4, node_count=3)
-        assert nonces == [0, 3, 6, 9]
-        assert counter == 12
-    
-    def test_multi_node_nonces_node1(self):
-        """Node 1 of 3 gets: 1, 4, 7, 10, ..."""
-        nonces, counter = _get_next_nonces(nonce_counter=1, batch_size=4, node_count=3)
-        assert nonces == [1, 4, 7, 10]
-        assert counter == 13
-    
-    def test_multi_node_nonces_node2(self):
-        """Node 2 of 3 gets: 2, 5, 8, 11, ..."""
-        nonces, counter = _get_next_nonces(nonce_counter=2, batch_size=4, node_count=3)
-        assert nonces == [2, 5, 8, 11]
-        assert counter == 14
 
 
 class TestUnknownAction:

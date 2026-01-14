@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 from vllm.logger import init_logger
 from .config import PoCState
-from .data import Artifact, DEFAULT_DIST_THRESHOLD, DEFAULT_P_MISMATCH, DEFAULT_FRAUD_THRESHOLD
+from .data import Artifact, DEFAULT_DIST_THRESHOLD, DEFAULT_P_MISMATCH, DEFAULT_FRAUD_THRESHOLD, pad_nonces, filter_artifacts
 from .callbacks import CallbackSender
 from .generate_queue import GenerateJob, get_queue, clear_queue, POC_MAX_QUEUED_NONCES
 from .validation import run_validation
@@ -25,6 +25,7 @@ POC_GENERATE_CHUNK_TIMEOUT_SEC = float(os.environ.get("POC_GENERATE_CHUNK_TIMEOU
 POC_CHAT_BUSY_BACKOFF_SEC = 0.05
 POC_RPC_TIMEOUT_MS = int(os.environ.get("POC_RPC_TIMEOUT_MS", "60000"))
 POC_BATCH_SIZE_DEFAULT = int(os.environ.get("POC_BATCH_SIZE_DEFAULT", "32"))
+POC_MIN_BATCH_SIZE = 3
 
 _poc_tasks: Dict[int, Dict[str, Any]] = {}
 
@@ -121,6 +122,23 @@ async def get_engine_client(request: Request):
 async def check_poc_enabled(request: Request):
     if not getattr(request.app.state, 'poc_enabled', False):
         raise HTTPException(status_code=503, detail="PoC not enabled")
+
+def _ensure_min_batch_size(batch_size: int):
+    if batch_size < POC_MIN_BATCH_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "batch_size too small",
+                "batch_size": batch_size,
+                "min_batch_size": POC_MIN_BATCH_SIZE,
+                "reason": (
+                    "PoC artifact vectors require fixed-shape batching for "
+                    "batch-shape invariance. batch_size<=2 is disallowed "
+                    "because attention backends may produce different outputs "
+                    "for the same nonce at very small batch sizes."
+                ),
+            },
+        )
 
 
 def check_params_match(request: Request, params: PoCParamsModel):
@@ -228,10 +246,18 @@ async def _compute_artifacts_chunk(
     public_key: str,
     seq_len: int,
     k_dim: int,
+    pad_to: int,
     timeout_sec: float = POC_GENERATE_CHUNK_TIMEOUT_SEC,
     check_cancelled: Optional[callable] = None,
 ) -> List[Dict]:
-    """Compute artifacts for a chunk with backoff on skip."""
+    """Compute artifacts for a chunk with backoff on skip.
+    
+    Uses fixed-shape padding to ensure batch-shape invariance:
+    nonces are padded to pad_to with negative dummy nonces, then
+    dummy artifacts are filtered out before returning.
+    """
+    original_nonces = set(nonces)
+    padded_nonces = pad_nonces(nonces, pad_to)
     chunk_start_time = time.time()
     
     while True:
@@ -239,7 +265,7 @@ async def _compute_artifacts_chunk(
             raise RuntimeError("Cancelled")
         
         result = await engine_client.poc_request("generate_artifacts", {
-            "nonces": nonces,
+            "nonces": padded_nonces,
             "block_hash": block_hash,
             "public_key": public_key,
             "seq_len": seq_len,
@@ -247,7 +273,8 @@ async def _compute_artifacts_chunk(
         })
         
         if not result.get("skipped"):
-            return result.get("artifacts", [])
+            artifacts = result.get("artifacts", [])
+            return filter_artifacts(artifacts, original_nonces)
         
         elapsed = time.time() - chunk_start_time
         if elapsed >= timeout_sec:
@@ -356,6 +383,7 @@ async def _generation_loop(
 async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
     await check_poc_enabled(request)
     check_params_match(request, body.params)
+    _ensure_min_batch_size(body.batch_size)
     engine_client = await get_engine_client(request)
     
     app_id = id(request.app)
@@ -407,6 +435,7 @@ async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
 async def generate(request: Request, body: PoCGenerateRequest) -> dict:
     await check_poc_enabled(request)
     check_params_match(request, body.params)
+    _ensure_min_batch_size(body.batch_size)
     engine_client = await get_engine_client(request)
     
     app_id = id(request.app)
@@ -484,7 +513,9 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
             artifacts = await _compute_artifacts_chunk(
                 engine_client, chunk, body.block_hash, body.public_key,
                 body.params.seq_len, body.params.k_dim,
-                POC_GENERATE_CHUNK_TIMEOUT_SEC, check_cancelled
+                pad_to=body.batch_size,
+                timeout_sec=POC_GENERATE_CHUNK_TIMEOUT_SEC,
+                check_cancelled=check_cancelled,
             )
             computed_artifacts.extend(artifacts)
             logger.debug(f"PoC /generate: chunk {chunk_idx+1}/{n_chunks} done ({len(chunk)} nonces)")

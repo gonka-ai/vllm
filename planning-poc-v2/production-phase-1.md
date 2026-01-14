@@ -552,6 +552,37 @@ Single background worker processes jobs FIFO:
 - Continuous generation (`/init/generate`) does NOT include `request_id` in callbacks (matches pow behavior)
 - Explicit generation (`/generate`) includes `request_id` for tracking
 
+### Batch-Shape Invariance (Required)
+
+**Artifact vectors MUST be independent of request batch shape.** Different attention backends may use different kernels/accumulation paths based on batch size, causing numerically different outputs for the same nonce when batched with different sets of other nonces.
+
+To ensure deterministic, reproducible artifacts across any request batch size:
+
+0. **Minimum batch size**: The server rejects `batch_size <= 2` (returns `400`) with an explanation. This avoids pathological small-batch kernel paths and makes the protocol contract explicit: `batch_size >= 3`.
+
+1. **Fixed-shape padding**: All PoC forwards pad the nonce list to exactly `batch_size` using negative dummy nonces (-1, -2, ...) before running the model forward.
+
+2. **Filter dummy artifacts**: After forward, artifacts for negative nonces are filtered out before returning to the caller.
+
+3. **Protocol invariant**: `vector(nonce)` is defined as the output when computed in a batch of size `batch_size`, regardless of how many real nonces were requested.
+
+**Implementation** (in `vllm/poc/data.py`):
+```python
+def pad_nonces(nonces: List[int], pad_to: int) -> List[int]:
+    """Pad nonce list with negative dummy nonces to reach pad_to length."""
+    if len(nonces) >= pad_to:
+        return nonces
+    dummy_count = pad_to - len(nonces)
+    dummy_nonces = [-(i + 1) for i in range(dummy_count)]
+    return nonces + dummy_nonces
+
+def filter_artifacts(artifacts: List[dict], original_nonces: set) -> List[dict]:
+    """Filter artifacts to only include those with nonces in original_nonces."""
+    return [a for a in artifacts if a["nonce"] in original_nonces]
+```
+
+**Why negative nonces?** Negative nonces cannot collide with real nonces (which are always >= 0), making filtering unambiguous.
+
 ### Dtype Handling (Required Change)
 
 Current PoC computes vectors in FP32 for numerical stability:
