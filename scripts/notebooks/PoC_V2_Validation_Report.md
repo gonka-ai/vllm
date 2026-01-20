@@ -1,6 +1,6 @@
 ## PoC V2 Validation Report
 
-### Context (what we are validating)
+### Context
 In each PoC, every participant produces a set of nonces with corresponding vectors. We need to make sure that the nonce-vector pairs that a participant reports as a proof of compute was produced honestly with the model `Qwen/Qwen3-235B-A22B-Instruct-2507-FP8`.
 
 To ensure honest behaviour we need to validate the Proof of Compute.
