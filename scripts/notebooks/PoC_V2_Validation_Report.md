@@ -135,5 +135,5 @@ The simulations cover three layers:
 ### Reproducibility pointers
 - Data collection: [`vllm/scripts/collect_data.py`](../collect_data.py)
 - Analysis notebook: [`vllm/scripts/notebooks/analyze_data_poc2.ipynb`](analyze_data_poc2.ipynb)
-- Collected artifacts: `logs/v2/{name}_{timestamp}/` (config + per-server JSON outputs)
+- Collected artifacts: [GDrive link](https://drive.google.com/drive/folders/1-zZ67x2N2PCxamZuuBI_OJulYxPJ0i1a?usp=sharing)
 - Figures used in this report: `vllm/scripts/notebooks/report_assets/` (commit these PNGs alongside the report so GitHub can render them)
