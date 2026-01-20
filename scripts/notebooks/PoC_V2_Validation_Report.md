@@ -55,7 +55,7 @@ The heatmap and histogram below visualize this separation.
 
 Below are the printed pairwise summaries (mean ± std, max):
 
-![Pairwise distance heatmap](report_assets/plot_pairwise_distance_heatmap.png)
+![Pairwise distance heatmap](./report_assets/plot_pairwise_distance_heatmap.png)
 
 | Pair | mean ± std | max |
 |---|---:|---:|
@@ -72,7 +72,7 @@ Below are the printed pairwise summaries (mean ± std, max):
 
 **Observation:** FP8↔FP8 and INT4↔INT4 pairs cluster at lower distances (~0.06–0.08), while INT4↔FP8 pairs cluster at much higher distances (~0.24). This separation is what enables a distance-based mismatch rule.
 
-![Honest vs cheater separation](report_assets/plot_honest_vs_cheater_separation.png)
+![Honest vs cheater separation](./report_assets/plot_honest_vs_cheater_separation.png)
 
 ---
 
@@ -94,7 +94,7 @@ For any checked nonce:
 
 This produces an expected mismatch probability of ~2% under honest behavior (by construction).
 
-![Threshold on distributions](report_assets/plot_threshold_distributions.png)
+![Threshold on distributions](./report_assets/plot_threshold_distributions.png)
 
 ---
 
@@ -136,3 +136,4 @@ The simulations cover three layers:
 - Data collection: [`vllm/scripts/collect_data.py`](../collect_data.py)
 - Analysis notebook: [`vllm/scripts/notebooks/analyze_data_poc2.ipynb`](analyze_data_poc2.ipynb)
 - Collected artifacts: `logs/v2/{name}_{timestamp}/` (config + per-server JSON outputs)
+- Figures used in this report: `vllm/scripts/notebooks/report_assets/` (commit these PNGs alongside the report so GitHub can render them)
