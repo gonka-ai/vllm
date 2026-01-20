@@ -72,6 +72,31 @@ def api_call(url: str, endpoint: str, method: str = "POST", json_data: dict = No
     return r.json()
 
 
+def ensure_inference_up(base_url: str, config: dict) -> None:
+    """Ensure the server is in INFERENCE mode and inference is started.
+
+    Uses:
+      - GET  /api/v1/state
+      - POST /api/v1/inference/up
+    """
+    try:
+        state = api_call(base_url, "/api/v1/state", method="GET").get("state")
+        if state == "INFERENCE":
+            return
+    except Exception:
+        # If state endpoint isn't reachable, just try to start inference.
+        pass
+
+    payload = {
+        "model": config["model"],
+        "dtype": config.get("dtype", "auto"),
+        "additional_args": config.get("additional_args", []),
+    }
+    timeout = int(config.get("inference_start_timeout", 1800))
+    r = requests.post(f"{base_url}/api/v1/inference/up", json=payload, timeout=timeout)
+    r.raise_for_status()
+
+
 def decode_vector(b64: str) -> np.ndarray:
     """Decode base64 FP16 little-endian to FP32."""
     data = base64.b64decode(b64)
@@ -79,11 +104,45 @@ def decode_vector(b64: str) -> np.ndarray:
     return f16.astype(np.float32)
 
 
+def generate_with_poll(url: str, gen_config: dict, timeout_s: int) -> dict:
+    """Avoid long-held HTTP connections by submitting and polling.
+
+    For large runs (e.g. thousands of nonces), keeping a single request open with
+    wait=true can trigger upstream/proxy timeouts (seen as 502). Instead:
+    - submit with wait=false (expect request_id)
+    - poll /generate/{request_id} until artifacts arrive
+    """
+    submit = dict(gen_config)
+    submit["wait"] = False
+
+    submitted = api_call(url, "/api/v1/inference/pow/generate", json_data=submit)
+    if submitted.get("artifacts"):
+        return submitted
+
+    request_id = submitted.get("request_id")
+    if not request_id:
+        return submitted
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if shutdown_event.is_set():
+            raise RuntimeError("Cancelled")
+        polled = api_call(url, f"/api/v1/inference/pow/generate/{request_id}", method="GET")
+        if polled.get("artifacts"):
+            return polled
+        status = str(polled.get("status", "")).lower()
+        if status == "failed":
+            raise RuntimeError(f"generate failed: {polled}")
+        time.sleep(2)
+
+    raise TimeoutError(f"Timed out waiting for generate result (request_id={request_id})")
+
+
 def collect_from_server(name: str, url: str, config: dict, block_hash: str, public_key: str) -> dict:
     """Collect data from a single server for a specific seed."""
     # Stop any running generation
     try:
-        api_call(url, "/api/v1/pow/stop")
+        api_call(url, "/api/v1/inference/pow/stop")
     except Exception:
         pass  # Ignore if nothing running
 
@@ -106,8 +165,8 @@ def collect_from_server(name: str, url: str, config: dict, block_hash: str, publ
         "wait": True,
     }
 
-    # Generate artifacts
-    result = api_call(url, "/api/v1/pow/generate", json_data=gen_config)
+    # Generate artifacts (submit + poll to avoid 502 timeouts on long runs)
+    result = generate_with_poll(url, gen_config, timeout_s=int(config.get("generate_timeout", 1800)))
 
     # Extract artifacts
     artifacts = result.get("artifacts", [])
@@ -182,6 +241,15 @@ def get_task_key(server_name: str, block_hash: str, public_key: str, multi_seed:
         return server_name
 
 
+def _format_duration(seconds: float) -> str:
+    """Format a duration in seconds as H:MM:SS (with seconds precision)."""
+    total = int(round(seconds))
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    return f"{hours}:{minutes:02d}:{secs:02d}"
+
+
 def main():
     # Register signal handler for Ctrl-C
     signal.signal(signal.SIGINT, signal_handler)
@@ -202,6 +270,10 @@ def main():
     if "model" not in config:
         print("Error: config must include 'model' field")
         sys.exit(1)
+
+    # Ensure inference is up on each server URL before collecting.
+    for _, url in config.get("servers", {}).items():
+        ensure_inference_up(url, config)
 
     # Resolve seeds - support both single and multi-seed configs
     if "block_hashes" in config:
@@ -293,6 +365,7 @@ def main():
         return
 
     # Parallel execution - one worker per URL
+    collect_start = time.perf_counter()
     interrupted = False
     try:
         with ThreadPoolExecutor(max_workers=len(url_to_tasks)) as executor:
@@ -328,12 +401,16 @@ def main():
         shutdown_event.set()
         print("\n\nInterrupt received, cancelling pending tasks...")
 
+    collect_elapsed_s = time.perf_counter() - collect_start
+
     if interrupted:
         print(f"\nInterrupted. Partial results in {out_dir}")
+        print(f"Time spent collecting nonces: {_format_duration(collect_elapsed_s)} ({collect_elapsed_s:.1f}s)")
         print("Use --continue to resume from where you left off.")
         sys.exit(1)
     else:
         print(f"\nDone. Results in {out_dir}")
+        print(f"Time spent collecting nonces: {_format_duration(collect_elapsed_s)} ({collect_elapsed_s:.1f}s)")
 
 
 if __name__ == "__main__":
