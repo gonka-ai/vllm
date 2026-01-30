@@ -50,8 +50,6 @@ from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
 
 logger = init_logger(__name__)
-logger.info("=== QWEN3111 MODEL LOADED FROM LOCAL VLLM CODE ===")
-
 
 class Qwen3Attention(nn.Module):
 
