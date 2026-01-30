@@ -1208,7 +1208,8 @@ class AsyncLLMEngine(EngineClient):
                 "skipped": True,
             }
         from vllm.poc.data import Artifact
-        artifacts = manager.generate_artifacts(
+        artifacts = await asyncio.to_thread(
+            manager.generate_artifacts,
             nonces=payload.get("nonces", []),
             block_hash=payload.get("block_hash", ""),
             public_key=payload.get("public_key", ""),

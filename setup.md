@@ -20,8 +20,14 @@ uv pip install torch --extra-index-url https://download.pytorch.org/whl/cu128
 # Install xformers (for optimized attention)
 uv pip install xformers==0.0.33.post2 --extra-index-url https://download.pytorch.org/whl/cu128
 
+# Fix: xformers downgrades NCCL, but torch cu128 requires NCCL 2.27+
+uv pip install nvidia-nccl-cu12==2.27.5 --no-deps --reinstall
+
 # Install build requirements
 uv pip install cmake ninja packaging wheel "setuptools>=77.0.3,<80.0.0" setuptools-scm jinja2 regex
+
+# Install runtime dependencies (transformers 5.x breaks vLLM)
+uv pip install "transformers>=4.47,<5.0" accelerate sentencepiece tokenizers protobuf openai
 ```
 
 ## Step 2: Build vLLM from Source
@@ -47,7 +53,8 @@ export CCACHE_NOHASHDIR="true"
 rm -rf build .deps vllm/*.so vllm/_C*.so
 
 # Build (~20 min first time, faster with ccache)
-SETUPTOOLS_SCM_PRETEND_VERSION=0.0.1 MAX_JOBS=8 uv pip install --no-build-isolation -e .
+# Use --no-deps to prevent NCCL from being downgraded during install
+SETUPTOOLS_SCM_PRETEND_VERSION=0.0.1 MAX_JOBS=8 uv pip install --no-build-isolation --no-deps -e .
 ```
 
 ---
