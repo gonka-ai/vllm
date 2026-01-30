@@ -1181,7 +1181,8 @@ class AsyncLLMEngine(EngineClient):
     async def add_lora(self, lora_request: LoRARequest) -> None:
         self.engine.add_lora(lora_request)
 
-    async def poc_request(self, action: str, payload: dict) -> dict:
+    async def poc_request(self, action: str, payload: dict,
+                          timeout_ms: Optional[int] = None) -> dict:
         """Send a PoC (Proof of Compute) request to the engine.
         
         Only supports 'generate_artifacts' action. All PoC state (generation

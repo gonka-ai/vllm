@@ -103,6 +103,7 @@ from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 from vllm.poc.routes import router as poc_router
+from vllm.poc.generate_queue import clear_queue as clear_poc_queue
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
@@ -136,6 +137,11 @@ async def lifespan(app: FastAPI):
         try:
             yield
         finally:
+            try:
+                await clear_poc_queue()
+            except Exception as e:
+                logger.debug(f"Error clearing PoC queue: {e}")
+            
             if task is not None:
                 task.cancel()
     finally:

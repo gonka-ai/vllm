@@ -317,12 +317,14 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def poc_request(self, action: str, payload: dict) -> dict:
+    async def poc_request(self, action: str, payload: dict,
+                          timeout_ms: Optional[int] = None) -> dict:
         """Send a PoC (Proof of Compute) request to the engine.
         
         Args:
             action: Only "generate_artifacts" is supported
             payload: {nonces, block_hash, public_key, seq_len, k_dim}
+            timeout_ms: Optional timeout for RPC implementations
             
         Returns:
             Result dictionary with 'artifacts' list, or 'skipped'=True if

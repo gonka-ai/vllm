@@ -216,13 +216,22 @@ class GenerateQueue:
                     await asyncio.sleep(0.1)
                     continue
                 
-                result = await job.engine_client.poc_request("generate_artifacts", {
-                    "nonces": chunk,
-                    "block_hash": job.block_hash,
-                    "public_key": job.public_key,
-                    "seq_len": job.seq_len,
-                    "k_dim": job.k_dim,
-                })
+                try:
+                    result = await asyncio.wait_for(
+                        job.engine_client.poc_request("generate_artifacts", {
+                            "nonces": chunk,
+                            "block_hash": job.block_hash,
+                            "public_key": job.public_key,
+                            "seq_len": job.seq_len,
+                            "k_dim": job.k_dim,
+                        }),
+                        timeout=POC_GENERATE_CHUNK_TIMEOUT_SEC
+                    )
+                except asyncio.CancelledError:
+                    logger.info(f"PoC queue job {job.request_id[:8]}: cancelled during RPC")
+                    raise RuntimeError("Job cancelled")
+                except asyncio.TimeoutError:
+                    raise RuntimeError(f"Timeout waiting for engine RPC: chunk {chunk_idx}")
                 
                 if not result.get("skipped"):
                     computed_artifacts.extend(result.get("artifacts", []))

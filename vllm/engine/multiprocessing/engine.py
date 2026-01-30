@@ -176,10 +176,19 @@ class MQLLMEngine:
             self.cleanup()
 
     def cleanup(self):
-        """Cleanup zeromq state on shutdown."""
-        # Closes all sockets and destroys context.
+        if hasattr(self, '_poc_manager'):
+            del self._poc_manager
+        
+        try:
+            if hasattr(self, 'engine') and hasattr(self.engine, 'model_executor'):
+                self.engine.model_executor.shutdown()
+        except Exception as e:
+            logger.debug(f"Error during executor shutdown: {e}")
+        
         self.ctx.destroy(linger=0)
-        del self.engine
+        
+        if hasattr(self, 'engine'):
+            del self.engine
 
     @contextmanager
     def make_data_socket(

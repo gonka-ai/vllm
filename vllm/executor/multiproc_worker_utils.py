@@ -257,6 +257,14 @@ def _run_worker_process(
                 and not tunable.record_untuned_is_enabled()):
             tunable.write_file()
 
+    try:
+        from vllm.distributed.parallel_state import (destroy_model_parallel,
+                                                     destroy_distributed_environment)
+        destroy_model_parallel()
+        destroy_distributed_environment()
+    except Exception:
+        pass
+
     logger.info("Worker exiting")
 
 

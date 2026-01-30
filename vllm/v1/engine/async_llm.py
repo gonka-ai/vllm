@@ -540,7 +540,8 @@ class AsyncLLM(EngineClient):
         return await self.engine_core.collective_rpc_async(
             method, timeout, args, kwargs)
 
-    async def poc_request(self, action: str, payload: dict) -> dict:
+    async def poc_request(self, action: str, payload: dict,
+                          timeout_ms: Optional[int] = None) -> dict:
         """Send a PoC (Proof of Compute) request to the engine.
         
         Note: V1 PoC support is not yet implemented.
