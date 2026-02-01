@@ -270,6 +270,102 @@ class TestGenerateQueueIntegration:
         assert result["status"] == "completed"
 
 
+class TestCallbackBlocking:
+    """Tests for callback behavior when external server returns errors."""
+
+    @pytest.mark.asyncio
+    async def test_callback_503_does_not_block_queue(self):
+        """Jobs should continue processing even when callbacks fail with 503.
+        
+        This test verifies that when a callback receiver returns HTTP 503,
+        the queue worker continues processing subsequent jobs instead of
+        blocking indefinitely on callback retries.
+        
+        Before fix: This test times out because the worker blocks on the first
+        job's callback retry loop, never processing job2 and job3.
+        
+        After fix: All 3 jobs complete within seconds because callbacks run
+        in background tasks.
+        """
+        from vllm.poc.generate_queue import GenerateQueue
+        from unittest.mock import patch, AsyncMock
+        import aiohttp
+        
+        queue = GenerateQueue()
+        mock_client = AsyncMock()
+        mock_client.poc_request.return_value = {
+            "artifacts": [{"nonce": 0, "vector_b64": "AAAA"}]
+        }
+        
+        # Track how many times callback was attempted
+        callback_attempts = []
+        
+        async def mock_post(*args, **kwargs):
+            """Mock aiohttp post that always returns 503."""
+            callback_attempts.append(time.time())
+            mock_response = AsyncMock()
+            mock_response.status = 503
+            mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_response.__aexit__ = AsyncMock(return_value=None)
+            return mock_response
+        
+        # Create 3 jobs with callback URLs
+        jobs = []
+        for i in range(3):
+            job = GenerateJob(
+                request_id=f"job{i}",
+                engine_client=mock_client,
+                app_id=1,
+                block_hash="abc",
+                block_height=100,
+                public_key="pk",
+                node_id=0,
+                node_count=1,
+                nonces=[i],
+                seq_len=256,
+                k_dim=12,
+                batch_size=10,
+                callback_url="http://localhost:9999/callback",
+            )
+            jobs.append(job)
+        
+        # Enqueue all jobs
+        for job in jobs:
+            await queue.enqueue(job)
+        
+        # Patch aiohttp to return 503
+        with patch.object(aiohttp.ClientSession, 'post', side_effect=mock_post):
+            # Start worker
+            await queue.ensure_worker_running(mock_client, app_id=1)
+            
+            # Wait for all jobs to complete (with timeout)
+            # Before fix: this will timeout because worker blocks on first callback
+            # After fix: all jobs complete quickly
+            start_time = time.time()
+            timeout = 5.0  # 5 second timeout
+            
+            while time.time() - start_time < timeout:
+                all_completed = all(
+                    queue.get_result(f"job{i}") and 
+                    queue.get_result(f"job{i}").status == "completed"
+                    for i in range(3)
+                )
+                if all_completed:
+                    break
+                await asyncio.sleep(0.1)
+            
+            # Stop worker
+            await queue.stop_worker()
+        
+        # Verify all jobs completed
+        for i in range(3):
+            result = queue.get_result(f"job{i}")
+            assert result is not None, f"job{i} result not found"
+            assert result.status == "completed", \
+                f"job{i} status is {result.status}, expected 'completed'. " \
+                f"Queue worker likely blocked on callback retry."
+
+
 class TestBatchSizeDefaults:
     def test_batch_size_default_constant_exists(self):
         assert POC_BATCH_SIZE_DEFAULT == 32
