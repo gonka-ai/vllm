@@ -206,6 +206,7 @@ class CallbackQueue:
     
     async def _worker_loop(self):
         """Main worker loop - dispatches callbacks with bounded concurrency."""
+        logger.info("Callback worker loop starting")
         try:
             while not self.stop_event.is_set():
                 # Clean up completed tasks
@@ -226,6 +227,9 @@ class CallbackQueue:
                 
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            logger.error(f"Callback worker loop crashed: {e}", exc_info=True)
+        logger.info("Callback worker loop exited")
     
     async def _send_with_retry(self, url: str, path: str, payload: Dict) -> bool:
         """Send callback with exponential backoff retry."""

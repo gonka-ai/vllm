@@ -139,10 +139,11 @@ class GenerateQueue:
                 pass
             self._worker_task = None
         
-        # Stop callback queue
+        # Stop callback queue and clear global singleton
         if self._callback_queue:
             await self._callback_queue.stop()
             self._callback_queue = None
+        await clear_callback_queue()
     
     async def _worker_loop(self, engine_client, app_id: int):
         """Background worker that processes queued jobs."""
