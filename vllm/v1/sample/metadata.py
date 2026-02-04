@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.validation import EnforcedTokens
+
+if TYPE_CHECKING:
+    from vllm.v1.sample.deterministic_utils import Sha256CounterRNG
 
 @dataclass
 class SamplingMetadata:
@@ -24,6 +28,12 @@ class SamplingMetadata:
     top_k: torch.Tensor | None
 
     generators: dict[int, torch.Generator]
+
+    # Deterministic RNGs for cross-platform reproducible sampling (validation)
+    # When VLLM_DETERMINISTIC_SAMPLING=1, this contains Sha256CounterRNG
+    # instances keyed by request index
+    deterministic_rngs: "dict[int, Sha256CounterRNG]" = field(
+        default_factory=dict)
 
     # None means no logprobs, 0 means sampled token logprobs only
     max_num_logprobs: int | None

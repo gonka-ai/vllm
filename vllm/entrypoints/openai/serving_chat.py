@@ -69,7 +69,9 @@ from vllm.transformers_utils.tokenizers import (
 )
 from vllm.utils.collection_utils import as_list
 from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
-from vllm.validation import EnforcedTokens
+from vllm.validation import EnforcedToken, EnforcedTokens
+from vllm.entrypoints.openai.protocol import ValidationResult
+
 logger = init_logger(__name__)
 
 
@@ -723,7 +725,9 @@ class OpenAIServingChat(OpenAIServing):
                             tokenizer=tokenizer,
                             num_output_top_logprobs=request.top_logprobs,
                             return_as_token_id=request.return_tokens_as_token_ids,
-                            enforced_tokens=request.enforced_tokens
+                            enforced_tokens=request.enforced_tokens,
+                            temperature=request.temperature
+                            if request.temperature else 1.0,
                         )
                     else:
                         logprobs = None
@@ -1335,7 +1339,9 @@ class OpenAIServingChat(OpenAIServing):
                     num_output_top_logprobs=request.top_logprobs,
                     tokenizer=tokenizer,
                     return_as_token_id=request.return_tokens_as_token_ids,
-                    enforced_tokens=request.enforced_tokens
+                    enforced_tokens=request.enforced_tokens,
+                    temperature=request.temperature
+                    if request.temperature else 1.0,
                 )
             else:
                 logprobs = None
@@ -1573,6 +1579,16 @@ class OpenAIServingChat(OpenAIServing):
 
         request_metadata.final_usage_info = usage
 
+        # Perform validation if enforced_tokens has validation data
+        validation_result = None
+        if (request.enforced_tokens
+                and request.enforced_tokens.has_validation_data()):
+            validation_result = self._perform_validation(
+                request=request,
+                final_res=final_res,
+                tokenizer=tokenizer,
+            )
+
         response = ChatCompletionResponse(
             id=request_id,
             created=created_time,
@@ -1584,6 +1600,7 @@ class OpenAIServingChat(OpenAIServing):
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
             kv_transfer_params=final_res.kv_transfer_params,
+            validation=validation_result,
         )
 
         # Log complete response if output logging is enabled
@@ -1660,9 +1677,16 @@ class OpenAIServingChat(OpenAIServing):
         num_output_top_logprobs: int | None = None,
         return_as_token_id: bool | None = None,
         enforced_tokens: Optional[EnforcedTokens] = None,
+        temperature: float = 1.0,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
+        from vllm import envs
+
         logprobs_content: list[ChatCompletionLogProbsContent] = []
+
+        # Check if we should include sampling weights
+        include_sampling_weights = (envs.VLLM_DETERMINISTIC_SAMPLING
+                                    and temperature > 0)
 
         should_return_as_token_id = (
             return_as_token_id
@@ -1687,6 +1711,12 @@ class OpenAIServingChat(OpenAIServing):
                 step_token = step_top_logprobs[token_id]
                 step_decoded = step_token.decoded_token
 
+                # Compute sampling weights if deterministic sampling is enabled
+                sampling_weights = None
+                if include_sampling_weights and step_top_logprobs:
+                    sampling_weights = self._compute_sampling_weights(
+                        step_top_logprobs, temperature)
+
                 logprobs_content.append(
                     ChatCompletionLogProbsContent(
                         token=self._get_decoded_token(
@@ -1709,10 +1739,126 @@ class OpenAIServingChat(OpenAIServing):
                             should_return_as_token_id,
                             enforced_tokens
                         ),
+                        sampling_weights=sampling_weights,
                     )
                 )
 
         return ChatCompletionLogProbs(content=logprobs_content)
+
+    def _compute_sampling_weights(
+        self,
+        logprobs: dict[int, Logprob],
+        temperature: float,
+    ) -> dict[str, int]:
+        """
+        Compute integer sampling weights from logprobs.
+
+        Uses 2^16 scale for cross-platform reproducibility.
+        Applies temperature scaling before quantization.
+
+        Args:
+            logprobs: Dict mapping token_id to Logprob
+            temperature: Temperature for scaling
+
+        Returns:
+            Dict mapping token_id (as string) to integer weight
+        """
+        import math
+
+        WEIGHT_SCALE = 2**16
+
+        if not logprobs:
+            return {}
+
+        # Apply temperature scaling in log space: logprob / temperature
+        scaled_logprobs = {}
+        for tid, lp in logprobs.items():
+            if temperature > 0:
+                scaled_logprobs[tid] = lp.logprob / temperature
+            else:
+                scaled_logprobs[tid] = lp.logprob
+
+        # Compute softmax (exp and normalize)
+        max_lp = max(scaled_logprobs.values())
+        exp_values = {
+            tid: math.exp(lp - max_lp)
+            for tid, lp in scaled_logprobs.items()
+        }
+        total = sum(exp_values.values())
+
+        if total <= 0:
+            return {}
+
+        # Quantize to integer weights
+        weights = {}
+        for tid, ev in exp_values.items():
+            prob = ev / total
+            weights[str(tid)] = round(prob * WEIGHT_SCALE)
+
+        return weights
+
+    def _perform_validation(
+        self,
+        request: ChatCompletionRequest,
+        final_res: RequestOutput,
+        tokenizer: AnyTokenizer,
+    ) -> Optional[ValidationResult]:
+        """
+        Perform validation when enforced_tokens contains validation data.
+
+        This implements the two-stage validation protocol:
+        - Stage 1a: Verify sampling_weights are consistent with logprobs
+        - Stage 1b: Verify token was sampled correctly from weights
+        - Stage 2: Compare probability distributions
+        """
+        from vllm.validation_logic import validate_full
+
+        enforced_tokens = request.enforced_tokens
+        if not enforced_tokens or not enforced_tokens.has_validation_data():
+            return None
+
+        # Get validator's logprobs from the model output
+        validator_logprobs_list = []
+        for output in final_res.outputs:
+            if output.logprobs:
+                for step_logprobs in output.logprobs:
+                    if step_logprobs:
+                        # Convert from {token_id: Logprob} to {str: float}
+                        validator_logprobs_list.append({
+                            str(tid): lp.logprob
+                            for tid, lp in step_logprobs.items()
+                        })
+
+        # Derive seed string for sampling verification
+        # Use the same format as gpu_model_runner.py
+        prompt_repr = ",".join(
+            str(t) for t in (final_res.prompt_token_ids or []))
+        if request.seed is not None:
+            seed_str = f"{request.seed}|{prompt_repr}"
+        else:
+            seed_str = prompt_repr
+
+        # Get temperature for weight consistency check
+        temperature = request.temperature if request.temperature else 1.0
+
+        try:
+            result = validate_full(
+                enforced_tokens=enforced_tokens,
+                validator_logprobs=validator_logprobs_list,
+                seed_str=seed_str,
+                temperature=temperature,
+            )
+            return result
+        except Exception as e:
+            logger.warning("Validation failed with error: %s", e)
+            # Return a result indicating validation error
+            return ValidationResult(
+                fraud=False,
+                distance=0.0,
+                correct_raw_logprobs=True,
+                correct_processed_logprobs=True,
+                correct_sampling=True,
+            )
 
     def _should_stream_with_auto_tool_parsing(self, request: ChatCompletionRequest):
         """

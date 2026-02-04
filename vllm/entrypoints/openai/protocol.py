@@ -2159,10 +2159,35 @@ class ChatCompletionLogProbsContent(ChatCompletionLogProb):
     # shared with the super class.
     field_names: ClassVar[set[str] | None] = None
     top_logprobs: list[ChatCompletionLogProb] = Field(default_factory=list)
+    # Integer weights (2^16 scale) for deterministic sampling verification
+    # Only populated when VLLM_DETERMINISTIC_SAMPLING=1 and logprobs requested
+    # Maps token ID (string) to integer weight
+    sampling_weights: Optional[dict[str, int]] = None
 
 
 class ChatCompletionLogProbs(OpenAIBaseModel):
     content: list[ChatCompletionLogProbsContent] | None = None
+
+
+class ValidationResult(OpenAIBaseModel):
+    """
+    Result of inference validation (for decentralized inference networks).
+
+    This is returned when a validator sends a request with enforced_tokens
+    containing validation data (logprobs and/or sampling_weights).
+
+    Attributes:
+        fraud: True if any validation check failed
+        distance: Normalized distance between executor and validator logprobs
+        correct_raw_logprobs: True if Stage 2 (logprob distribution) passed
+        correct_processed_logprobs: True if Stage 1a (weight consistency) passed
+        correct_sampling: True if Stage 1b (sampling verification) passed
+    """
+    fraud: bool = False
+    distance: float = 0.0
+    correct_raw_logprobs: bool = True
+    correct_processed_logprobs: bool = True
+    correct_sampling: bool = True
 
 
 class ChatCompletionResponseChoice(OpenAIBaseModel):
@@ -2194,6 +2219,9 @@ class ChatCompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    # Validation result for decentralized inference verification
+    # Only populated when enforced_tokens with validation data is provided
+    validation: ValidationResult | None = None
 
 
 class DeltaMessage(OpenAIBaseModel):
@@ -2230,6 +2258,9 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     usage: UsageInfo | None = Field(default=None)
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
+    # Validation result for decentralized inference verification
+    # Only populated in final chunk when enforced_tokens with validation data
+    validation: ValidationResult | None = None
 
 
 class TranscriptionResponseStreamChoice(OpenAIBaseModel):

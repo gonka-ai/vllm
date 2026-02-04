@@ -224,6 +224,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_FLAT_LOGPROBS: bool = False
+    VLLM_DETERMINISTIC_SAMPLING: bool = False
 
 
 def get_default_cache_root():
@@ -1486,6 +1487,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # After enabled, PromptLogprobs and SampleLogprobs would populated as
     # FlatLogprobs.
     "VLLM_FLAT_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLAT_LOGPROBS", "0"))),
+
+    # If set, vLLM will use SHA256-based deterministic sampling for all
+    # requests. This enables cross-platform reproducible sampling for
+    # validation purposes. When enabled:
+    # - ALL requests use deterministic RNG (Sha256CounterRNG)
+    # - If user provides seed: use SHA256(str(seed) + "|" + prompt)
+    # - If no seed: use SHA256(prompt) to derive seed
+    # - Same seed + same prompt = same output tokens (reproducible)
+    "VLLM_DETERMINISTIC_SAMPLING":
+    lambda: bool(int(os.getenv("VLLM_DETERMINISTIC_SAMPLING", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]

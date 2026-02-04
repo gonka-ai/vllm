@@ -209,9 +209,7 @@ class Sampler(nn.Module):
         # Apply top_k and/or top_p.
         random_sampled, processed_logprobs = self.topk_topp_sampler(
             logits,
-            sampling_metadata.generators,
-            sampling_metadata.top_k,
-            sampling_metadata.top_p,
+            sampling_metadata,
         )
 
         if greedy_sampled is None:

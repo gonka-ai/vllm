@@ -3,7 +3,7 @@
 # Datastructures defining a GPU input batch
 
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, Optional, cast
 
 import numpy as np
 import torch
@@ -27,6 +27,11 @@ from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.validation import EnforcedTokens
 
+if TYPE_CHECKING:
+    from vllm.v1.sample.deterministic_utils import Sha256CounterRNG
+
+_SAMPLING_EPS = 1e-5
+
 @dataclass
 class CachedRequestState:
     req_id: str
@@ -45,6 +50,10 @@ class CachedRequestState:
 
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
+
+    # Deterministic RNG for cross-platform reproducible sampling (validation)
+    # Used when VLLM_DETERMINISTIC_SAMPLING=1
+    deterministic_rng: Optional["Sha256CounterRNG"] = None
 
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
@@ -219,6 +228,9 @@ class InputBatch:
         # generator should not be included in the dictionary.
         self.generators: dict[int, torch.Generator] = {}
 
+        # req_index -> deterministic_rng (for VLLM_DETERMINISTIC_SAMPLING)
+        self.deterministic_rngs: dict[int, "Sha256CounterRNG"] = {}
+
         self.num_logprobs: dict[str, int] = {}
         # NOTE(rob): num_prompt_logprobs only includes reqs
         # that are currently in the prefill phase.
@@ -383,6 +395,10 @@ class InputBatch:
             if request.generator is not None:
                 self.generators[req_index] = request.generator
 
+            # Handle deterministic RNG (for VLLM_DETERMINISTIC_SAMPLING)
+            if request.deterministic_rng is not None:
+                self.deterministic_rngs[req_index] = request.deterministic_rng
+
             if sampling_params.logprobs is not None:
                 self.num_logprobs[req_id] = (
                     self.vocab_size
@@ -500,6 +516,7 @@ class InputBatch:
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
+        self.deterministic_rngs.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
@@ -560,6 +577,9 @@ class InputBatch:
         self.token_ids_cpu[i2, ...] = tmp
 
         self.is_token_ids[[i1, i2], ...] = self.is_token_ids[[i2, i1], ...]
+
+        swap_dict_values(self.generators, i1, i2)
+        swap_dict_values(self.deterministic_rngs, i1, i2)
 
         # Swap prompt embeddings if they exist
         embeds_i1 = self.req_prompt_embeds.get(i1)
@@ -744,6 +764,12 @@ class InputBatch:
             if generator is not None:
                 self.generators[empty_index] = generator
 
+            # Handle deterministic RNG (for VLLM_DETERMINISTIC_SAMPLING)
+            deterministic_rng = self.deterministic_rngs.pop(last_req_index,
+                                                            None)
+            if deterministic_rng is not None:
+                self.deterministic_rngs[empty_index] = deterministic_rng
+
             # TODO convert these to LogitsProcessors
             if self.allowed_token_ids_mask_cpu_tensor is not None:
                 self.allowed_token_ids_mask_cpu_tensor[empty_index] = (
@@ -867,6 +893,7 @@ class InputBatch:
             top_p=None if self.no_top_p else self.top_p[:num_reqs],
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
             generators=self.generators,
+            deterministic_rngs=self.deterministic_rngs,
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
             frequency_penalties=self.frequency_penalties[:num_reqs],
