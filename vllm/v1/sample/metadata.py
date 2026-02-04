@@ -29,12 +29,6 @@ class SamplingMetadata:
 
     generators: dict[int, torch.Generator]
 
-    # Deterministic RNGs for cross-platform reproducible sampling (validation)
-    # When VLLM_DETERMINISTIC_SAMPLING=1, this contains Sha256CounterRNG
-    # instances keyed by request index
-    deterministic_rngs: "dict[int, Sha256CounterRNG]" = field(
-        default_factory=dict)
-
     # None means no logprobs, 0 means sampled token logprobs only
     max_num_logprobs: int | None
 
@@ -58,3 +52,9 @@ class SamplingMetadata:
 
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
+
+    # Deterministic RNGs for cross-platform reproducible sampling (validation)
+    # When VLLM_DETERMINISTIC_SAMPLING=1, this contains Sha256CounterRNG
+    # instances keyed by request index
+    deterministic_rngs: "dict[int, Sha256CounterRNG]" = field(
+        default_factory=dict)

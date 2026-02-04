@@ -49,6 +49,14 @@ class Sha256CounterRNG:
         return (x >> 11) * (1.0 / (1 << 53))
 
 
+def iter_u64(seed: str, count: int) -> List[int]:
+    """
+    Return a list of `count` u64 values from a fresh RNG seeded with `seed`.
+    """
+    rng = Sha256CounterRNG.from_seed_string(seed)
+    return [rng.next_u64() for _ in range(count)]
+
+
 def uint64_below(rng: Sha256CounterRNG, n: int) -> int:
     """
     Unbiased draw in [0, n) from 64-bit uniform values via rejection sampling.
