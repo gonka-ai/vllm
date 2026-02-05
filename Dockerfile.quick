@@ -1,4 +1,4 @@
-FROM ghcr.io/gonka-ai/vllm:v0.9.1
+FROM ghcr.io/gonka-ai/vllm:v0.9.1-poc-v2-post3-blackwell-sm120-fp8-alpha1
 
 ENV VLLM_USE_V1=0
 
@@ -6,6 +6,9 @@ ENV VLLM_USE_V1=0
 COPY ./vllm /tmp/vllm-src
 
 RUN python3 -m pip uninstall nvidia-nccl-cu12 -y && python3 -m pip install nvidia-nccl-cu12==2.26.2.post1
+
+# Upgrade Triton to 3.6.0 for SM120 (Blackwell) MoE kernel support
+RUN python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu128 --pre "pytorch_triton>=3.6.0"
 
 # Merge only .py files into existing vllm package (preserves .so files)
 RUN cd /tmp/vllm-src \
