@@ -445,6 +445,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         else:
             self.rocm_aiter_fused_experts = None  # type: ignore
 
+        # SM120 (Blackwell) fallback: Triton MoE kernels crash on SM120
+        # due to TritonGPUAccelerateMatmul MLIR pass bug
+        self.use_sm120_torch_fallback = False
+        cap = current_platform.get_device_capability()
+        if cap is not None and cap[0] == 12:  # SM120 (Blackwell)
+            logger.warning_once(
+                "SM120 detected: Using PyTorch MoE fallback "
+                "(Triton MoE not yet supported on Blackwell)"
+            )
+            from .moe_torch_iterative import fused_moe as torch_fused_moe
+            self.torch_fused_moe = torch_fused_moe
+            self.use_sm120_torch_fallback = True
+
     def select_gemm_impl(self, prepare_finalize: FusedMoEPrepareAndFinalize,
                          moe: Optional[MoEConfig]):
 
@@ -612,6 +625,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
+
+        # SM120 fallback to PyTorch iterative MoE
+        if self.use_sm120_torch_fallback:
+            return self.torch_fused_moe(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                gating_output=router_logits,
+                topk=top_k,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                renormalize=renormalize,
+            )
 
         if self.rocm_aiter_moe_enabled:
             assert expert_map is None
