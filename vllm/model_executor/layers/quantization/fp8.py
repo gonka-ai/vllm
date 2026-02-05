@@ -470,6 +470,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             block_shape=self.quant_config.weight_block_size,
             allow_deep_gemm=self.allow_deep_gemm)
 
+        # SM120 (Blackwell) fallback: Triton MoE kernels crash on SM120
+        # due to TritonGPUAccelerateMatmul MLIR pass bug
+        self.use_sm120_torch_fallback = False
+        cap = current_platform.get_device_capability()
+        if cap is not None and cap[0] == 12:  # SM120 (Blackwell)
+            logger.warning_once(
+                "SM120 detected: Using PyTorch MoE fallback for FP8 "
+                "(Triton MoE not yet supported on Blackwell)"
+            )
+            from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
+                fused_moe as torch_fused_moe)
+            self.torch_fused_moe = torch_fused_moe
+            self.use_sm120_torch_fallback = True
+
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
@@ -839,6 +853,19 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
         )
+
+        # SM120 fallback to PyTorch iterative MoE (no FP8 support, dequantize)
+        if self.use_sm120_torch_fallback:
+            return self.torch_fused_moe(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                gating_output=router_logits,
+                topk=top_k,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                renormalize=renormalize,
+            )
 
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
