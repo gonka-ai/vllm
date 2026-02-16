@@ -256,6 +256,11 @@ class GrammarConfig:
                 tokenizer_data=tokenizer_data,
             )
         elif guided_params.regex:
+            try:
+                xgr.Grammar.from_regex(guided_params.regex)
+            except RuntimeError as err:
+                raise ValueError(str(err)) from err
+
             return cls(
                 regex_str=guided_params.regex,
                 tokenizer_hash=tokenizer_hash,
