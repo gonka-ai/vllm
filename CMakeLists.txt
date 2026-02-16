@@ -288,6 +288,22 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
   FetchContent_MakeAvailable(cutlass)
 
+  # Fetch CUTLASS v4.x for SM120 support (has Sm120BlockwiseScaleConfig)
+  # Only fetch source - do NOT run MakeAvailable to avoid duplicate target names
+  FetchContent_Declare(
+      cutlass_v4
+      GIT_REPOSITORY https://github.com/nvidia/cutlass.git
+      GIT_TAG v4.0.0
+      GIT_PROGRESS TRUE
+      GIT_SHALLOW TRUE
+  )
+  FetchContent_GetProperties(cutlass_v4)
+  if(NOT cutlass_v4_POPULATED)
+    FetchContent_Populate(cutlass_v4)
+  endif()
+  set(CUTLASS_V4_INCLUDE_DIR ${cutlass_v4_SOURCE_DIR}/include)
+  set(CUTLASS_V4_TOOLS_UTIL_INCLUDE_DIR ${cutlass_v4_SOURCE_DIR}/tools/util/include)
+
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
@@ -421,8 +437,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 
   # The cutlass_scaled_mm kernels for Blackwell (c3x, i.e. CUTLASS 3.x) require
-  # CUDA 12.8 or later
-  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a;12.0a" "${CUDA_ARCHS}")
+  # CUDA 12.8 or later (SM100/SM101 only, SM120 handled separately with CUTLASS v4.x)
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND SCALED_MM_ARCHS)
     set(SRCS
       "csrc/quantization/cutlass_w8a8/scaled_mm_c3x_sm100.cu"
@@ -445,6 +461,41 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                      "Blackwell.")
     else()
       message(STATUS "Not building scaled_mm_c3x_100 as no compatible archs found "
+                     "in CUDA target architectures")
+    endif()
+  endif()
+
+  # SM120 kernels require CUTLASS v4.x (has Sm120BlockwiseScaleConfig)
+  cuda_archs_loose_intersection(SCALED_MM_SM120_ARCHS "12.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_SM120_ARCHS)
+    set(SM120_SRCS
+      "csrc/quantization/cutlass_w8a8/scaled_mm_c3x_sm120.cu"
+      "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm120_fp8.cu"
+      "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_blockwise_sm120_fp8.cu"
+    )
+    
+    # SM120 uses CUTLASS v4.x includes
+    set_source_files_properties(
+      ${SM120_SRCS}
+      PROPERTIES
+      INCLUDE_DIRECTORIES "${CUTLASS_V4_INCLUDE_DIR};${CUTLASS_V4_TOOLS_UTIL_INCLUDE_DIR};${CMAKE_SOURCE_DIR}/csrc"
+    )
+    
+    set_gencode_flags_for_srcs(
+      SRCS "${SM120_SRCS}"
+      CUDA_ARCHS "${SCALED_MM_SM120_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SM120_SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_SM120=1")
+    list(APPEND SCALED_MM_3X_ARCHS "${SCALED_MM_SM120_ARCHS}")
+    message(STATUS "Building scaled_mm_c3x_sm120 with CUTLASS v4.x for archs: ${SCALED_MM_SM120_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_SM120_ARCHS)
+      message(STATUS "Not building scaled_mm_c3x_sm120 as CUDA Compiler version is "
+                     "not >= 12.8, we recommend upgrading to CUDA 12.8 or "
+                     "later if you intend on running FP8 quantized models on "
+                     "SM120 (RTX 50xx).")
+    else()
+      message(STATUS "Not building scaled_mm_c3x_sm120 as no compatible archs found "
                      "in CUDA target architectures")
     endif()
   endif()
