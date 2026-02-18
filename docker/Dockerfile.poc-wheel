@@ -1,0 +1,109 @@
+# Build from precompiled vLLM wheel + PoC patches.
+#
+# Installs vLLM from PyPI (precompiled wheel with C extensions),
+# then overlays PoC Python patches. No C compilation needed.
+# Use when you don't have a pre-built vLLM Docker image.
+#
+# Build time: ~10-15 min (downloads only, no compilation).
+#
+# Usage:
+#   docker build -f docker/Dockerfile.poc-wheel .
+#
+# For different CUDA versions:
+#   docker build -f docker/Dockerfile.poc-wheel \
+#     --build-arg CUDA_VERSION=12.8.1 .
+
+ARG CUDA_VERSION=12.9.1
+ARG PYTHON_VERSION=3.12
+ARG VLLM_VERSION=0.15.1
+ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
+
+FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04
+
+ARG CUDA_VERSION
+ARG PYTHON_VERSION
+ARG VLLM_VERSION
+ARG PYTORCH_CUDA_INDEX_BASE_URL
+
+ENV DEBIAN_FRONTEND=noninteractive
+WORKDIR /vllm-workspace
+
+# Install Python and minimal system dependencies
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        software-properties-common \
+        curl \
+        python3-pip \
+    && for i in 1 2 3; do \
+        add-apt-repository -y ppa:deadsnakes/ppa && break || \
+        { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
+    done \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-dev \
+        python${PYTHON_VERSION}-venv \
+        libibverbs-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && python3 -m pip install uv \
+    && python3 --version && python3 -m pip --version
+
+# Install CUDA development tools for runtime JIT compilation (FlashInfer)
+RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        cuda-nvcc-${CUDA_VERSION_DASH} \
+        cuda-cudart-${CUDA_VERSION_DASH} \
+        cuda-nvrtc-${CUDA_VERSION_DASH} \
+        cuda-cuobjdump-${CUDA_VERSION_DASH} \
+        libcurand-dev-${CUDA_VERSION_DASH} \
+        libcublas-${CUDA_VERSION_DASH} \
+        libnccl-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_LINK_MODE=copy
+
+# Ensure CUDA compatibility library is loaded
+RUN echo "/usr/local/cuda-$(echo "$CUDA_VERSION" | cut -d. -f1,2)/compat/" \
+    > /etc/ld.so.conf.d/00-cuda-compat.conf && ldconfig
+
+# Install vLLM from PyPI precompiled wheel (includes PyTorch + all deps)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system "vllm==${VLLM_VERSION}" \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+# Install scipy (required by vllm.poc.data for binomtest)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system 'scipy>=1.13.0'
+
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+ENV VLLM_USAGE_SOURCE=production-docker-image
+
+# ============================================================
+# Overlay PoC patches onto installed vLLM
+# ============================================================
+ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+
+# New module: vllm/poc/ (12 files)
+COPY vllm/poc/ ${SITE_PACKAGES}/vllm/poc/
+
+# New module: vllm/validation.py
+COPY vllm/validation.py ${SITE_PACKAGES}/vllm/validation.py
+
+# Patched vLLM files
+COPY vllm/sampling_params.py ${SITE_PACKAGES}/vllm/sampling_params.py
+COPY vllm/v1/sample/metadata.py ${SITE_PACKAGES}/vllm/v1/sample/metadata.py
+COPY vllm/v1/sample/sampler.py ${SITE_PACKAGES}/vllm/v1/sample/sampler.py
+COPY vllm/v1/worker/gpu_input_batch.py ${SITE_PACKAGES}/vllm/v1/worker/gpu_input_batch.py
+COPY vllm/entrypoints/openai/api_server.py ${SITE_PACKAGES}/vllm/entrypoints/openai/api_server.py
+COPY vllm/entrypoints/openai/chat_completion/protocol.py ${SITE_PACKAGES}/vllm/entrypoints/openai/chat_completion/protocol.py
+COPY vllm/entrypoints/openai/chat_completion/serving.py ${SITE_PACKAGES}/vllm/entrypoints/openai/chat_completion/serving.py
+
+ENTRYPOINT ["vllm", "serve"]
