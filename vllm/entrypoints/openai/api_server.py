@@ -112,6 +112,11 @@ async def lifespan(app: FastAPI):
         finally:
             if task is not None:
                 task.cancel()
+            try:
+                from vllm.poc.generate_queue import clear_queue as clear_poc_queue
+                await clear_poc_queue()
+            except Exception as e:
+                logger.debug(f"Error clearing PoC queue: {e}")
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state
@@ -529,6 +534,9 @@ def build_app(args: Namespace) -> FastAPI:
 
     register_sagemaker_routes(router)
     app.include_router(router)
+
+    from vllm.poc.routes import router as poc_router
+    app.include_router(poc_router)
 
     app.root_path = args.root_path
 
