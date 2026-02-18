@@ -3,6 +3,7 @@ cachetools
 psutil
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
+scipy >= 1.13.0 # Required for PoC validation (binomtest)
 requests >= 2.26.0
 tqdm
 blake3
