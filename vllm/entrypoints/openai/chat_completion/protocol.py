@@ -8,6 +8,8 @@ import time
 from dataclasses import replace
 from typing import Annotated, Any, ClassVar, Literal
 
+from vllm.validation import EnforcedTokens
+
 import torch
 from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
@@ -344,6 +346,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
+    )
+
+    enforced_tokens: EnforcedTokens | None = Field(
+        default=None,
+        description="Enforced token sequence for validation (gonka-style).",
+    )
+    enforced_str: str | None = Field(
+        default=None,
+        description="Enforced output string for validation.",
     )
 
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(

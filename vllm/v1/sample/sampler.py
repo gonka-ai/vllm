@@ -102,6 +102,14 @@ class Sampler(nn.Module):
         # return int32 (while PyTorch argmax and topk return int64).
         sampled = sampled.long()
 
+        # Override with enforced token ids where specified (gonka PoC
+        # validation replay). -1 means no enforcement for that request.
+        if sampling_metadata.enforced_next_token_ids is not None:
+            enforced = sampling_metadata.enforced_next_token_ids
+            mask = enforced != -1
+            if mask.any():
+                sampled[mask] = enforced[mask]
+
         if num_logprobs is None:
             logprobs_tensors = None
         elif num_logprobs == -1:
