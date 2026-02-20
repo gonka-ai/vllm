@@ -75,11 +75,13 @@ def maybe_backend_fallback(
               and grammar_is_likely_lark(guided_params.grammar)):
             try:
                 convert_lark_to_gbnf(guided_params.grammar)
-            except Exception:
-                fallback_or_error(
-                    guided_params,
-                    "xgrammar does not support Lark grammars and the "
-                    "grammar failed to convert to GBNF.", "outlines")
+            except Exception as e:
+                raise ValueError(
+                    "Failed to convert the grammar from Lark to GBNF. "
+                    "Please either use GBNF grammar directly or specify "
+                    "--guided-decoding-backend=outlines with a compatible "
+                    f"grammar.\nConversion error: {e}"
+                ) from e
 
         # If the xgrammar module cannot be imported successfully,
         # we should still allow users to use guided decoding with a fallback.
