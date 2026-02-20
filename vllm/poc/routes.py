@@ -27,6 +27,12 @@ POC_RPC_TIMEOUT_MS = int(os.environ.get("POC_RPC_TIMEOUT_MS", "60000"))
 POC_BATCH_SIZE_DEFAULT = int(os.environ.get("POC_BATCH_SIZE_DEFAULT", "32"))
 
 _poc_tasks: Dict[int, Dict[str, Any]] = {}
+_poc_generation_active: bool = False
+
+
+def is_poc_generation_active() -> bool:
+    """Check if POC generation is active (for use by chat endpoint to reject requests)."""
+    return _poc_generation_active
 
 
 # =============================================================================
@@ -349,6 +355,7 @@ async def _generation_loop(
 
 @router.post("/init/generate")
 async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
+    global _poc_generation_active
     logger.info(f"PoC /init/generate: {body.block_hash}, {body.block_height}, {body.public_key}, {body.node_id}, {body.node_count}, {body.group_id}, {body.n_groups}, {body.batch_size}, {body.params}, {body.url}")
     check_params_match(request, body.params)
     engine_client = await get_engine_client(request)
@@ -395,6 +402,7 @@ async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
         "stats": stats,
     }
     
+    _poc_generation_active = True
     return {"status": "OK", "pow_status": {"status": "GENERATING"}}
 
 
@@ -538,9 +546,11 @@ async def get_status(request: Request) -> dict:
 
 @router.post("/stop")
 async def stop_round(request: Request) -> dict:
+    global _poc_generation_active
     app_id = id(request.app)
     
     await _cancel_poc_tasks(app_id)
     await clear_queue()
     
+    _poc_generation_active = False
     return {"status": "OK", "pow_status": {"status": "STOPPED"}}

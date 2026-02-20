@@ -1,4 +1,5 @@
-"""Tests for PoC+Chat coexistence (chat-priority gating)."""
+"""Tests for PoC+Chat coexistence and priority modes."""
+import os
 import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,118 +24,202 @@ def mock_engine_client():
     return client
 
 
-class TestChatPriorityGating:
-    """Tests for chat-priority gating in PoC GPU actions."""
+class TestPoCPriorityMode:
+    """Tests for default PoC priority mode (PoC has priority, aborts chat)."""
+    
+    def test_generate_artifacts_aborts_chat_requests(self):
+        """Test that PoC aborts active chat requests by default."""
+        with patch.dict(os.environ, {"POC_ENABLE_CHAT_PRIORITY": "0"}):
+            import importlib
+            import vllm.engine.multiprocessing.engine as engine_module
+            importlib.reload(engine_module)
+            from vllm.engine.multiprocessing.engine import MQLLMEngine
+            from vllm.poc.data import Artifact
+            
+            mock_llm_engine = MagicMock()
+            mock_scheduler = MagicMock()
+            mock_seq_group = MagicMock()
+            mock_seq_group.request_id = "req-123"
+            mock_scheduler.waiting = [mock_seq_group]
+            mock_scheduler.running = []
+            mock_scheduler.swapped = []
+            mock_llm_engine.scheduler = [mock_scheduler]
+            
+            mq_engine = MagicMock()
+            mq_engine.engine = mock_llm_engine
+            mq_engine._engine_step_in_progress = False
+            mq_engine._abort_all_chat_requests = MQLLMEngine._abort_all_chat_requests.__get__(mq_engine, MQLLMEngine)
+            
+            mock_manager = MagicMock()
+            mock_manager.generate_artifacts.return_value = [
+                Artifact(nonce=0, vector_b64="AAA="),
+            ]
+            mq_engine._poc_manager = mock_manager
+            mq_engine._get_poc_manager = lambda: mock_manager
+            
+            result = MQLLMEngine._process_poc_action(mq_engine, "generate_artifacts", {
+                "nonces": [0],
+                "block_hash": "hash",
+                "public_key": "key",
+                "seq_len": 256,
+                "k_dim": 12,
+            })
+            
+            mock_llm_engine.abort_request.assert_called_with("req-123")
+            mock_manager.generate_artifacts.assert_called_once()
+            assert "skipped" not in result or result.get("skipped") is not True
+    
+    def test_generate_artifacts_skips_when_engine_step_in_progress(self):
+        """Test PoC skips when engine.step() is running (safety check preserved)."""
+        with patch.dict(os.environ, {"POC_ENABLE_CHAT_PRIORITY": "0"}):
+            import importlib
+            import vllm.engine.multiprocessing.engine as engine_module
+            importlib.reload(engine_module)
+            from vllm.engine.multiprocessing.engine import MQLLMEngine
+            
+            mock_llm_engine = MagicMock()
+            mock_llm_engine.scheduler = []
+            
+            mq_engine = MagicMock()
+            mq_engine.engine = mock_llm_engine
+            mq_engine._engine_step_in_progress = True
+            mq_engine._abort_all_chat_requests = MQLLMEngine._abort_all_chat_requests.__get__(mq_engine, MQLLMEngine)
+            
+            mock_manager = MagicMock()
+            mq_engine._poc_manager = mock_manager
+            mq_engine._get_poc_manager = lambda: mock_manager
+            
+            result = MQLLMEngine._process_poc_action(mq_engine, "generate_artifacts", {
+                "nonces": [0, 1, 2],
+            })
+            
+            assert result["skipped"] is True
+            assert result["reason"] == "engine_step_in_progress"
+            mock_manager.generate_artifacts.assert_not_called()
+
+
+class TestLegacyChatPriorityMode:
+    """Tests for legacy chat-priority mode (POC_ENABLE_CHAT_PRIORITY=1)."""
     
     def test_generate_artifacts_skips_when_pending_input(self):
         """Test generate_artifacts returns skip when there's pending input (chat waiting)."""
-        from vllm.engine.multiprocessing.engine import MQLLMEngine
-        
-        mock_llm_engine = MagicMock()
-        
-        mq_engine = MagicMock()
-        mq_engine.engine = mock_llm_engine
-        mq_engine._engine_step_in_progress = False
-        mq_engine.input_socket.poll.return_value = 1  # Pending input
-        
-        mock_manager = MagicMock()
-        mq_engine._poc_manager = mock_manager
-        mq_engine._get_poc_manager = lambda: mock_manager
-        
-        result = MQLLMEngine._process_poc_action(mq_engine, "generate_artifacts", {
-            "nonces": [0, 1, 2],
-        })
-        
-        assert result["skipped"] is True
-        assert result["reason"] == "pending_input"
-        mock_manager.generate_artifacts.assert_not_called()
+        with patch.dict(os.environ, {"POC_ENABLE_CHAT_PRIORITY": "1"}):
+            import importlib
+            import vllm.engine.multiprocessing.engine as engine_module
+            importlib.reload(engine_module)
+            from vllm.engine.multiprocessing.engine import MQLLMEngine
+            
+            mock_llm_engine = MagicMock()
+            
+            mq_engine = MagicMock()
+            mq_engine.engine = mock_llm_engine
+            mq_engine._engine_step_in_progress = False
+            mq_engine.input_socket.poll.return_value = 1  # Pending input
+            
+            mock_manager = MagicMock()
+            mq_engine._poc_manager = mock_manager
+            mq_engine._get_poc_manager = lambda: mock_manager
+            
+            result = MQLLMEngine._process_poc_action(mq_engine, "generate_artifacts", {
+                "nonces": [0, 1, 2],
+            })
+            
+            assert result["skipped"] is True
+            assert result["reason"] == "pending_input"
+            mock_manager.generate_artifacts.assert_not_called()
     
     def test_generate_artifacts_skips_when_engine_step_in_progress(self):
         """Test generate_artifacts returns skip when _engine_step_in_progress is True."""
-        from vllm.engine.multiprocessing.engine import MQLLMEngine
-        
-        mock_llm_engine = MagicMock()
-        
-        mq_engine = MagicMock()
-        mq_engine.engine = mock_llm_engine
-        mq_engine._engine_step_in_progress = True
-        mq_engine.input_socket.poll.return_value = 0  # No pending input
-        
-        mock_manager = MagicMock()
-        mq_engine._poc_manager = mock_manager
-        mq_engine._get_poc_manager = lambda: mock_manager
-        
-        result = MQLLMEngine._process_poc_action(mq_engine, "generate_artifacts", {
-            "nonces": [0, 1, 2],
-        })
-        
-        assert result["skipped"] is True
-        assert result["reason"] == "engine_step_in_progress"
-        mock_manager.generate_artifacts.assert_not_called()
+        with patch.dict(os.environ, {"POC_ENABLE_CHAT_PRIORITY": "1"}):
+            import importlib
+            import vllm.engine.multiprocessing.engine as engine_module
+            importlib.reload(engine_module)
+            from vllm.engine.multiprocessing.engine import MQLLMEngine
+            
+            mock_llm_engine = MagicMock()
+            
+            mq_engine = MagicMock()
+            mq_engine.engine = mock_llm_engine
+            mq_engine._engine_step_in_progress = True
+            mq_engine.input_socket.poll.return_value = 0  # No pending input
+            
+            mock_manager = MagicMock()
+            mq_engine._poc_manager = mock_manager
+            mq_engine._get_poc_manager = lambda: mock_manager
+            
+            result = MQLLMEngine._process_poc_action(mq_engine, "generate_artifacts", {
+                "nonces": [0, 1, 2],
+            })
+            
+            assert result["skipped"] is True
+            assert result["reason"] == "engine_step_in_progress"
+            mock_manager.generate_artifacts.assert_not_called()
     
     def test_generate_artifacts_skips_when_chat_unfinished(self):
         """Test generate_artifacts returns skip when chat has unfinished requests."""
-        from vllm.engine.multiprocessing.engine import MQLLMEngine
-        
-        mock_llm_engine = MagicMock()
-        mock_llm_engine.has_unfinished_requests.return_value = True
-        
-        mq_engine = MagicMock()
-        mq_engine.engine = mock_llm_engine
-        mq_engine._engine_step_in_progress = False
-        mq_engine.input_socket.poll.return_value = 0  # No pending input
-        
-        mock_manager = MagicMock()
-        mq_engine._poc_manager = mock_manager
-        mq_engine._get_poc_manager = lambda: mock_manager
-        
-        result = MQLLMEngine._process_poc_action(mq_engine, "generate_artifacts", {
-            "nonces": [0, 1, 2],
-        })
-        
-        assert result["skipped"] is True
-        assert result["reason"] == "chat_unfinished"
-        mock_manager.generate_artifacts.assert_not_called()
+        with patch.dict(os.environ, {"POC_ENABLE_CHAT_PRIORITY": "1"}):
+            import importlib
+            import vllm.engine.multiprocessing.engine as engine_module
+            importlib.reload(engine_module)
+            from vllm.engine.multiprocessing.engine import MQLLMEngine
+            
+            mock_llm_engine = MagicMock()
+            mock_llm_engine.has_unfinished_requests.return_value = True
+            
+            mq_engine = MagicMock()
+            mq_engine.engine = mock_llm_engine
+            mq_engine._engine_step_in_progress = False
+            mq_engine.input_socket.poll.return_value = 0  # No pending input
+            
+            mock_manager = MagicMock()
+            mq_engine._poc_manager = mock_manager
+            mq_engine._get_poc_manager = lambda: mock_manager
+            
+            result = MQLLMEngine._process_poc_action(mq_engine, "generate_artifacts", {
+                "nonces": [0, 1, 2],
+            })
+            
+            assert result["skipped"] is True
+            assert result["reason"] == "chat_unfinished"
+            mock_manager.generate_artifacts.assert_not_called()
     
     def test_generate_artifacts_proceeds_when_all_checks_pass(self):
         """Test generate_artifacts proceeds when no pending input, not in step, and no chat."""
-        from vllm.engine.multiprocessing.engine import MQLLMEngine
-        from vllm.poc.data import Artifact
-        
-        mock_llm_engine = MagicMock()
-        mock_llm_engine.has_unfinished_requests.return_value = False
-        
-        mq_engine = MagicMock()
-        mq_engine.engine = mock_llm_engine
-        mq_engine._engine_step_in_progress = False
-        mq_engine.input_socket.poll.return_value = 0  # No pending input
-        
-        mock_manager = MagicMock()
-        mock_manager.generate_artifacts.return_value = [
-            Artifact(nonce=0, vector_b64="AAA="),
-            Artifact(nonce=1, vector_b64="BBB="),
-        ]
-        mq_engine._poc_manager = mock_manager
-        mq_engine._get_poc_manager = lambda: mock_manager
-        
-        result = MQLLMEngine._process_poc_action(mq_engine, "generate_artifacts", {
-            "nonces": [0, 1],
-            "block_hash": "hash",
-            "public_key": "key",
-            "seq_len": 256,
-            "k_dim": 12,
-        })
-        
-        # Should call _prepare_for_poc_gpu_work before generate_artifacts
-        mq_engine._prepare_for_poc_gpu_work.assert_called_once()
-        mock_manager.generate_artifacts.assert_called_once()
-        assert "skipped" not in result or result.get("skipped") is not True
-        assert len(result["artifacts"]) == 2
-
-
-# Note: AsyncLLMEngine (in-process mode) tests are skipped because _AsyncLLMEngine
-# is difficult to mock correctly due to class proxy behavior at module load time.
-# The main PoC behavior is tested via MQLLMEngine (MP mode) tests above.
+        with patch.dict(os.environ, {"POC_ENABLE_CHAT_PRIORITY": "1"}):
+            import importlib
+            import vllm.engine.multiprocessing.engine as engine_module
+            importlib.reload(engine_module)
+            from vllm.engine.multiprocessing.engine import MQLLMEngine
+            from vllm.poc.data import Artifact
+            
+            mock_llm_engine = MagicMock()
+            mock_llm_engine.has_unfinished_requests.return_value = False
+            
+            mq_engine = MagicMock()
+            mq_engine.engine = mock_llm_engine
+            mq_engine._engine_step_in_progress = False
+            mq_engine.input_socket.poll.return_value = 0  # No pending input
+            
+            mock_manager = MagicMock()
+            mock_manager.generate_artifacts.return_value = [
+                Artifact(nonce=0, vector_b64="AAA="),
+                Artifact(nonce=1, vector_b64="BBB="),
+            ]
+            mq_engine._poc_manager = mock_manager
+            mq_engine._get_poc_manager = lambda: mock_manager
+            
+            result = MQLLMEngine._process_poc_action(mq_engine, "generate_artifacts", {
+                "nonces": [0, 1],
+                "block_hash": "hash",
+                "public_key": "key",
+                "seq_len": 256,
+                "k_dim": 12,
+            })
+            
+            mq_engine._prepare_for_poc_gpu_work.assert_called_once()
+            mock_manager.generate_artifacts.assert_called_once()
+            assert "skipped" not in result or result.get("skipped") is not True
+            assert len(result["artifacts"]) == 2
 
 
 class TestGenerationLoopBackoff:

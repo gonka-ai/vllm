@@ -3,6 +3,7 @@
 
 import asyncio
 import copy
+import os
 import time
 import weakref
 from functools import partial
@@ -38,6 +39,7 @@ from vllm.utils import Device, weak_bind
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
+POC_ENABLE_CHAT_PRIORITY = os.environ.get("POC_ENABLE_CHAT_PRIORITY", "0").lower() in ("1", "true", "yes")
 
 
 class AsyncEngineDeadError(RuntimeError):
@@ -1181,6 +1183,16 @@ class AsyncLLMEngine(EngineClient):
     async def add_lora(self, lora_request: LoRARequest) -> None:
         self.engine.add_lora(lora_request)
 
+    def _abort_all_chat_requests(self) -> int:
+        """Abort all active chat requests. Returns count of aborted requests."""
+        aborted = 0
+        for scheduler in self.engine.scheduler:
+            for queue in [scheduler.waiting, scheduler.running, scheduler.swapped]:
+                for seq_group in list(queue):
+                    self.engine.abort_request(seq_group.request_id)
+                    aborted += 1
+        return aborted
+
     async def poc_request(self, action: str, payload: dict,
                           timeout_ms: Optional[int] = None) -> dict:
         """Send a PoC (Proof of Compute) request to the engine.
@@ -1201,12 +1213,16 @@ class AsyncLLMEngine(EngineClient):
         
         manager = self._poc_manager
         
-        # Chat-priority: skip if chat has unfinished requests
-        if self.engine.has_unfinished_requests():
-            return {
-                "artifacts": [],
-                "skipped": True,
-            }
+        if POC_ENABLE_CHAT_PRIORITY:
+            # Legacy behavior: chat has priority, PoC yields
+            if self.engine.has_unfinished_requests():
+                return {"artifacts": [], "skipped": True}
+        else:
+            # Default: PoC has priority, abort active chat requests
+            aborted = self._abort_all_chat_requests()
+            if aborted > 0:
+                logger.info(f"PoC: aborted {aborted} chat requests")
+        
         from vllm.poc.data import Artifact
         artifacts = await asyncio.to_thread(
             manager.generate_artifacts,

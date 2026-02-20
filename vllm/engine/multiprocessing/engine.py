@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import pickle
 import signal
 from contextlib import contextmanager
@@ -40,6 +41,7 @@ from vllm.worker.model_runner_base import InputProcessingError
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 10000
+POC_ENABLE_CHAT_PRIORITY = os.environ.get("POC_ENABLE_CHAT_PRIORITY", "0").lower() in ("1", "true", "yes")
 HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 
@@ -423,6 +425,16 @@ class MQLLMEngine:
             logger.debug("Stopping remote worker execution loop for PoC GPU work")
             executor.stop_remote_worker_execution_loop()
 
+    def _abort_all_chat_requests(self) -> int:
+        """Abort all active chat requests. Returns count of aborted requests."""
+        aborted = 0
+        for scheduler in self.engine.scheduler:
+            for queue in [scheduler.waiting, scheduler.running, scheduler.swapped]:
+                for seq_group in list(queue):
+                    self.engine.abort_request(seq_group.request_id)
+                    aborted += 1
+        return aborted
+
     def _process_poc_action(self, action: str, payload: dict) -> dict:
         """Process a PoC action and return result.
         
@@ -434,28 +446,39 @@ class MQLLMEngine:
         
         manager = self._get_poc_manager()
         
-        # PoC coexistence: chat has priority over PoC GPU work
-        # Check 1: Skip if there's pending input (chat requests waiting)
-        if self.input_socket.poll(timeout=0) != 0:
-            return {
-                "artifacts": [],
-                "skipped": True,
-                "reason": "pending_input",
-            }
-        # Check 2: Skip if we're inside engine.step() (async callback path)
-        if self._engine_step_in_progress:
-            return {
-                "artifacts": [],
-                "skipped": True,
-                "reason": "engine_step_in_progress",
-            }
-        # Check 3: Skip if chat has unfinished requests (still processing)
-        if self.engine.has_unfinished_requests():
-            return {
-                "artifacts": [],
-                "skipped": True,
-                "reason": "chat_unfinished",
-            }
+        if POC_ENABLE_CHAT_PRIORITY:
+            # Legacy behavior: chat has priority, PoC yields
+            if self.input_socket.poll(timeout=0) != 0:
+                return {
+                    "artifacts": [],
+                    "skipped": True,
+                    "reason": "pending_input",
+                }
+            if self._engine_step_in_progress:
+                return {
+                    "artifacts": [],
+                    "skipped": True,
+                    "reason": "engine_step_in_progress",
+                }
+            if self.engine.has_unfinished_requests():
+                return {
+                    "artifacts": [],
+                    "skipped": True,
+                    "reason": "chat_unfinished",
+                }
+        else:
+            # Default: PoC has priority, abort active chat requests
+            aborted = self._abort_all_chat_requests()
+            if aborted > 0:
+                logger.info(f"PoC: aborted {aborted} chat requests")
+            # Safety: never run during engine.step() (GPU conflict)
+            if self._engine_step_in_progress:
+                return {
+                    "artifacts": [],
+                    "skipped": True,
+                    "reason": "engine_step_in_progress",
+                }
+        
         # Safe to proceed: stop remote worker loop if running (v0 TP deadlock fix)
         self._prepare_for_poc_gpu_work()
         from vllm.poc.data import Artifact
