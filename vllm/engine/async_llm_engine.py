@@ -3,7 +3,6 @@
 
 import asyncio
 import copy
-import os
 import time
 import weakref
 from functools import partial
@@ -36,10 +35,10 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, weak_bind
+from vllm.poc.state import is_poc_active, set_poc_active
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
-POC_ENABLE_CHAT_PRIORITY = os.environ.get("POC_ENABLE_CHAT_PRIORITY", "0").lower() in ("1", "true", "yes")
 
 
 class AsyncEngineDeadError(RuntimeError):
@@ -741,6 +740,17 @@ class AsyncLLMEngine(EngineClient):
         new_requests, aborted_requests = (
             self._request_tracker.get_new_and_aborted_requests())
 
+        if is_poc_active():
+            for new_request in new_requests:
+                self._request_tracker.process_exception(
+                    new_request["request_id"],
+                    RuntimeError("PoC generation in progress, request rejected"),
+                    verbose=self.log_requests,
+                )
+            if aborted_requests:
+                await self._engine_abort(aborted_requests)
+            return False
+
         for new_request in new_requests:
             # Add the request into the vLLM engine's waiting queue.
             try:
@@ -822,6 +832,11 @@ class AsyncLLMEngine(EngineClient):
                     for ve in range(pipeline_parallel_size)
                 ]
                 has_requests_in_progress = [True] * pipeline_parallel_size
+
+            if is_poc_active():
+                # Yield while PoC is active so chat generation does not start.
+                await asyncio.sleep(0)
+                continue
 
             # Abort if iteration takes too long due to unrecoverable errors
             # (eg. NCCL timeouts).
@@ -1196,13 +1211,27 @@ class AsyncLLMEngine(EngineClient):
     async def poc_request(self, action: str, payload: dict,
                           timeout_ms: Optional[int] = None) -> dict:
         """Send a PoC (Proof of Compute) request to the engine.
-        
-        Only supports 'generate_artifacts' action. All PoC state (generation
-        loop, nonce counter, stats) is managed in the API layer.
+
+        Supported actions:
+          - ``start_session``       – mark PoC active and abort all chat requests.
+          - ``end_session``         – clear PoC active flag so chat resumes.
+          - ``generate_artifacts``  – run PoC forward pass.
         """
+        if action == "start_session":
+            set_poc_active(True)
+            aborted = self._abort_all_chat_requests()
+            if aborted > 0:
+                logger.info("PoC: aborted %d chat requests", aborted)
+            return {"ok": True}
+
+        if action == "end_session":
+            set_poc_active(False)
+            logger.info("PoC session ended")
+            return {"ok": True}
+
         if action != "generate_artifacts":
             raise ValueError(f"Unknown PoC action: {action}")
-        
+
         if not hasattr(self, '_poc_manager'):
             from vllm.poc.manager import PoCManager
             self._poc_manager = PoCManager(
@@ -1210,19 +1239,22 @@ class AsyncLLMEngine(EngineClient):
                 model_config=self.engine.model_config,
                 vllm_config=self.engine.vllm_config,
             )
-        
+
         manager = self._poc_manager
-        
-        if POC_ENABLE_CHAT_PRIORITY:
-            # Legacy behavior: chat has priority, PoC yields
-            if self.engine.has_unfinished_requests():
-                return {"artifacts": [], "skipped": True}
-        else:
-            # Default: PoC has priority, abort active chat requests
-            aborted = self._abort_all_chat_requests()
-            if aborted > 0:
-                logger.info(f"PoC: aborted {aborted} chat requests")
-        
+
+        # Always keep PoC active while generating artifacts.
+        set_poc_active(True)
+        # Always abort all chat requests to free up resources for PoC
+        aborted = self._abort_all_chat_requests()
+        if aborted > 0:
+            logger.info("PoC: aborted %d chat requests", aborted)
+        if self.engine.has_unfinished_requests():
+            return {
+                "artifacts": [],
+                "skipped": True,
+                "reason": "chat_unfinished",
+            }
+
         from vllm.poc.data import Artifact
         artifacts = await asyncio.to_thread(
             manager.generate_artifacts,

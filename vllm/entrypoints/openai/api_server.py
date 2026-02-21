@@ -36,7 +36,7 @@ from typing_extensions import assert_never
 
 import vllm.envs as envs
 
-from vllm.poc.routes import is_poc_generation_active
+from vllm.poc.state import is_poc_active
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
@@ -555,7 +555,7 @@ async def show_version():
 @load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
-    if is_poc_generation_active():
+    if is_poc_active():
         return JSONResponse(
             status_code=503,
             content={"error": {"message": "Service unavailable: POC generation in progress", "type": "service_unavailable"}}
@@ -599,7 +599,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 @with_cancellation
 @load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
-    if is_poc_generation_active():
+    if is_poc_active():
         return JSONResponse(
             status_code=503,
             content={"error": {"message": "Service unavailable: POC generation in progress", "type": "service_unavailable"}}
