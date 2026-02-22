@@ -448,7 +448,8 @@ class MQLLMEngine:
         for scheduler in self.engine.scheduler:
             for queue in [scheduler.waiting, scheduler.running, scheduler.swapped]:
                 for seq_group in list(queue):
-                    self.engine.abort_request(seq_group.request_id)
+                    group = self.engine.seq_id_to_seq_group.get(seq_group.request_id)
+                    self.engine.abort_request(group.group_id if group is not None else seq_group.request_id)
                     aborted += 1
         return aborted
 
