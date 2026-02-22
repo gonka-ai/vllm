@@ -14,7 +14,6 @@ from .config import PoCState
 from .data import Artifact, DEFAULT_DIST_THRESHOLD, DEFAULT_P_MISMATCH, DEFAULT_FRAUD_THRESHOLD
 from .callbacks import CallbackSender
 from .generate_queue import GenerateJob, get_queue, clear_queue, POC_MAX_QUEUED_NONCES
-from .state import is_poc_active, set_poc_active
 from .validation import run_validation
 
 logger = init_logger(__name__)
@@ -28,8 +27,12 @@ POC_RPC_TIMEOUT_MS = int(os.environ.get("POC_RPC_TIMEOUT_MS", "60000"))
 POC_BATCH_SIZE_DEFAULT = int(os.environ.get("POC_BATCH_SIZE_DEFAULT", "32"))
 
 _poc_tasks: Dict[int, Dict[str, Any]] = {}
+_poc_generation_active: bool = False
 
 
+def is_poc_generation_active() -> bool:
+    """Check if POC generation is active (for use by chat endpoint to reject requests)."""
+    return _poc_generation_active
 
 
 # =============================================================================
@@ -344,16 +347,6 @@ async def _generation_loop(
     except Exception as e:
         logger.error(f"PoC generation crashed: {e}", exc_info=True)
         raise
-    finally:
-        # Always clear the flag so chat endpoints are unblocked even
-        # if the loop crashes or is cancelled unexpectedly.
-        try:
-            await asyncio.shield(
-                engine_client.poc_request("end_session", {}, timeout_ms=5000))
-        except Exception:
-            set_poc_active(False)
-            pass
-        logger.info("PoC generation flag cleared")
 
 
 # =============================================================================
@@ -362,6 +355,7 @@ async def _generation_loop(
 
 @router.post("/init/generate")
 async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
+    global _poc_generation_active
     logger.info(f"PoC /init/generate: {body.block_hash}, {body.block_height}, {body.public_key}, {body.node_id}, {body.node_count}, {body.group_id}, {body.n_groups}, {body.batch_size}, {body.params}, {body.url}")
     check_params_match(request, body.params)
     engine_client = await get_engine_client(request)
@@ -370,11 +364,6 @@ async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
     
     if _is_generation_active(app_id):
         raise HTTPException(status_code=409, detail="Already generating")
-    
-    # Set the flag BEFORE creating the task so that any concurrent chat
-    # request hitting the middleware / endpoint guard is rejected
-    # immediately, with no race window.
-    await engine_client.poc_request("start_session", {}, timeout_ms=5000)
     
     await _cancel_poc_tasks(app_id)
     
@@ -399,7 +388,7 @@ async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
     if body.url:
         callback_sender = CallbackSender(body.url, stop_event, body.params.k_dim)
         callback_task = asyncio.create_task(callback_sender.run())
-
+    
     gen_task = asyncio.create_task(
         _generation_loop(engine_client, stop_event, callback_sender, config, stats)
     )
@@ -413,6 +402,7 @@ async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
         "stats": stats,
     }
     
+    _poc_generation_active = True
     return {"status": "OK", "pow_status": {"status": "GENERATING"}}
 
 
@@ -556,10 +546,11 @@ async def get_status(request: Request) -> dict:
 
 @router.post("/stop")
 async def stop_round(request: Request) -> dict:
+    global _poc_generation_active
     app_id = id(request.app)
     
     await _cancel_poc_tasks(app_id)
     await clear_queue()
     
-    set_poc_active(False)
+    _poc_generation_active = False
     return {"status": "OK", "pow_status": {"status": "STOPPED"}}

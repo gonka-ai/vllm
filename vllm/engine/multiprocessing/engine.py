@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import pickle
 import signal
 from contextlib import contextmanager
@@ -36,11 +37,11 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
 from vllm.worker.model_runner_base import InputProcessingError
-from vllm.poc.state import is_poc_active, set_poc_active
 
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 10000
+POC_ENABLE_CHAT_PRIORITY = os.environ.get("POC_ENABLE_CHAT_PRIORITY", "0").lower() in ("1", "true", "yes")
 HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 
@@ -238,12 +239,6 @@ class MQLLMEngine:
             # Handle any input from the client.
             self.handle_new_input()
 
-            # Skip inference while PoC generation is active – running
-            # engine.step() here would allocate KV-cache and compete
-            # with the PoC forward pass for GPU memory.
-            if is_poc_active():
-                continue
-
             # Engine step.
             request_outputs = self.engine_step()
 
@@ -323,18 +318,6 @@ class MQLLMEngine:
     def _handle_process_request(self, request: RPCProcessRequest):
         """Handle RPCProcessRequest by adding it to the LLMEngine."""
         request_id = request.request_id
-
-        # Reject chat/completion requests while PoC generation is active.
-        # This prevents new requests from being scheduled between
-        # consecutive PoC batches when the engine loop resumes.
-        if is_poc_active():
-            rpc_err = RPCError(
-                request_id=request_id,
-                is_engine_errored=False,
-                exception=RuntimeError(
-                    "PoC generation in progress, request rejected"))
-            self._send_outputs(rpc_err)
-            return
 
         if self._errored_with is not None:
             rpc_err = RPCError(request_id=request_id,
@@ -455,53 +438,48 @@ class MQLLMEngine:
 
     def _process_poc_action(self, action: str, payload: dict) -> dict:
         """Process a PoC action and return result.
-
-        Supported actions:
-          - ``start_session``       – mark PoC active and abort all chat requests.
-          - ``end_session``         – clear PoC active flag so chat resumes.
-          - ``generate_artifacts``  – run PoC forward pass.
+        
+        Only supports 'generate_artifacts' action. All PoC state (generation
+        loop, nonce counter, stats) is managed in the API layer.
         """
-        if action == "start_session":
-            set_poc_active(True)
-            aborted = self._abort_all_chat_requests()
-            if aborted > 0:
-                logger.info("PoC: aborted %d chat requests", aborted)
-            return {"ok": True}
-
-        if action == "end_session":
-            set_poc_active(False)
-            logger.info("PoC session ended in engine process")
-            return {"ok": True}
-
         if action != "generate_artifacts":
             raise ValueError(f"Unknown PoC action: {action}")
-
+        
         manager = self._get_poc_manager()
-
-        # Always keep PoC active while generating artifacts.
-        set_poc_active(True)
-        aborted = self._abort_all_chat_requests()
-        if aborted > 0:
-            logger.info("PoC: aborted %d chat requests", aborted)
-        if self.input_socket.poll(timeout=0) != 0:
-            return {
-                "artifacts": [],
-                "skipped": True,
-                "reason": "pending_input",
-            }
-        if self._engine_step_in_progress:
-            return {
-                "artifacts": [],
-                "skipped": True,
-                "reason": "engine_step_in_progress",
-            }
-        if self.engine.has_unfinished_requests():
-            return {
-                "artifacts": [],
-                "skipped": True,
-                "reason": "chat_unfinished",
-            }
-
+        
+        if POC_ENABLE_CHAT_PRIORITY:
+            # Legacy behavior: chat has priority, PoC yields
+            if self.input_socket.poll(timeout=0) != 0:
+                return {
+                    "artifacts": [],
+                    "skipped": True,
+                    "reason": "pending_input",
+                }
+            if self._engine_step_in_progress:
+                return {
+                    "artifacts": [],
+                    "skipped": True,
+                    "reason": "engine_step_in_progress",
+                }
+            if self.engine.has_unfinished_requests():
+                return {
+                    "artifacts": [],
+                    "skipped": True,
+                    "reason": "chat_unfinished",
+                }
+        else:
+            # Default: PoC has priority, abort active chat requests
+            aborted = self._abort_all_chat_requests()
+            if aborted > 0:
+                logger.info(f"PoC: aborted {aborted} chat requests")
+            # Safety: never run during engine.step() (GPU conflict)
+            if self._engine_step_in_progress:
+                return {
+                    "artifacts": [],
+                    "skipped": True,
+                    "reason": "engine_step_in_progress",
+                }
+        
         # Safe to proceed: stop remote worker loop if running (v0 TP deadlock fix)
         self._prepare_for_poc_gpu_work()
         from vllm.poc.data import Artifact
