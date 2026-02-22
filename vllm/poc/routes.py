@@ -507,12 +507,13 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
         }
     
     validation_result = run_validation(
-        computed_artifacts,
-        validation_map,
-        len(body.nonces),
-        stat_test.dist_threshold,
-        stat_test.p_mismatch,
-        stat_test.fraud_threshold,
+        computed_artifacts=computed_artifacts,
+        validation_map=validation_map,
+        n_total=len(body.nonces),
+        dist_threshold=stat_test.dist_threshold,
+        p_mismatch=stat_test.p_mismatch,
+        fraud_threshold=stat_test.fraud_threshold,
+        k_dim=body.params.k_dim,
     )
     
     return {

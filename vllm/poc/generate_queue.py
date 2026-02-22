@@ -269,12 +269,13 @@ class GenerateQueue:
             }
         
         validation_result = run_validation(
-            computed_artifacts,
-            job.validation_artifacts,
-            len(job.nonces),
-            job.stat_test_dist_threshold,
-            job.stat_test_p_mismatch,
-            job.stat_test_fraud_threshold,
+            computed_artifacts=computed_artifacts,
+            validation_map=job.validation_artifacts,
+            n_total=len(job.nonces),
+            dist_threshold=job.stat_test_dist_threshold,
+            p_mismatch=job.stat_test_p_mismatch,
+            fraud_threshold=job.stat_test_fraud_threshold,
+            k_dim=job.k_dim,
         )
         
         return {
