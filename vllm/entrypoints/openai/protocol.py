@@ -89,6 +89,12 @@ from vllm.entrypoints.chat_utils import ChatCompletionMessageParam, make_tool_ca
 from vllm.entrypoints.score_utils import ScoreContentPartParam, ScoreMultiModalParam
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.logprobs_validation import ValidationResult
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionLogProbsContent,
+    ValidationResponse,
+    ValidateRequest,
+)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (
     BeamSearchParams,
@@ -145,6 +151,17 @@ class ErrorInfo(OpenAIBaseModel):
 
 class ErrorResponse(OpenAIBaseModel):
     error: ErrorInfo
+
+
+class ValidationResponse(OpenAIBaseModel):
+    valid: bool
+    similarity: float
+    reason: str
+
+
+class ValidateRequest(OpenAIBaseModel):
+    original_logprobs: List[ChatCompletionLogProbsContent]
+    validation_logprobs: List[ChatCompletionLogProbsContent]
 
 
 class ModelPermission(OpenAIBaseModel):

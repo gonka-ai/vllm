@@ -357,6 +357,20 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
+def validate_client(request: Request) -> bool:
+    return request.app.state.openai_serving_validate
+
+
+@router.post("/v1/validate")
+async def validate(raw_request: Request):
+    handler = validate_client(raw_request)
+
+    if handler is None:
+        return JSONResponse(content={"error": "Validation client not found"}, status_code=404)
+
+    return JSONResponse(content={"valid": handler.validate()})
+
+
 @router.get("/health", response_class=Response)
 async def health(raw_request: Request) -> Response:
     """Health check."""

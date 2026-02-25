@@ -21,18 +21,21 @@ SIMILARITY_THRESHOLD = 0.99
 
 @dataclass
 class ValidationResult:
+    def __init__(self, threshold: float = SIMILARITY_THRESHOLD):
+        self.threshold = threshold
     similarity: float
     reason: str  # "similarity" | "different_length" | "different_tokens"
 
     @property
     def is_successful(self) -> bool:
         return (self.reason == "similarity"
-                and self.similarity > SIMILARITY_THRESHOLD)
+                and self.similarity > self.threshold)
 
 
 def compare_logprobs(
     original_logprobs: List[ChatCompletionLogProbsContent],
     validation_logprobs: List[ChatCompletionLogProbsContent],
+    threshold: float = SIMILARITY_THRESHOLD,
 ) -> ValidationResult:
     """Compare logprobs from original and validation inference runs.
 
@@ -45,14 +48,14 @@ def compare_logprobs(
         ValidationResult with similarity score and reason.
     """
     if len(validation_logprobs) < len(original_logprobs):
-        return ValidationResult(similarity=0.0, reason="different_length")
+        return ValidationResult(threshold=threshold, similarity=0.0, reason="different_length",)
 
     for i in range(len(original_logprobs)):
         if original_logprobs[i].token != validation_logprobs[i].token:
-            return ValidationResult(similarity=0.0, reason="different_tokens")
+            return ValidationResult(threshold=threshold, similarity=0.0, reason="different_tokens")
 
     similarity = _custom_similarity(original_logprobs, validation_logprobs)
-    return ValidationResult(similarity=similarity, reason="similarity")
+    return ValidationResult(threshold=threshold, similarity=similarity, reason="similarity")
 
 
 def _custom_similarity(
