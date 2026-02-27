@@ -82,6 +82,7 @@ from vllm.entrypoints.openai.protocol import (
     TranscriptionResponse,
     TranslationRequest,
     TranslationResponse,
+    ValidateRequest,
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_classification import ServingClassification
@@ -100,6 +101,7 @@ from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
 )
+from vllm.entrypoints.openai.serving_validate import OpenAIServingValidate
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.tool_server import DemoToolServer, MCPToolServer, ToolServer
 from vllm.entrypoints.utils import (
@@ -111,6 +113,7 @@ from vllm.entrypoints.utils import (
     with_cancellation,
 )
 from vllm.logger import init_logger
+from vllm.logprobs_validation import SIMILARITY_THRESHOLD
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS
 from vllm.usage.usage_lib import UsageContext
@@ -357,18 +360,31 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
-def validate_client(request: Request) -> bool:
+def validate_client(request: Request) -> OpenAIServingValidate:
     return request.app.state.openai_serving_validate
 
 
-@router.post("/v1/validate")
-async def validate(raw_request: Request):
+@router.post(
+    "/v1/validate",
+    dependencies=[Depends(validate_json_request)],
+)
+async def validate(request: ValidateRequest, raw_request: Request):
     handler = validate_client(raw_request)
 
     if handler is None:
-        return JSONResponse(content={"error": "Validation client not found"}, status_code=404)
+        return JSONResponse(
+            content={"error": "Validation client not found"}, status_code=404
+        )
 
-    return JSONResponse(content={"valid": handler.validate()})
+    result = await handler.validate(
+        request.original_logprobs,
+        request.validation_logprobs,
+    )
+
+    if isinstance(result, ErrorResponse):
+        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+
+    return JSONResponse(content={"valid": result.is_successful})
 
 
 @router.get("/health", response_class=Response)
@@ -1843,6 +1859,10 @@ async def init_app_state(
         )
         if "transcription" in supported_tasks
         else None
+    )
+    state.openai_serving_validate = OpenAIServingValidate(
+        engine_client=engine_client,
+        threshold=SIMILARITY_THRESHOLD,
     )
     state.anthropic_serving_messages = (
         AnthropicServingMessages(

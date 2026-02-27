@@ -194,6 +194,9 @@ AGENTS.md
 # Results
 *.csv
 
+# Notebooks
+*.ipynb
+
 # Python pickle files
 *.pkl
 

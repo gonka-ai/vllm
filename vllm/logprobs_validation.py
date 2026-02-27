@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Logprobs validation for decentralized inference.
 
@@ -9,7 +11,6 @@ decentralized-api/internal/validation/inference_validation.go
 """
 
 from dataclasses import dataclass
-from typing import List
 
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb,
@@ -21,20 +22,18 @@ SIMILARITY_THRESHOLD = 0.99
 
 @dataclass
 class ValidationResult:
-    def __init__(self, threshold: float = SIMILARITY_THRESHOLD):
-        self.threshold = threshold
     similarity: float
     reason: str  # "similarity" | "different_length" | "different_tokens"
+    threshold: float = SIMILARITY_THRESHOLD
 
     @property
     def is_successful(self) -> bool:
-        return (self.reason == "similarity"
-                and self.similarity > self.threshold)
+        return self.reason == "similarity" and self.similarity > self.threshold
 
 
 def compare_logprobs(
-    original_logprobs: List[ChatCompletionLogProbsContent],
-    validation_logprobs: List[ChatCompletionLogProbsContent],
+    original_logprobs: list[ChatCompletionLogProbsContent],
+    validation_logprobs: list[ChatCompletionLogProbsContent],
     threshold: float = SIMILARITY_THRESHOLD,
 ) -> ValidationResult:
     """Compare logprobs from original and validation inference runs.
@@ -48,19 +47,27 @@ def compare_logprobs(
         ValidationResult with similarity score and reason.
     """
     if len(validation_logprobs) < len(original_logprobs):
-        return ValidationResult(threshold=threshold, similarity=0.0, reason="different_length",)
+        return ValidationResult(
+            threshold=threshold,
+            similarity=0.0,
+            reason="different_length",
+        )
 
     for i in range(len(original_logprobs)):
         if original_logprobs[i].token != validation_logprobs[i].token:
-            return ValidationResult(threshold=threshold, similarity=0.0, reason="different_tokens")
+            return ValidationResult(
+                threshold=threshold, similarity=0.0, reason="different_tokens"
+            )
 
     similarity = _custom_similarity(original_logprobs, validation_logprobs)
-    return ValidationResult(threshold=threshold, similarity=similarity, reason="similarity")
+    return ValidationResult(
+        threshold=threshold, similarity=similarity, reason="similarity"
+    )
 
 
 def _custom_similarity(
-    original: List[ChatCompletionLogProbsContent],
-    validation: List[ChatCompletionLogProbsContent],
+    original: list[ChatCompletionLogProbsContent],
+    validation: list[ChatCompletionLogProbsContent],
 ) -> float:
     distance = _custom_distance(original, validation)
     similarity = 1.0 - distance
@@ -68,20 +75,21 @@ def _custom_similarity(
 
 
 def _custom_distance(
-    original: List[ChatCompletionLogProbsContent],
-    validation: List[ChatCompletionLogProbsContent],
+    original: list[ChatCompletionLogProbsContent],
+    validation: list[ChatCompletionLogProbsContent],
 ) -> float:
     distance = 0.0
     for i in range(len(original)):
-        distance += _position_distance(original[i].top_logprobs,
-                                       validation[i].top_logprobs)
+        distance += _position_distance(
+            original[i].top_logprobs, validation[i].top_logprobs
+        )
     total = max(100, len(original)) * len(original[0].top_logprobs)
     return distance / total
 
 
 def _position_distance(
-    original_top: List[ChatCompletionLogProb],
-    validation_top: List[ChatCompletionLogProb],
+    original_top: list[ChatCompletionLogProb],
+    validation_top: list[ChatCompletionLogProb],
 ) -> float:
     if not original_top or not validation_top:
         raise ValueError("Empty logprobs provided")
