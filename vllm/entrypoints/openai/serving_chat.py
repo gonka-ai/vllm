@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Final, Optional
+from typing import Final
 
 import jinja2
 import partial_json_parser
@@ -70,6 +70,7 @@ from vllm.transformers_utils.tokenizers import (
 from vllm.utils.collection_utils import as_list
 from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
 from vllm.validation import EnforcedTokens
+
 logger = init_logger(__name__)
 
 
@@ -232,6 +233,7 @@ class OpenAIServingChat(OpenAIServing):
                     conversation,
                     request_prompts,
                     engine_prompts,
+                    input_artifacts,
                 ) = await self._preprocess_chat(
                     request,
                     tokenizer,
@@ -253,6 +255,7 @@ class OpenAIServingChat(OpenAIServing):
                     request_prompts,
                     engine_prompts,
                 ) = self._make_request_with_harmony(request)
+                input_artifacts = None
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
@@ -370,6 +373,7 @@ class OpenAIServingChat(OpenAIServing):
                 conversation,
                 tokenizer,
                 request_metadata,
+                input_artifacts=input_artifacts,
             )
 
         try:
@@ -381,6 +385,7 @@ class OpenAIServingChat(OpenAIServing):
                 conversation,
                 tokenizer,
                 request_metadata,
+                input_artifacts=input_artifacts,
             )
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
@@ -535,6 +540,7 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
+        input_artifacts: list[dict[str, str]] | None = None,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -658,6 +664,7 @@ class OpenAIServingChat(OpenAIServing):
                                 if request.return_token_ids
                                 else None
                             ),
+                            input_artifacts=input_artifacts,
                         )
 
                         # if continuous usage stats are requested, add it
@@ -723,7 +730,7 @@ class OpenAIServingChat(OpenAIServing):
                             tokenizer=tokenizer,
                             num_output_top_logprobs=request.top_logprobs,
                             return_as_token_id=request.return_tokens_as_token_ids,
-                            enforced_tokens=request.enforced_tokens
+                            enforced_tokens=request.enforced_tokens,
                         )
                     else:
                         logprobs = None
@@ -1300,6 +1307,7 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
+        input_artifacts: list[dict[str, str]] | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
@@ -1335,7 +1343,7 @@ class OpenAIServingChat(OpenAIServing):
                     num_output_top_logprobs=request.top_logprobs,
                     tokenizer=tokenizer,
                     return_as_token_id=request.return_tokens_as_token_ids,
-                    enforced_tokens=request.enforced_tokens
+                    enforced_tokens=request.enforced_tokens,
                 )
             else:
                 logprobs = None
@@ -1584,6 +1592,7 @@ class OpenAIServingChat(OpenAIServing):
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
             kv_transfer_params=final_res.kv_transfer_params,
+            input_artifacts=input_artifacts,
         )
 
         # Log complete response if output logging is enabled
@@ -1628,9 +1637,8 @@ class OpenAIServingChat(OpenAIServing):
         top_logprobs: int | None,
         tokenizer: AnyTokenizer,
         should_return_as_token_id: bool,
-        enforced_tokens: Optional[EnforcedTokens] = None
+        enforced_tokens: EnforcedTokens | None = None,
     ) -> list[ChatCompletionLogProb]:
-        
         if enforced_tokens:
             top_logprobs = len(logprobs)
 
@@ -1642,7 +1650,7 @@ class OpenAIServingChat(OpenAIServing):
                         p[0],
                         tokenizer,
                         return_as_token_id=should_return_as_token_id,
-                        enforced_tokens=enforced_tokens
+                        enforced_tokens=enforced_tokens,
                     )
                 ),
                 logprob=max(p[1].logprob, -9999.0),
@@ -1659,7 +1667,7 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: AnyTokenizer,
         num_output_top_logprobs: int | None = None,
         return_as_token_id: bool | None = None,
-        enforced_tokens: Optional[EnforcedTokens] = None,
+        enforced_tokens: EnforcedTokens | None = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
         logprobs_content: list[ChatCompletionLogProbsContent] = []
@@ -1694,7 +1702,7 @@ class OpenAIServingChat(OpenAIServing):
                             token_id,
                             tokenizer,
                             should_return_as_token_id,
-                            enforced_tokens
+                            enforced_tokens,
                         ),
                         logprob=max(step_token.logprob, -9999.0),
                         bytes=(
@@ -1707,7 +1715,7 @@ class OpenAIServingChat(OpenAIServing):
                             num_output_top_logprobs,
                             tokenizer,
                             should_return_as_token_id,
-                            enforced_tokens
+                            enforced_tokens,
                         ),
                     )
                 )

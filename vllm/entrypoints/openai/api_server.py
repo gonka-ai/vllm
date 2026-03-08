@@ -379,6 +379,8 @@ async def validate(request: ValidateRequest, raw_request: Request):
     result = await handler.validate(
         request.original_logprobs,
         request.validation_logprobs,
+        original_artifacts=request.original_artifacts,
+        validation_artifacts=request.validation_artifacts,
     )
 
     if isinstance(result, ErrorResponse):

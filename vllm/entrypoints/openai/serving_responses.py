@@ -516,7 +516,7 @@ class OpenAIServingResponses(OpenAIServing):
             tool_dicts = [tool.model_dump() for tool in request.tools]
         # Construct the input messages.
         messages = self._construct_input_messages(request, prev_response)
-        _, request_prompts, engine_prompts = await self._preprocess_chat(
+        _, request_prompts, engine_prompts, _ = await self._preprocess_chat(
             request,
             tokenizer,
             messages,

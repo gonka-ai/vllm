@@ -34,6 +34,7 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
     apply_hf_chat_template,
     apply_mistral_chat_template,
+    create_mm_artifacts,
     parse_chat_messages_futures,
     resolve_chat_template_content_format,
 )
@@ -106,8 +107,8 @@ from vllm.utils.async_utils import (
 )
 from vllm.utils.collection_utils import is_list_of
 from vllm.v1.engine import EngineCoreRequest
-
 from vllm.validation import EnforcedTokens
+
 logger = init_logger(__name__)
 
 CompletionLikeRequest: TypeAlias = (
@@ -1045,6 +1046,7 @@ class OpenAIServing:
         list[ConversationMessage],
         Sequence[RequestPrompt],
         list[EngineTokensPrompt],
+        list[dict[str, str]] | None,
     ]:
         model_config = self.model_config
 
@@ -1147,7 +1149,11 @@ class OpenAIServing:
         if hasattr(request, "cache_salt") and request.cache_salt is not None:
             engine_prompt["cache_salt"] = request.cache_salt
 
-        return conversation, [request_prompt], [engine_prompt]
+        input_artifacts: list[dict[str, str]] | None = None
+        if getattr(request, "include_input_artifacts", False) and mm_data:
+            input_artifacts = create_mm_artifacts(mm_data)
+
+        return conversation, [request_prompt], [engine_prompt], input_artifacts
 
     async def _process_inputs(
         self,
@@ -1390,7 +1396,7 @@ class OpenAIServing:
         token_id: int,
         tokenizer: AnyTokenizer,
         return_as_token_id: bool = False,
-        enforced_tokens: EnforcedTokens = None
+        enforced_tokens: EnforcedTokens = None,
     ) -> str:
         if return_as_token_id:
             # Return token ids as plain strings for compatibility with older

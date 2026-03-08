@@ -85,6 +85,7 @@ class EmbeddingMixin(OpenAIServing):
                     _,
                     _,
                     ctx.engine_prompts,
+                    _,
                 ) = await self._preprocess_chat(
                     ctx.request,
                     tokenizer,

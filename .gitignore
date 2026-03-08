@@ -227,3 +227,13 @@ ep_kernels_workspace/
 
 # Allow tracked library source folders under submodules (e.g., benchmarks/lib)
 !vllm/benchmarks/lib/
+
+# Images
+*.jpg
+*.png
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.ico
+*.webp

@@ -135,6 +135,7 @@ class OpenAIServingPooling(OpenAIServing):
                     _,
                     _,
                     engine_prompts,
+                    _,
                 ) = await self._preprocess_chat(
                     request,
                     tokenizer,

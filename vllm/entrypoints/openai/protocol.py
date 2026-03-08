@@ -670,6 +670,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
+    include_input_artifacts: bool = Field(
+        default=False,
+        description=(
+            "If true, the response will include normalized artifacts of "
+            "multimodal inputs. Used for validation."
+        ),
+    )
     structured_outputs: StructuredOutputsParams | None = Field(
         default=None,
         description="Additional kwargs for structured outputs",
@@ -2183,6 +2190,8 @@ class ChatCompletionLogProbsContent(ChatCompletionLogProb):
 class ValidateRequest(OpenAIBaseModel):
     original_logprobs: list[ChatCompletionLogProbsContent]
     validation_logprobs: list[ChatCompletionLogProbsContent]
+    original_artifacts: list[dict[str, str]] | None = None
+    validation_artifacts: list[dict[str, str]] | None = None
 
 
 class ChatCompletionLogProbs(OpenAIBaseModel):
@@ -2217,6 +2226,10 @@ class ChatCompletionResponse(OpenAIBaseModel):
     prompt_token_ids: list[int] | None = None
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
+    )
+    input_artifacts: list[dict[str, str]] | None = Field(
+        default=None,
+        description=("Normalized artifacts of multimodal inputs."),
     )
 
 
@@ -2254,6 +2267,10 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     usage: UsageInfo | None = Field(default=None)
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
+    input_artifacts: list[dict[str, str]] | None = Field(
+        default=None,
+        description="Normalized multimodal input artifacts (first chunk only).",
+    )
 
 
 class TranscriptionResponseStreamChoice(OpenAIBaseModel):
