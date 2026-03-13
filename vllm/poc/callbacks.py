@@ -14,6 +14,7 @@ logger = init_logger(__name__)
 
 POC_CALLBACK_INTERVAL_SEC = float(os.environ.get("POC_CALLBACK_INTERVAL_SEC", "5"))
 POC_CALLBACK_MAX_ARTIFACTS = int(os.environ.get("POC_CALLBACK_MAX_ARTIFACTS", "1000000"))
+POC_CALLBACK_MAX_RETRIES = int(os.environ.get("POC_CALLBACK_MAX_RETRIES", "10"))
 POC_CALLBACK_RETRY_BACKOFF_SEC = 1.0
 POC_CALLBACK_RETRY_MAX_BACKOFF_SEC = 30.0
 
@@ -95,9 +96,16 @@ class CallbackSender:
                         backoff = POC_CALLBACK_RETRY_BACKOFF_SEC
                         retry_attempt = 0
                         last_send_time = current_time
+                    elif retry_attempt >= POC_CALLBACK_MAX_RETRIES:
+                        n_artifacts = len(self._pending_payload.get('artifacts', []))
+                        logger.error(f"Callback to {self.callback_url} failed after {retry_attempt} attempts, dropping {n_artifacts} artifacts")
+                        self._pending_payload = None
+                        backoff = POC_CALLBACK_RETRY_BACKOFF_SEC
+                        retry_attempt = 0
+                        last_send_time = current_time
                     else:
                         if retry_attempt == 1 or retry_attempt % 10 == 0:
-                            logger.warning(f"Callback to {self.callback_url} failed (attempt {retry_attempt}, next backoff {backoff:.1f}s)")
+                            logger.warning(f"Callback to {self.callback_url} failed (attempt {retry_attempt}/{POC_CALLBACK_MAX_RETRIES}, next backoff {backoff:.1f}s)")
                         await asyncio.sleep(backoff)
                         backoff = min(backoff * 2, POC_CALLBACK_RETRY_MAX_BACKOFF_SEC)
     

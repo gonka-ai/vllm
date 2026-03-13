@@ -83,6 +83,8 @@ def is_mismatch(
 ) -> bool:
     """Check if vectors differ beyond threshold."""
     received = decode_vector(received_b64)
+    if not np.all(np.isfinite(received)):
+        return True
     distance = float(np.linalg.norm(computed_vector - received))
     return distance > dist_threshold
 
