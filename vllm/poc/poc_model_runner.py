@@ -57,72 +57,77 @@ def _get_block_size(worker):
     return worker.cache_config.block_size
 
 
-def _get_attn_layer_names(worker):
-    """Get all attention layer names from static_forward_context."""
-    sfc = worker.vllm_config.compilation_config.static_forward_context
-    return list(sfc.keys())
-
-
-def _create_v1_attn_metadata_single(seq_len, block_size, device):
+def _create_v1_attn_metadata(seq_len, block_size, device, worker):
     """Create attention metadata for a single sequence (batch_size=1).
 
-    Uses blocks from the beginning of KV cache. Creates valid slot_mapping
-    and block_table for one sequence.
-
-    Currently supports FlashAttention backend only. FlashInfer uses a
-    different metadata structure (wrappers, prefill/decode split) that
-    requires the MetadataBuilder; add support here if needed.
+    Uses the worker's metadata builders to create the correct metadata
+    for whatever attention backend is configured (FlashAttention,
+    FlashInfer, etc.). Works with both V1 (attn_groups) and V2
+    (attn_metadata_builders) model runners.
     """
-    try:
-        from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-    except ImportError:
-        raise RuntimeError(
-            "PoC model runner requires FlashAttention backend. "
-            "FlashInfer and other backends are not yet supported."
-        )
+    from vllm.v1.attention.backend import CommonAttentionMetadata
 
     blocks_per_seq = math.ceil(seq_len / block_size)
 
-    # slot_mapping: token t -> block_idx * block_size + offset
     all_slots = []
     for t in range(seq_len):
         block_idx = t // block_size
         all_slots.append(block_idx * block_size + (t % block_size))
     slot_mapping = torch.tensor(all_slots, dtype=torch.long, device=device)
 
-    # block_table: [1, blocks_per_seq] = identity mapping
     block_table = torch.arange(
         blocks_per_seq, dtype=torch.int32, device=device
     ).unsqueeze(0)
 
-    query_start_loc = torch.tensor(
+    query_start_loc_gpu = torch.tensor(
         [0, seq_len], dtype=torch.int32, device=device
     )
+    query_start_loc_cpu = torch.tensor(
+        [0, seq_len], dtype=torch.int32, device="cpu"
+    )
+    seq_lens_gpu = torch.tensor([seq_len], dtype=torch.int32, device=device)
+    seq_lens_cpu = torch.tensor([seq_len], dtype=torch.int32, device="cpu")
 
-    metadata = FlashAttentionMetadata(
+    common_attn_metadata = CommonAttentionMetadata(
+        query_start_loc=query_start_loc_gpu,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens_gpu,
+        num_reqs=1,
         num_actual_tokens=seq_len,
         max_query_len=seq_len,
-        query_start_loc=query_start_loc,
         max_seq_len=seq_len,
-        seq_lens=torch.tensor([seq_len], dtype=torch.int32, device=device),
-        block_table=block_table,
+        block_table_tensor=block_table,
         slot_mapping=slot_mapping,
-        use_cascade=False,
-        common_prefix_len=0,
-        cu_prefix_query_lens=None,
-        prefix_kv_lens=None,
-        suffix_kv_lens=None,
+        causal=True,
+        _seq_lens_cpu=seq_lens_cpu,
+        _num_computed_tokens_cpu=torch.zeros(1, dtype=torch.int32, device="cpu"),
     )
-    return metadata, slot_mapping
+
+    model_runner = worker.model_runner
+    attn_metadata_dict = {}
+    slot_mapping_dict = {}
+
+    for kv_cache_group_attn_groups in model_runner.attn_groups:
+        for attn_group in kv_cache_group_attn_groups:
+            builder = attn_group.get_metadata_builder(0)
+            metadata = builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+            for layer_name in attn_group.layer_names:
+                attn_metadata_dict[layer_name] = metadata
+                slot_mapping_dict[layer_name] = slot_mapping
+
+    return attn_metadata_dict, slot_mapping_dict
 
 
-def _get_or_create_attn_metadata(seq_len, block_size, device):
+def _get_or_create_attn_metadata(seq_len, block_size, device, worker):
     """Get cached attention metadata or create new one."""
     global _cached_attn_meta, _cached_attn_meta_key
     key = (seq_len, block_size, device)
     if _cached_attn_meta_key == key and _cached_attn_meta is not None:
         return _cached_attn_meta
-    result = _create_v1_attn_metadata_single(seq_len, block_size, device)
+    result = _create_v1_attn_metadata(seq_len, block_size, device, worker)
     _cached_attn_meta = result
     _cached_attn_meta_key = key
     return result
@@ -201,13 +206,9 @@ def execute_poc_forward(
 
     # Get block_size and prepare attention metadata (cached, reused)
     block_size = _get_block_size(worker)
-    attn_metadata, slot_mapping_tensor = _get_or_create_attn_metadata(
-        seq_len, block_size, device
+    attn_metadata, slot_mapping_dict = _get_or_create_attn_metadata(
+        seq_len, block_size, device, worker
     )
-
-    # Build slot_mapping dict for all attention layers
-    layer_names = _get_attn_layer_names(worker)
-    slot_mapping_dict = {name: slot_mapping_tensor for name in layer_names}
 
     # Positions for single sequence
     positions_single = torch.arange(seq_len, device=device)
