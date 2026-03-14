@@ -210,8 +210,9 @@ def execute_poc_forward(
         seq_len, block_size, device, worker
     )
 
-    # Positions for single sequence
+    # Positions and dummy input_ids for single sequence
     positions_single = torch.arange(seq_len, device=device)
+    dummy_input_ids = torch.zeros(seq_len, dtype=torch.long, device=device)
 
     # Process each nonce independently for determinism.
     # ALL TP ranks must participate in every forward pass.
@@ -239,7 +240,7 @@ def execute_poc_forward(
         ):
             with poc_forward_context():
                 hidden_states = model(
-                    input_ids=None,
+                    input_ids=dummy_input_ids,
                     positions=positions_single,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds.view(-1, hidden_size) if inputs_embeds is not None else None,
