@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from vllm.logger import init_logger
 from .validation import run_validation
-from .callbacks import send_oneshot_callback
+from .callbacks import get_callback_queue, clear_callback_queue
 from .data import DEFAULT_DIST_THRESHOLD, DEFAULT_P_MISMATCH, DEFAULT_FRAUD_THRESHOLD
 
 logger = init_logger(__name__)
@@ -63,6 +63,7 @@ class GenerateQueue:
         self._worker_task: Optional[asyncio.Task] = None
         self._stop_event: asyncio.Event = asyncio.Event()
         self._is_generation_active: Optional[Callable[[int], bool]] = None
+        self._callback_queue = None  # Initialized lazily
     
     def set_generation_active_check(self, fn: Callable[[int], bool]):
         """Set callback to check if /init/generate is active."""
@@ -128,7 +129,7 @@ class GenerateQueue:
             )
     
     async def stop_worker(self):
-        """Stop the worker task."""
+        """Stop the worker task and callback queue."""
         self._stop_event.set()
         if self._worker_task and not self._worker_task.done():
             self._worker_task.cancel()
@@ -137,9 +138,19 @@ class GenerateQueue:
             except asyncio.CancelledError:
                 pass
             self._worker_task = None
+
+        # Stop callback queue and clear global singleton
+        if self._callback_queue:
+            await self._callback_queue.stop()
+            self._callback_queue = None
+        await clear_callback_queue()
     
     async def _worker_loop(self, engine_client, app_id: int):
         """Background worker that processes queued jobs."""
+        # Initialize callback queue with bounded concurrency
+        self._callback_queue = get_callback_queue(self._stop_event)
+        await self._callback_queue.start()
+
         logger.info("Generate queue worker started")
         
         while not self._stop_event.is_set():
@@ -170,7 +181,7 @@ class GenerateQueue:
                         self._results[job.request_id].result = result
                     
                     if job.callback_url:
-                        await self._send_callback(job, result)
+                        self._enqueue_callback(job, result)
                     
                 except Exception as e:
                     logger.error(f"Generate job {job.request_id} failed: {e}", exc_info=True)
@@ -216,13 +227,22 @@ class GenerateQueue:
                     await asyncio.sleep(0.1)
                     continue
                 
-                result = await job.engine_client.poc_request("generate_artifacts", {
-                    "nonces": chunk,
-                    "block_hash": job.block_hash,
-                    "public_key": job.public_key,
-                    "seq_len": job.seq_len,
-                    "k_dim": job.k_dim,
-                })
+                try:
+                    result = await asyncio.wait_for(
+                        job.engine_client.poc_request("generate_artifacts", {
+                            "nonces": chunk,
+                            "block_hash": job.block_hash,
+                            "public_key": job.public_key,
+                            "seq_len": job.seq_len,
+                            "k_dim": job.k_dim,
+                        }),
+                        timeout=POC_GENERATE_CHUNK_TIMEOUT_SEC
+                    )
+                except asyncio.CancelledError:
+                    logger.info(f"PoC queue job {job.request_id[:8]}: cancelled during RPC")
+                    raise RuntimeError("Job cancelled")
+                except asyncio.TimeoutError:
+                    raise RuntimeError(f"Timeout waiting for engine RPC: chunk {chunk_idx}")
                 
                 if not result.get("skipped"):
                     computed_artifacts.extend(result.get("artifacts", []))
@@ -248,12 +268,13 @@ class GenerateQueue:
             }
         
         validation_result = run_validation(
-            computed_artifacts,
-            job.validation_artifacts,
-            len(job.nonces),
-            job.stat_test_dist_threshold,
-            job.stat_test_p_mismatch,
-            job.stat_test_fraud_threshold,
+            computed_artifacts=computed_artifacts,
+            validation_map=job.validation_artifacts,
+            n_total=len(job.nonces),
+            dist_threshold=job.stat_test_dist_threshold,
+            p_mismatch=job.stat_test_p_mismatch,
+            fraud_threshold=job.stat_test_fraud_threshold,
+            k_dim=job.k_dim,
         )
         
         return {
@@ -262,8 +283,12 @@ class GenerateQueue:
             **validation_result,
         }
     
-    async def _send_callback(self, job: GenerateJob, result: Dict[str, Any]):
-        """Send callback for completed job."""
+    def _enqueue_callback(self, job: GenerateJob, result: Dict[str, Any]):
+        """Enqueue callback for delivery via bounded callback queue."""
+        if self._callback_queue is None:
+            logger.warning(f"Callback queue not initialized, skipping callback for {job.request_id}")
+            return
+
         if job.validation_artifacts is None:
             payload = {
                 "request_id": job.request_id,
@@ -274,7 +299,7 @@ class GenerateQueue:
                 "artifacts": result.get("artifacts", []),
                 "encoding": result.get("encoding", {}),
             }
-            await send_oneshot_callback(job.callback_url, "generated", payload, self._stop_event)
+            self._callback_queue.enqueue(job.callback_url, "generated", payload)
         else:
             payload = {
                 "request_id": job.request_id,
@@ -288,7 +313,7 @@ class GenerateQueue:
                 "p_value": result.get("p_value", 1.0),
                 "fraud_detected": result.get("fraud_detected", False),
             }
-            await send_oneshot_callback(job.callback_url, "validated", payload, self._stop_event)
+            self._callback_queue.enqueue(job.callback_url, "validated", payload)
 
 
 _queue_instance: Optional[GenerateQueue] = None
