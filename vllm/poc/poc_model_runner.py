@@ -2,20 +2,19 @@
 
 Full model forward pass with proper V1 attention metadata.
 Uses actual KV cache blocks for attention to work correctly.
-Processes nonces one at a time (batch_size=1) for determinism.
-Caches final vectors per-nonce to guarantee identical outputs on
-non-deterministic backends (e.g. MARLIN FP8 on A800).
+Batched forward pass — processes all nonces in a single forward call.
 """
 import math
 import torch
 import torch.distributed as dist
+import numpy as np
 from typing import List, Optional, Dict, Any
-from collections import OrderedDict
 
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.forward_context import set_forward_context
 from vllm.sequence import IntermediateTensors
+from vllm.logger import init_logger
 
 from .gpu_random import (
     generate_inputs,
@@ -24,18 +23,13 @@ from .gpu_random import (
 )
 from .layer_hooks import LayerHouseholderHook, poc_forward_context
 
+logger = init_logger(__name__)
+
 DEFAULT_K_DIM = 12
 
-# Cached attention metadata (reused across calls with same seq_len)
+# Cached attention metadata (reused across calls with same batch_size+seq_len)
 _cached_attn_meta = None
 _cached_attn_meta_key = None
-
-# Per-nonce vector cache for determinism on non-deterministic backends.
-# Only used on the last PP rank (driver) at the output stage.
-# Key: (block_hash, public_key, nonce, seq_len, hidden_size, k_dim)
-# Value: numpy array (FP16 vector, shape [k_dim])
-_VECTOR_CACHE_MAX = 100000
-_vector_cache = OrderedDict()
 
 
 def _ensure_layer_hooks(worker, block_hash, hidden_size):
@@ -57,50 +51,62 @@ def _get_block_size(worker):
     return worker.cache_config.block_size
 
 
-def _create_v1_attn_metadata(seq_len, block_size, device, worker):
-    """Create attention metadata for a single sequence (batch_size=1).
+def _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker):
+    """Create attention metadata for batch_size sequences.
 
     Uses the worker's metadata builders to create the correct metadata
     for whatever attention backend is configured (FlashAttention,
-    FlashInfer, etc.). Works with both V1 (attn_groups) and V2
-    (attn_metadata_builders) model runners.
+    FlashInfer, etc.).
     """
     from vllm.v1.attention.backend import CommonAttentionMetadata
 
     blocks_per_seq = math.ceil(seq_len / block_size)
+    total_tokens = batch_size * seq_len
 
+    # slot_mapping: each sequence gets its own block range
     all_slots = []
-    for t in range(seq_len):
-        block_idx = t // block_size
-        all_slots.append(block_idx * block_size + (t % block_size))
+    for seq_idx in range(batch_size):
+        base_block = seq_idx * blocks_per_seq
+        for t in range(seq_len):
+            block_idx = base_block + t // block_size
+            all_slots.append(block_idx * block_size + t % block_size)
     slot_mapping = torch.tensor(all_slots, dtype=torch.long, device=device)
 
+    # block_table: [batch_size, blocks_per_seq]
     block_table = torch.arange(
-        blocks_per_seq, dtype=torch.int32, device=device
-    ).unsqueeze(0)
+        batch_size * blocks_per_seq, dtype=torch.int32, device=device
+    ).view(batch_size, blocks_per_seq)
 
-    query_start_loc_gpu = torch.tensor(
-        [0, seq_len], dtype=torch.int32, device=device
+    # query_start_loc: [0, seq_len, 2*seq_len, ..., batch_size*seq_len]
+    query_start_loc_gpu = (
+        torch.arange(batch_size + 1, dtype=torch.int32, device=device) * seq_len
     )
-    query_start_loc_cpu = torch.tensor(
-        [0, seq_len], dtype=torch.int32, device="cpu"
+    query_start_loc_cpu = (
+        torch.arange(batch_size + 1, dtype=torch.int32, device="cpu") * seq_len
     )
-    seq_lens_gpu = torch.tensor([seq_len], dtype=torch.int32, device=device)
-    seq_lens_cpu = torch.tensor([seq_len], dtype=torch.int32, device="cpu")
+
+    seq_lens_gpu = torch.full(
+        (batch_size,), seq_len, dtype=torch.int32, device=device
+    )
+    seq_lens_cpu = torch.full(
+        (batch_size,), seq_len, dtype=torch.int32, device="cpu"
+    )
 
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=query_start_loc_gpu,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens_gpu,
-        num_reqs=1,
-        num_actual_tokens=seq_len,
+        num_reqs=batch_size,
+        num_actual_tokens=total_tokens,
         max_query_len=seq_len,
         max_seq_len=seq_len,
         block_table_tensor=block_table,
         slot_mapping=slot_mapping,
         causal=True,
         _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=torch.zeros(1, dtype=torch.int32, device="cpu"),
+        _num_computed_tokens_cpu=torch.zeros(
+            batch_size, dtype=torch.int32, device="cpu"
+        ),
     )
 
     model_runner = worker.model_runner
@@ -121,35 +127,16 @@ def _create_v1_attn_metadata(seq_len, block_size, device, worker):
     return attn_metadata_dict, slot_mapping_dict
 
 
-def _get_or_create_attn_metadata(seq_len, block_size, device, worker):
+def _get_or_create_attn_metadata(batch_size, seq_len, block_size, device, worker):
     """Get cached attention metadata or create new one."""
     global _cached_attn_meta, _cached_attn_meta_key
-    key = (seq_len, block_size, device)
+    key = (batch_size, seq_len, block_size, device)
     if _cached_attn_meta_key == key and _cached_attn_meta is not None:
         return _cached_attn_meta
-    result = _create_v1_attn_metadata(seq_len, block_size, device, worker)
+    result = _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker)
     _cached_attn_meta = result
     _cached_attn_meta_key = key
     return result
-
-
-def _cache_get(block_hash, public_key, nonce, seq_len, hidden_size, k_dim):
-    """Get cached vector for a nonce, or None if not cached."""
-    key = (block_hash, public_key, nonce, seq_len, hidden_size, k_dim)
-    if key in _vector_cache:
-        _vector_cache.move_to_end(key)
-        return _vector_cache[key]
-    return None
-
-
-def _cache_put(block_hash, public_key, nonce, seq_len, hidden_size, k_dim, vector):
-    """Cache a computed vector for a nonce."""
-    global _vector_cache
-    key = (block_hash, public_key, nonce, seq_len, hidden_size, k_dim)
-    _vector_cache[key] = vector
-    _vector_cache.move_to_end(key)
-    while len(_vector_cache) > _VECTOR_CACHE_MAX:
-        _vector_cache.popitem(last=False)
 
 
 @torch.inference_mode()
@@ -162,17 +149,15 @@ def execute_poc_forward(
     hidden_size: int,
     k_dim: int = DEFAULT_K_DIM,
 ) -> Optional[Dict[str, Any]]:
-    """Execute PoC forward pass on a V1 worker.
+    """Execute batched PoC forward pass on a V1 worker.
 
-    Processes each nonce independently (batch_size=1) for determinism.
-    All TP ranks always participate in every forward pass to avoid
-    collective operation deadlocks. The vector cache is only applied
-    at the output stage on the last PP rank.
+    Processes all nonces in a single forward call for maximum throughput.
     """
     device = worker.device
     dtype = worker.model_config.dtype
     model = worker.model_runner.model
     vllm_config = worker.vllm_config
+    batch_size = len(nonces)
 
     tp_group = get_tp_group()
     is_tp_driver = tp_group.rank_in_group == 0
@@ -194,6 +179,7 @@ def execute_poc_forward(
             hidden_size = int(broadcast_data["hidden_size"])
             nonces = list(broadcast_data["nonces"])
             k_dim = int(broadcast_data["k_dim"])
+            batch_size = len(nonces)
 
     pp_group = get_pp_group()
 
@@ -207,99 +193,95 @@ def execute_poc_forward(
     # Get block_size and prepare attention metadata (cached, reused)
     block_size = _get_block_size(worker)
     attn_metadata, slot_mapping_dict = _get_or_create_attn_metadata(
-        seq_len, block_size, device, worker
+        batch_size, seq_len, block_size, device, worker
     )
 
-    # Positions and dummy input_ids for single sequence
-    positions_single = torch.arange(seq_len, device=device)
-    dummy_input_ids = torch.zeros(seq_len, dtype=torch.long, device=device)
+    # Positions and dummy input_ids for the batch
+    positions = torch.arange(seq_len, device=device).repeat(batch_size)
+    dummy_input_ids = torch.zeros(
+        batch_size * seq_len, dtype=torch.long, device=device
+    )
 
-    # Process each nonce independently for determinism.
-    # ALL TP ranks must participate in every forward pass.
-    all_last_hidden = []
+    # Generate inputs for all nonces at once
+    intermediate_tensors = None
+    inputs_embeds = None
 
-    for nonce in nonces:
-        intermediate_tensors = None
-        inputs_embeds = None
+    if pp_group.is_first_rank:
+        inputs_embeds = generate_inputs(
+            block_hash, public_key, nonces,
+            dim=hidden_size, seq_len=seq_len,
+            device=device, dtype=dtype,
+        )  # [batch_size, seq_len, hidden_size]
+    else:
+        intermediate_tensors = IntermediateTensors(
+            pp_group.recv_tensor_dict(all_gather_group=get_tp_group())
+        )
 
-        if pp_group.is_first_rank:
-            inputs_embeds = generate_inputs(
-                block_hash, public_key, [nonce],
-                dim=hidden_size, seq_len=seq_len,
-                device=device, dtype=dtype,
+    with set_forward_context(
+        attn_metadata, vllm_config,
+        num_tokens=batch_size * seq_len,
+        slot_mapping=slot_mapping_dict,
+    ):
+        with poc_forward_context():
+            hidden_states = model(
+                input_ids=dummy_input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds.view(-1, hidden_size) if inputs_embeds is not None else None,
             )
-        else:
-            intermediate_tensors = IntermediateTensors(
-                pp_group.recv_tensor_dict(all_gather_group=get_tp_group())
-            )
 
-        with set_forward_context(
-            attn_metadata, vllm_config,
-            num_tokens=seq_len,
-            slot_mapping=slot_mapping_dict,
-        ):
-            with poc_forward_context():
-                hidden_states = model(
-                    input_ids=dummy_input_ids,
-                    positions=positions_single,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds.view(-1, hidden_size) if inputs_embeds is not None else None,
-                )
-
-        # PP: send to next rank if not last
-        if not pp_group.is_last_rank:
-            if isinstance(hidden_states, IntermediateTensors):
-                pp_group.send_tensor_dict(
-                    hidden_states.tensors, all_gather_group=get_tp_group()
-                )
-            continue
-
-        # Handle tuple return
-        if isinstance(hidden_states, tuple):
-            hidden_states = hidden_states[0]
-
-        # Extract last token hidden state
-        hidden_states = hidden_states.view(1, seq_len, -1)
-        last_hidden = hidden_states[:, -1, :].float()
-        all_last_hidden.append(last_hidden)
-
-    # PP: non-last ranks return None
+    # PP: send to next rank if not last
     if not pp_group.is_last_rank:
+        if isinstance(hidden_states, IntermediateTensors):
+            pp_group.send_tensor_dict(
+                hidden_states.tensors, all_gather_group=get_tp_group()
+            )
         return None
 
-    # Output stage: use cache for determinism, compute only uncached nonces.
-    import numpy as np
-    final_vectors = []
+    # Handle tuple return
+    if isinstance(hidden_states, tuple):
+        hidden_states = hidden_states[0]
 
-    for i, nonce in enumerate(nonces):
-        # Check cache first
-        cached = _cache_get(block_hash, public_key, nonce, seq_len, hidden_size, k_dim)
-        if cached is not None:
-            final_vectors.append(cached)
-            continue
+    # Extract last hidden per sequence
+    hidden_states = hidden_states.view(batch_size, seq_len, -1)
+    last_hidden = hidden_states[:, -1, :].float()  # [batch_size, hidden_size]
 
-        # Not cached: compute from hidden state
-        last_hidden = all_last_hidden[i]  # [1, hidden_size]
+    # NaN detection
+    nan_mask = torch.isnan(last_hidden).any(dim=-1)  # [batch_size]
+    if nan_mask.any():
+        clean_idx = (~nan_mask).nonzero(as_tuple=True)[0]
+        nan_count = nan_mask.sum().item()
+        logger.warning("NaN in %d/%d hidden states (GPU fault?)", nan_count, batch_size)
 
-        # Normalize to unit sphere
-        last_hidden = last_hidden / (last_hidden.norm(dim=-1, keepdim=True) + 1e-8)
+        if clean_idx.numel() == 0:
+            logger.error("All %d nonces produced NaN — batch rejected", batch_size)
+            return {"nonces": [], "vectors": np.empty((0, k_dim), dtype=np.float16)}
 
-        # k-dim pick + Haar rotation
-        indices = random_pick_indices(block_hash, public_key, [nonce], hidden_size, k_dim, device)
-        xk = torch.gather(last_hidden, 1, indices)
-        yk = apply_haar_rotation(block_hash, public_key, [nonce], xk, device)
+        last_hidden = last_hidden[clean_idx]
+        nonces = [nonces[i] for i in clean_idx.tolist()]
+        batch_size = len(nonces)
 
-        # Normalize output vector
-        yk = yk / (yk.norm(dim=-1, keepdim=True) + 1e-8)
+    # Normalize to unit sphere
+    last_hidden = last_hidden / (last_hidden.norm(dim=-1, keepdim=True) + 1e-8)
 
-        # Convert to FP16
-        vec_f16 = yk.half().cpu().numpy()[0]  # [k_dim]
+    # Batched k-dim pick + Haar rotation
+    indices = random_pick_indices(block_hash, public_key, nonces, hidden_size, k_dim, device)
+    xk = torch.gather(last_hidden, 1, indices)
+    yk = apply_haar_rotation(block_hash, public_key, nonces, xk, device)
 
-        # Cache for future determinism
-        _cache_put(block_hash, public_key, nonce, seq_len, hidden_size, k_dim, vec_f16)
-        final_vectors.append(vec_f16)
+    # Normalize output vectors
+    yk = yk / (yk.norm(dim=-1, keepdim=True) + 1e-8)
 
-    vectors_f16 = np.stack(final_vectors)
+    # Convert to FP16
+    vectors_f16 = yk.half().cpu().numpy()  # [batch_size, k_dim]
+
+    # Late NaN check after FP16 conversion
+    nan_out = np.isnan(vectors_f16).any(axis=1)
+    if nan_out.any():
+        clean = ~nan_out
+        vectors_f16 = vectors_f16[clean]
+        nonces = [n for n, c in zip(nonces, clean) if c]
+        logger.warning("NaN in FP16 output — %d nonces filtered", nan_out.sum())
 
     return {
         "nonces": nonces,
