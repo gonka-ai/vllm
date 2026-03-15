@@ -196,11 +196,8 @@ def execute_poc_forward(
         batch_size, seq_len, block_size, device, worker
     )
 
-    # Positions and dummy input_ids for the batch
+    # Positions for the batch
     positions = torch.arange(seq_len, device=device).repeat(batch_size)
-    dummy_input_ids = torch.zeros(
-        batch_size * seq_len, dtype=torch.long, device=device
-    )
 
     # Generate inputs for all nonces at once
     intermediate_tensors = None
@@ -224,7 +221,7 @@ def execute_poc_forward(
     ):
         with poc_forward_context():
             hidden_states = model(
-                input_ids=dummy_input_ids,
+                input_ids=None,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds.view(-1, hidden_size) if inputs_embeds is not None else None,
