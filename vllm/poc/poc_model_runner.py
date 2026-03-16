@@ -218,6 +218,7 @@ def execute_poc_forward(
         attn_metadata, vllm_config,
         num_tokens=batch_size * seq_len,
         slot_mapping=slot_mapping_dict,
+        skip_compiled=True,
     ):
         with poc_forward_context():
             hidden_states = model(
