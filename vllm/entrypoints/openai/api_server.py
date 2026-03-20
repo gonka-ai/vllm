@@ -386,7 +386,15 @@ async def validate(request: ValidateRequest, raw_request: Request):
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
-    return JSONResponse(content={"valid": result.is_successful})
+    return JSONResponse(
+        content={
+            "valid": result.is_successful,
+            "reason": result.reason,
+            "similarity": result.similarity,
+            "threshold": result.threshold,
+            "artifacts_match": result.artifacts_match,
+        }
+    )
 
 
 @router.get("/health", response_class=Response)
