@@ -6,6 +6,7 @@ Batched forward pass — processes all nonces in a single forward call.
 """
 import math
 import torch
+import torch._dynamo
 import torch.distributed as dist
 import numpy as np
 from typing import List, Optional, Dict, Any
@@ -188,6 +189,7 @@ def execute_poc_forward(
     if tp_group.world_size > 1:
         dist.barrier(group=tp_group.cpu_group)
     torch.cuda.synchronize()
+    torch.cuda.empty_cache()
 
     _ensure_layer_hooks(worker, block_hash, hidden_size)
 
@@ -241,7 +243,7 @@ def execute_poc_forward(
         skip_compiled=True,
     ):
         with poc_forward_context():
-            hidden_states = model(
+            hidden_states = torch._dynamo.disable(model)(
                 input_ids=None,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
