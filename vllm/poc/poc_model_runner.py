@@ -206,11 +206,30 @@ def execute_poc_forward(
     inputs_embeds = None
 
     if pp_group.is_first_rank:
-        inputs_embeds = generate_inputs(
-            block_hash, public_key, nonces,
-            dim=hidden_size, seq_len=seq_len,
-            device=device, dtype=dtype,
-        )  # [batch_size, seq_len, hidden_size]
+        kv_caches = getattr(worker.model_runner, "kv_caches", [])
+        kv_scratch = None
+        needed_elems = batch_size * seq_len * hidden_size
+        for kv in kv_caches:
+            if kv.numel() >= needed_elems:
+                kv_scratch = kv.flatten()[:needed_elems].view(
+                    batch_size, seq_len, hidden_size)
+                break
+        if kv_scratch is not None:
+            from .gpu_random import _seed_from_string, _normal
+            for i, nonce in enumerate(nonces):
+                seed = _seed_from_string(
+                    f"{block_hash}_{public_key}_nonce{nonce}")
+                vals = _normal(seed, seq_len * hidden_size,
+                               torch.device("cpu"))
+                kv_scratch[i].copy_(vals.view(seq_len, hidden_size).to(dtype))
+                del vals
+            inputs_embeds = kv_scratch
+        else:
+            inputs_embeds = generate_inputs(
+                block_hash, public_key, nonces,
+                dim=hidden_size, seq_len=seq_len,
+                device=device, dtype=dtype,
+            )
     else:
         intermediate_tensors = IntermediateTensors(
             pp_group.recv_tensor_dict(all_gather_group=get_tp_group())
