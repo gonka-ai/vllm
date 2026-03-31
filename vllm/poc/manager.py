@@ -33,13 +33,14 @@ class PoCManager:
         nonces: List[int],
         seq_len: int,
         k_dim: int,
+        poc_stronger_rng: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Run forward pass via collective_rpc.
-        
+
         Returns dict with 'nonces' and 'vectors' (FP16 numpy array).
         """
         from .poc_model_runner import execute_poc_forward
-        
+
         results = self.model_executor.collective_rpc(
             execute_poc_forward,
             args=(
@@ -49,6 +50,7 @@ class PoCManager:
                 seq_len,
                 self.model_config.get_hidden_size(),
                 k_dim,
+                poc_stronger_rng,
             ),
         )
         
@@ -62,6 +64,7 @@ class PoCManager:
         public_key: str,
         seq_len: int,
         k_dim: int,
+        poc_stronger_rng: bool = False,
     ) -> List[Artifact]:
         """Generate artifacts for specific nonces.
         
@@ -74,6 +77,7 @@ class PoCManager:
             nonces,
             seq_len,
             k_dim,
+            poc_stronger_rng,
         )
         
         if result is None:
