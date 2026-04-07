@@ -419,6 +419,12 @@ class OpenAIServingChat(OpenAIServing):
                         if enforced_ids[-1] != tokenizer.eos_token_id:
                             enforced_ids.append(tokenizer.eos_token_id)
                         sampling_params.enforced_token_ids = enforced_ids
+                        if (not sampling_params.logprobs_mode
+                                and request.enforced_tokens):
+                            detected = (request.enforced_tokens
+                                        .detect_logprobs_mode())
+                            if detected:
+                                sampling_params.logprobs_mode = detected
 
                 self._log_inputs(
                     sub_request_id,

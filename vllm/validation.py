@@ -47,3 +47,28 @@ class EnforcedTokens(BaseModel):
         if not self.tokens or self.tokens[0].token_id is None:
             raise ValueError("Enforced tokens are not encoded")
         return [token.token_id for token in self.tokens]
+
+    def detect_logprobs_mode(self, threshold: float = 0.10) -> Optional[str]:
+        """Classify original inference logprobs mode from top_token_ids.
+
+        In processed-logprobs results, empty top-k slots are padded with the
+        lowest vocab IDs (0-3 for Qwen: ``!``, ``"``, ``#``, ``$``) at
+        logprob -9999. This makes ~75% of top_token_ids entries < 4.
+        In raw-logprobs results, only ~0.2% of entries are < 4.
+
+        Must be called after encode().
+
+        Returns ``'raw_logprobs'``, ``'processed_logprobs'``, or ``None``
+        if there is insufficient data (fewer than 10 top-token entries).
+        """
+        total = 0
+        low_id_count = 0
+        for t in self.tokens:
+            for tid in t.top_token_ids:
+                total += 1
+                if tid < 4:
+                    low_id_count += 1
+        if total < 10:
+            return None
+        ratio = low_id_count / total
+        return "processed_logprobs" if ratio > threshold else "raw_logprobs"
