@@ -856,7 +856,11 @@ class EngineArgs:
             description=AttentionConfig.__doc__,
         )
         attention_group.add_argument(
-            "--attention-backend", **attention_kwargs["backend"]
+            "--attention-backend",
+            **{
+                **attention_kwargs["backend"],
+                "default": AttentionBackendEnum.FLASHINFER,
+            },
         )
 
         # Mamba arguments
