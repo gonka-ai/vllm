@@ -551,7 +551,7 @@ class EngineArgs:
     )
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str = ModelConfig.override_attention_dtype
-    attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
+    attention_backend: AttentionBackendEnum | None = AttentionBackendEnum.FLASHINFER
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
@@ -1848,7 +1848,7 @@ class EngineArgs:
             # TODO(woosuk): Tune the default values for other hardware.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 8192,
-                UsageContext.OPENAI_API_SERVER: 2048,
+                UsageContext.OPENAI_API_SERVER: 32768,
             }
             default_max_num_seqs = {
                 UsageContext.LLM_CLASS: 256,
