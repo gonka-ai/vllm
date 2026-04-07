@@ -16,7 +16,7 @@ IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]
 class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
-    backend: AttentionBackendEnum | None = None
+    backend: AttentionBackendEnum | None = AttentionBackendEnum.FLASHINFER
     """Attention backend to use. Use "auto" or None for automatic selection."""
 
     flash_attn_version: Literal[2, 3, 4] | None = None
