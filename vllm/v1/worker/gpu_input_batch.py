@@ -95,6 +95,7 @@ class InputBatch:
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
         cp_kv_cache_interleave_size: int = 1,
+        logprobs_mode_default: str = "raw_logprobs",
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -222,6 +223,8 @@ class InputBatch:
         self.generators: dict[int, torch.Generator] = {}
 
         self.num_logprobs: dict[str, int] = {}
+        self.logprobs_mode_default = logprobs_mode_default
+        self.logprobs_modes: dict[str, str] = {}
 
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
@@ -391,6 +394,10 @@ class InputBatch:
                     if sampling_params.logprobs == -1
                     else sampling_params.logprobs
                 )
+                self.logprobs_modes[req_id] = (
+                    sampling_params.logprobs_mode
+                    or self.logprobs_mode_default
+                )
 
             if sampling_params.allowed_token_ids:
                 self.has_allowed_token_ids.add(req_id)
@@ -519,6 +526,7 @@ class InputBatch:
         self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
+        self.logprobs_modes.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
         if self.prev_req_id_to_index is not None:
             self.prev_req_id_to_index.pop(req_id, None)
@@ -881,6 +889,20 @@ class InputBatch:
             )
             allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
 
+        batch_mode = self.batch_logprobs_mode
+        logprobs_is_processed = None
+        if batch_mode == "mixed":
+            logprobs_is_processed = torch.zeros(
+                num_reqs, dtype=torch.bool, device=self.device
+            )
+            for i in range(num_reqs):
+                req_id = self._req_ids[i]
+                if req_id is not None:
+                    logprobs_is_processed[i] = (
+                        self.logprobs_modes.get(req_id)
+                        == "processed_logprobs"
+                    )
+
         return SamplingMetadata(
             temperature=temperature,
             all_greedy=self.all_greedy,
@@ -900,6 +922,8 @@ class InputBatch:
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
             enforced_next_token_ids=self._build_enforced_tensor(),
+            batch_logprobs_mode=batch_mode,
+            logprobs_is_processed=logprobs_is_processed,
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:
@@ -1071,6 +1095,15 @@ class InputBatch:
     @property
     def max_num_logprobs(self) -> int | None:
         return max(self.num_logprobs.values()) if self.num_logprobs else None
+
+    @property
+    def batch_logprobs_mode(self) -> str | None:
+        if not self.logprobs_modes:
+            return None
+        modes = set(self.logprobs_modes.values())
+        if len(modes) == 1:
+            return next(iter(modes))
+        return "mixed"
 
     @property
     def no_allowed_token_ids(self) -> bool:

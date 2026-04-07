@@ -40,6 +40,14 @@ class SamplingMetadata:
     # Loaded logits processors
     logitsprocs: LogitsProcessors
 
+    # Per-request logprobs mode: "raw_logprobs", "processed_logprobs",
+    # "mixed", or None (no sampled-token logprobs requested).
+    batch_logprobs_mode: str | None = None
+
+    # Per-row bool mask: True = processed, False = raw.
+    # Only materialized when batch_logprobs_mode == "mixed".
+    logprobs_is_processed: torch.Tensor | None = None
+
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
 
