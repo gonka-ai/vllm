@@ -38,7 +38,6 @@ class PoCParamsModel(BaseModel):
     model: str
     seq_len: int
     k_dim: int = 12
-    poc_stronger_rng: bool = False
 
 
 class PoCInitGenerateRequest(BaseModel):
@@ -52,6 +51,7 @@ class PoCInitGenerateRequest(BaseModel):
     batch_size: int = POC_BATCH_SIZE_DEFAULT
     params: PoCParamsModel
     url: Optional[str] = None
+    poc_stronger_rng: bool = False
 
 
 @dataclass
@@ -106,6 +106,7 @@ class PoCGenerateRequest(BaseModel):
     url: Optional[str] = None
     validation: Optional[ValidationModel] = None
     stat_test: Optional[StatTestModel] = None
+    poc_stronger_rng: bool = False
 
 
 # =============================================================================
@@ -296,7 +297,7 @@ async def _generation_loop(
                         "public_key": config["public_key"],
                         "seq_len": config["seq_len"],
                         "k_dim": config["k_dim"],
-                        "poc_stronger_rng": config.get("poc_stronger_rng", False),
+                        "poc_stronger_rng": config["poc_stronger_rng"],
                     },
                     timeout_ms=POC_RPC_TIMEOUT_MS
                 )
@@ -375,7 +376,7 @@ async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
         "batch_size": body.batch_size,
         "seq_len": body.params.seq_len,
         "k_dim": body.params.k_dim,
-        "poc_stronger_rng": body.params.poc_stronger_rng,
+        "poc_stronger_rng": body.poc_stronger_rng,
     }
     
     stats = {"start_time": 0, "total_processed": 0}
@@ -442,7 +443,7 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
             seq_len=body.params.seq_len,
             k_dim=body.params.k_dim,
             batch_size=body.batch_size,
-            poc_stronger_rng=body.params.poc_stronger_rng,
+            poc_stronger_rng=body.poc_stronger_rng,
             validation_artifacts=validation_map,
             stat_test_dist_threshold=stat_test.dist_threshold,
             stat_test_p_mismatch=stat_test.p_mismatch,
@@ -485,7 +486,7 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
             artifacts = await _compute_artifacts_chunk(
                 engine_client, chunk, body.block_hash, body.public_key,
                 body.params.seq_len, body.params.k_dim,
-                body.params.poc_stronger_rng,
+                body.poc_stronger_rng,
                 POC_GENERATE_CHUNK_TIMEOUT_SEC, check_cancelled
             )
             computed_artifacts.extend(artifacts)
