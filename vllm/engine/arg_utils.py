@@ -630,7 +630,7 @@ class EngineArgs:
     )
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str | None = ModelConfig.override_attention_dtype
-    attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
+    attention_backend: AttentionBackendEnum | None = AttentionBackendEnum.FLASHINFER
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     kv_cache_dtype_skip_layers: list[str] = get_field(

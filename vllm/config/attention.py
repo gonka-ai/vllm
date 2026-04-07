@@ -13,7 +13,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
-    backend: AttentionBackendEnum | None = AttentionBackendEnum.FLASHINFER
+    backend: AttentionBackendEnum | None = None
     """Attention backend to use. Use "auto" or None for automatic selection."""
 
     flash_attn_version: Literal[2, 3, 4] | None = None
