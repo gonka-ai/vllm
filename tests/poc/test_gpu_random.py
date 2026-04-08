@@ -5,6 +5,7 @@ from scipy import stats
 
 from vllm.poc.gpu_random import (
     generate_inputs,
+    generate_inputs_concat_murmur,
     generate_target,
     generate_householder_vector,
     apply_householder,
@@ -726,3 +727,71 @@ def test_haar_rotation_different_inputs_same_rotation():
     # Should still be orthogonal
     dot = (y1 * y2).sum()
     assert abs(dot.item()) < 1e-4, f"Dot product {dot.item()} should be ~0"
+
+
+# =============================================================================
+# generate_inputs_concat_murmur() Tests
+# =============================================================================
+
+def test_concat_murmur_determinism():
+    device = torch.device("cuda:0")
+    r1 = generate_inputs_concat_murmur(BLOCK_HASH, PUBLIC_KEY, [0, 1, 2], dim=128, seq_len=16, device=device)
+    r2 = generate_inputs_concat_murmur(BLOCK_HASH, PUBLIC_KEY, [0, 1, 2], dim=128, seq_len=16, device=device)
+    assert torch.equal(r1, r2)
+
+
+def test_concat_murmur_different_nonces():
+    device = torch.device("cuda:0")
+    r1 = generate_inputs_concat_murmur(BLOCK_HASH, PUBLIC_KEY, [1], dim=128, seq_len=16, device=device)
+    r2 = generate_inputs_concat_murmur(BLOCK_HASH, PUBLIC_KEY, [2], dim=128, seq_len=16, device=device)
+    assert not torch.allclose(r1, r2)
+
+
+def test_concat_murmur_different_block_hash():
+    device = torch.device("cuda:0")
+    r1 = generate_inputs_concat_murmur("hash1", PUBLIC_KEY, [0], dim=128, seq_len=16, device=device)
+    r2 = generate_inputs_concat_murmur("hash2", PUBLIC_KEY, [0], dim=128, seq_len=16, device=device)
+    assert not torch.allclose(r1, r2)
+
+
+def test_concat_murmur_different_public_key():
+    device = torch.device("cuda:0")
+    r1 = generate_inputs_concat_murmur(BLOCK_HASH, "key1", [0], dim=128, seq_len=16, device=device)
+    r2 = generate_inputs_concat_murmur(BLOCK_HASH, "key2", [0], dim=128, seq_len=16, device=device)
+    assert not torch.allclose(r1, r2)
+
+
+def test_concat_murmur_shape_and_dtype():
+    device = torch.device("cuda:0")
+    result = generate_inputs_concat_murmur(BLOCK_HASH, PUBLIC_KEY, [0, 1, 2], dim=64, seq_len=8, device=device)
+    assert result.shape == (3, 8, 64)
+    assert result.dtype == torch.float16
+
+
+def test_concat_murmur_differs_from_generate_inputs():
+    """concat_murmur uses all 256 SHA256 bits, so output differs from generate_inputs."""
+    device = torch.device("cuda:0")
+    r_standard = generate_inputs(BLOCK_HASH, PUBLIC_KEY, [0], dim=128, seq_len=16, device=device)
+    r_concat = generate_inputs_concat_murmur(BLOCK_HASH, PUBLIC_KEY, [0], dim=128, seq_len=16, device=device)
+    assert not torch.allclose(r_standard, r_concat)
+
+
+def test_concat_murmur_gaussian_distribution():
+    """All 8 sub-seeds contribute; combined output is approximately N(0, 1)."""
+    device = torch.device("cuda:0")
+    all_samples = []
+    for batch_start in range(0, 1000, 100):
+        nonces = list(range(batch_start, batch_start + 100))
+        out = generate_inputs_concat_murmur(BLOCK_HASH, PUBLIC_KEY, nonces, dim=256, seq_len=16, device=device)
+        all_samples.append(out.flatten().float())
+    combined = torch.cat(all_samples)
+    assert abs(combined.mean().item()) < 0.05
+    assert abs(combined.std().item() - 1.0) < 0.1
+
+
+def test_concat_murmur_cpu_gpu_match():
+    cpu = torch.device("cpu")
+    gpu = torch.device("cuda:0")
+    r_cpu = generate_inputs_concat_murmur(BLOCK_HASH, PUBLIC_KEY, [0, 1], dim=64, seq_len=8, device=cpu)
+    r_gpu = generate_inputs_concat_murmur(BLOCK_HASH, PUBLIC_KEY, [0, 1], dim=64, seq_len=8, device=gpu)
+    assert torch.allclose(r_cpu, r_gpu.cpu(), rtol=1e-3, atol=1e-3)
