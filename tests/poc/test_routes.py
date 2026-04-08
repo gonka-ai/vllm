@@ -97,6 +97,18 @@ class TestPoCInitGenerate:
         })
         assert response.status_code == 422
 
+    def test_init_generate_poc_stronger_rng_stored_in_config(self, client, mock_engine_client, app_with_poc):
+        """poc_stronger_rng=True must be stored in the generation config."""
+        mock_engine_client.poc_request.return_value = {"artifacts": []}
+        response = client.post("/api/v1/pow/init/generate", json={
+            "block_hash": "abc123", "block_height": 100, "public_key": "pubkey123",
+            "node_id": 0, "node_count": 1,
+            "params": {"model": "test-model", "seq_len": 256, "k_dim": 12},
+            "poc_stronger_rng": True,
+        })
+        assert response.status_code == 200
+        assert _poc_tasks[id(app_with_poc)]["config"]["poc_stronger_rng"] is True
+
 
 class TestPoCGenerate:
     def test_generate_returns_artifacts(self, client, mock_engine_client):
@@ -144,6 +156,20 @@ class TestPoCGenerate:
             "validation": {"artifacts": [{"nonce": 0, "vector_b64": "AAA="}, {"nonce": 5, "vector_b64": "BBB="}]},
         })
         assert response.status_code == 400
+
+    def test_generate_propagates_poc_stronger_rng(self, client, mock_engine_client):
+        """poc_stronger_rng=True must reach the engine_client.poc_request payload."""
+        mock_engine_client.poc_request.return_value = {
+            "artifacts": [{"nonce": 0, "vector_b64": "AAAA"}],
+        }
+        client.post("/api/v1/pow/generate", json={
+            "block_hash": "abc123", "block_height": 100, "public_key": "pubkey123",
+            "node_id": 0, "node_count": 1, "nonces": [0],
+            "params": {"model": "test-model", "seq_len": 256, "k_dim": 12},
+            "wait": True, "poc_stronger_rng": True,
+        })
+        payload = mock_engine_client.poc_request.call_args[0][1]
+        assert payload["poc_stronger_rng"] is True
 
 
 class TestPoCStatus:

@@ -1213,6 +1213,7 @@ class AsyncLLMEngine(EngineClient):
             public_key=payload.get("public_key", ""),
             seq_len=payload.get("seq_len", 256),
             k_dim=payload.get("k_dim", 12),
+            poc_stronger_rng=payload.get("poc_stronger_rng", False),
         )
         return {
             "artifacts": [{"nonce": a.nonce, "vector_b64": a.vector_b64} for a in artifacts],

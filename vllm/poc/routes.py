@@ -51,6 +51,7 @@ class PoCInitGenerateRequest(BaseModel):
     batch_size: int = POC_BATCH_SIZE_DEFAULT
     params: PoCParamsModel
     url: Optional[str] = None
+    poc_stronger_rng: bool = False
 
 
 @dataclass
@@ -105,6 +106,7 @@ class PoCGenerateRequest(BaseModel):
     url: Optional[str] = None
     validation: Optional[ValidationModel] = None
     stat_test: Optional[StatTestModel] = None
+    poc_stronger_rng: bool = False
 
 
 # =============================================================================
@@ -223,22 +225,24 @@ async def _compute_artifacts_chunk(
     public_key: str,
     seq_len: int,
     k_dim: int,
+    poc_stronger_rng: bool = False,
     timeout_sec: float = POC_GENERATE_CHUNK_TIMEOUT_SEC,
     check_cancelled: Optional[callable] = None,
 ) -> List[Dict]:
     """Compute artifacts for a chunk with backoff on skip."""
     chunk_start_time = time.time()
-    
+
     while True:
         if check_cancelled and check_cancelled():
             raise RuntimeError("Cancelled")
-        
+
         result = await engine_client.poc_request("generate_artifacts", {
             "nonces": nonces,
             "block_hash": block_hash,
             "public_key": public_key,
             "seq_len": seq_len,
             "k_dim": k_dim,
+            "poc_stronger_rng": poc_stronger_rng,
         })
         
         if not result.get("skipped"):
@@ -293,6 +297,7 @@ async def _generation_loop(
                         "public_key": config["public_key"],
                         "seq_len": config["seq_len"],
                         "k_dim": config["k_dim"],
+                        "poc_stronger_rng": config["poc_stronger_rng"],
                     },
                     timeout_ms=POC_RPC_TIMEOUT_MS
                 )
@@ -349,7 +354,7 @@ async def _generation_loop(
 
 @router.post("/init/generate")
 async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
-    logger.info(f"PoC /init/generate: {body.block_hash}, {body.block_height}, {body.public_key}, {body.node_id}, {body.node_count}, {body.group_id}, {body.n_groups}, {body.batch_size}, {body.params}, {body.url}")
+    logger.info(f"PoC /init/generate: {body.block_hash}, {body.block_height}, {body.public_key}, {body.node_id}, {body.node_count}, {body.group_id}, {body.n_groups}, {body.batch_size}, {body.params}, {body.url}, {body.poc_stronger_rng}")
     check_params_match(request, body.params)
     engine_client = await get_engine_client(request)
     
@@ -371,6 +376,7 @@ async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
         "batch_size": body.batch_size,
         "seq_len": body.params.seq_len,
         "k_dim": body.params.k_dim,
+        "poc_stronger_rng": body.poc_stronger_rng,
     }
     
     stats = {"start_time": 0, "total_processed": 0}
@@ -400,7 +406,7 @@ async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
 
 @router.post("/generate")
 async def generate(request: Request, body: PoCGenerateRequest) -> dict:
-    logger.info(f"PoC /generate: {body.block_hash}, {body.block_height}, {body.public_key}, {body.node_id}, {body.node_count}, {body.nonces}, {body.params}, {body.batch_size}, {body.wait}, {body.url}, {body.validation}, {body.stat_test}")
+    logger.info(f"PoC /generate: {body.block_hash}, {body.block_height}, {body.public_key}, {body.node_id}, {body.node_count}, {body.nonces}, {body.params}, {body.batch_size}, {body.wait}, {body.url}, {body.validation}, {body.stat_test}, {body.poc_stronger_rng}")
     check_params_match(request, body.params)
     engine_client = await get_engine_client(request)
     
@@ -437,6 +443,7 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
             seq_len=body.params.seq_len,
             k_dim=body.params.k_dim,
             batch_size=body.batch_size,
+            poc_stronger_rng=body.poc_stronger_rng,
             validation_artifacts=validation_map,
             stat_test_dist_threshold=stat_test.dist_threshold,
             stat_test_p_mismatch=stat_test.p_mismatch,
@@ -479,6 +486,7 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
             artifacts = await _compute_artifacts_chunk(
                 engine_client, chunk, body.block_hash, body.public_key,
                 body.params.seq_len, body.params.k_dim,
+                body.poc_stronger_rng,
                 POC_GENERATE_CHUNK_TIMEOUT_SEC, check_cancelled
             )
             computed_artifacts.extend(artifacts)
