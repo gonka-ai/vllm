@@ -389,9 +389,27 @@ async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
         callback_sender = CallbackSender(body.url, stop_event, body.params.k_dim)
         callback_task = asyncio.create_task(callback_sender.run())
     
+    # Set the flag BEFORE creating the task so the chat endpoint starts
+    # rejecting immediately — the drain in poc_request relies on no new
+    # inference arriving while it waits.
+    _poc_generation_active = True
+
     gen_task = asyncio.create_task(
         _generation_loop(engine_client, stop_event, callback_sender, config, stats)
     )
+    
+    def _on_generation_done(task: asyncio.Task):
+        global _poc_generation_active
+        _poc_generation_active = False
+        if task.cancelled():
+            logger.info("PoC generation task cancelled, flag cleared")
+        elif task.exception():
+            logger.warning("PoC generation task failed, flag cleared: %s",
+                           task.exception())
+        else:
+            logger.info("PoC generation task completed, flag cleared")
+    
+    gen_task.add_done_callback(_on_generation_done)
     
     _poc_tasks[app_id] = {
         "gen_task": gen_task,
@@ -402,7 +420,6 @@ async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
         "stats": stats,
     }
     
-    _poc_generation_active = True
     return {"status": "OK", "pow_status": {"status": "GENERATING"}}
 
 
