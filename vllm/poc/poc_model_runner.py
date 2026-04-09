@@ -27,9 +27,13 @@ logger = init_logger(__name__)
 
 DEFAULT_K_DIM = 12
 
-# Cached attention metadata (reused across calls with same batch_size+seq_len)
-_cached_attn_meta = None
-_cached_attn_meta_key = None
+# NOTE: attention metadata must NOT be cached across PoC calls.
+# The metadata builder's internal state (workspace buffers, page-table
+# references) is mutated by every inference engine step.  Reusing a
+# stale metadata object causes the attention backend to write only a
+# fraction of the expected KV entries, producing all-NaN hidden states.
+# The cost of rebuilding is <1 ms per call (vs ~15 ms for the model
+# forward), so the overhead is negligible.
 
 
 def _ensure_layer_hooks(worker, block_hash, hidden_size):
@@ -128,15 +132,8 @@ def _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker):
 
 
 def _get_or_create_attn_metadata(batch_size, seq_len, block_size, device, worker):
-    """Get cached attention metadata or create new one."""
-    global _cached_attn_meta, _cached_attn_meta_key
-    key = (batch_size, seq_len, block_size, device)
-    if _cached_attn_meta_key == key and _cached_attn_meta is not None:
-        return _cached_attn_meta
-    result = _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker)
-    _cached_attn_meta = result
-    _cached_attn_meta_key = key
-    return result
+    """Create fresh attention metadata for the given parameters."""
+    return _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker)
 
 
 @torch.inference_mode()
