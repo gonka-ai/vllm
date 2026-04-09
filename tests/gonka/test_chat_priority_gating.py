@@ -1,8 +1,8 @@
 """Tests for Chat Priority Gating (PoC ↔ Chat coexistence).
 
 Tests cover:
-1. engine_patch.py: poc_request logs but proceeds when inference is active
-2. api_router.py: chat endpoint rejects requests when PoC generation is active
+1. engine_patch.py: poc_request aborts in-flight inference and proceeds
+2. api_router.py: chat and completion endpoints reject requests when PoC active
 3. routes.py: _poc_generation_active flag lifecycle (set/cleared correctly)
 """
 import asyncio
@@ -10,16 +10,16 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # ---------------------------------------------------------------------------
-# 1. Engine patch: poc_request behaviour with active inference
+# 1. Engine patch: poc_request aborts in-flight inference then proceeds
 # ---------------------------------------------------------------------------
 
 class TestPocRequestChatGating:
-    """Test that poc_request proceeds even when inference is in-flight
-    (V1 engine core serializes collective_rpc with inference steps)."""
+    """Test that poc_request aborts in-flight inference requests and proceeds
+    with PoC artifact generation."""
 
     @pytest.mark.asyncio
-    async def test_poc_request_proceeds_with_active_inference(self):
-        """poc_request should NOT skip when inference is active in V1."""
+    async def test_poc_request_aborts_active_inference(self):
+        """poc_request should abort in-flight requests then run collective_rpc."""
         from vllm.poc.engine_patch import poc_request
 
         mock_self = AsyncMock()
@@ -27,8 +27,11 @@ class TestPocRequestChatGating:
 
         mock_output_processor = MagicMock()
         mock_output_processor.has_unfinished_requests.return_value = True
-        mock_output_processor.get_num_unfinished_requests.return_value = 3
+        mock_output_processor.request_states = {
+            "req-1": MagicMock(), "req-2": MagicMock(), "req-3": MagicMock(),
+        }
         mock_self.output_processor = mock_output_processor
+        mock_self.abort = AsyncMock()
 
         mock_self.collective_rpc = AsyncMock(return_value=[{
             "vectors": __import__("numpy").zeros((2, 12), dtype="float16"),
@@ -41,9 +44,93 @@ class TestPocRequestChatGating:
              "seq_len": 256, "k_dim": 12},
         )
 
+        mock_self.abort.assert_called_once()
+        aborted_ids = mock_self.abort.call_args[0][0]
+        assert set(aborted_ids) == {"req-1", "req-2", "req-3"}
+        assert mock_self.abort.call_args[1].get("internal") is True
+
         assert "skipped" not in result or not result.get("skipped")
         assert len(result["artifacts"]) == 2
         mock_self.collective_rpc.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_poc_request_no_abort_when_no_inflight(self):
+        """poc_request should skip abort when no requests are in-flight."""
+        from vllm.poc.engine_patch import poc_request
+
+        mock_self = AsyncMock()
+        mock_self.vllm_config.model_config.get_hidden_size.return_value = 4096
+
+        mock_output_processor = MagicMock()
+        mock_output_processor.has_unfinished_requests.return_value = False
+        mock_self.output_processor = mock_output_processor
+        mock_self.abort = AsyncMock()
+
+        mock_self.collective_rpc = AsyncMock(return_value=[{
+            "vectors": __import__("numpy").zeros((1, 12), dtype="float16"),
+            "nonces": [0],
+        }])
+
+        result = await poc_request(
+            mock_self, "generate_artifacts",
+            {"nonces": [0], "block_hash": "abc", "public_key": "pk",
+             "seq_len": 256, "k_dim": 12},
+        )
+
+        mock_self.abort.assert_not_called()
+        assert len(result["artifacts"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_poc_request_skips_abort_when_request_states_empty(self):
+        """Race: has_unfinished=True but request_states already drained."""
+        from vllm.poc.engine_patch import poc_request
+
+        mock_self = AsyncMock()
+        mock_self.vllm_config.model_config.get_hidden_size.return_value = 4096
+
+        mock_output_processor = MagicMock()
+        mock_output_processor.has_unfinished_requests.return_value = True
+        mock_output_processor.request_states = {}
+        mock_self.output_processor = mock_output_processor
+        mock_self.abort = AsyncMock()
+
+        mock_self.collective_rpc = AsyncMock(return_value=[{
+            "vectors": __import__("numpy").zeros((1, 12), dtype="float16"),
+            "nonces": [0],
+        }])
+
+        result = await poc_request(
+            mock_self, "generate_artifacts",
+            {"nonces": [0], "block_hash": "abc", "public_key": "pk",
+             "seq_len": 256, "k_dim": 12},
+        )
+
+        mock_self.abort.assert_not_called()
+        assert len(result["artifacts"]) == 1
+        mock_self.collective_rpc.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_poc_request_abort_failure_propagates(self):
+        """If abort() itself raises, the error propagates to the caller."""
+        from vllm.poc.engine_patch import poc_request
+
+        mock_self = AsyncMock()
+        mock_self.vllm_config.model_config.get_hidden_size.return_value = 4096
+
+        mock_output_processor = MagicMock()
+        mock_output_processor.has_unfinished_requests.return_value = True
+        mock_output_processor.request_states = {"req-1": MagicMock()}
+        mock_self.output_processor = mock_output_processor
+        mock_self.abort = AsyncMock(side_effect=RuntimeError("engine dead"))
+
+        with pytest.raises(RuntimeError, match="engine dead"):
+            await poc_request(
+                mock_self, "generate_artifacts",
+                {"nonces": [0], "block_hash": "abc", "public_key": "pk",
+                 "seq_len": 256, "k_dim": 12},
+            )
+
+        mock_self.collective_rpc.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_poc_request_proceeds_without_output_processor(self):
@@ -122,11 +209,12 @@ class TestPocRequestChatGating:
 
 
 # ---------------------------------------------------------------------------
-# 2. Chat endpoint rejects requests when PoC is active
+# 2. Chat and completion endpoints reject requests when PoC is active
 # ---------------------------------------------------------------------------
 
-class TestChatEndpointPocRejection:
-    """Test that /v1/chat/completions returns 503 when PoC generation active."""
+class TestEndpointPocRejection:
+    """Test that /v1/chat/completions and /v1/completions return 503 when
+    PoC generation is active."""
 
     @pytest.mark.asyncio
     async def test_chat_rejected_when_poc_active(self):
@@ -152,6 +240,32 @@ class TestChatEndpointPocRejection:
                 "/v1/chat/completions",
                 json={"model": "test", "messages": [{"role": "user",
                                                       "content": "hi"}]},
+            )
+            assert resp.status_code == 503
+            body = resp.json()
+            assert "PoC generation is active" in body["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_completion_rejected_when_poc_active(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from vllm.entrypoints.openai.completion.api_router import router
+
+        app = FastAPI()
+        app.include_router(router)
+
+        app.state.openai_serving_completion = None
+        app.state.openai_serving_tokenization = MagicMock()
+        app.state.openai_serving_tokenization.create_error_response = (
+            lambda message: MagicMock()
+        )
+
+        with patch("vllm.poc.routes._poc_generation_active", True):
+            client = TestClient(app)
+            resp = client.post(
+                "/v1/completions",
+                json={"model": "test", "prompt": "hello"},
             )
             assert resp.status_code == 503
             body = resp.json()

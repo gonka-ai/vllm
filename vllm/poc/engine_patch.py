@@ -3,19 +3,18 @@
 This module patches the V1 AsyncLLM class to add poc_request support,
 enabling PoC (Proof of Compute) artifact generation.
 
-Chat Priority Gating:
-    PoC has priority over chat. When PoC generation is active, the chat
-    API endpoint (api_router.py) rejects new inference requests with 503.
+PoC Priority:
+    PoC has priority over inference. When PoC generation is active, the
+    chat and completion API endpoints reject new requests with 503.
 
     IMPORTANT: PoC's execute_poc_forward reuses KV cache blocks starting
     from block 0 (both as scratch for inputs_embeds and as the attention
     slot mapping).  If any inference request still has KV blocks allocated,
     PoC will overwrite them and permanently corrupt the model output.
 
-    Therefore poc_request MUST wait for all in-flight requests to fully
-    complete (drain) before issuing the collective_rpc.  The API-level
-    gating ensures no *new* requests arrive, so the drain is bounded by
-    the longest in-flight generation (max_tokens).
+    Therefore poc_request aborts all in-flight inference requests before
+    issuing collective_rpc.  The API-level 503 gating prevents new
+    requests from arriving while PoC is active.
 
 Usage:
     Import this module early in the application startup to apply the patch.
@@ -35,14 +34,14 @@ async def poc_request(self, action: str, payload: dict, timeout_ms: int = 60000)
     Only supports 'generate_artifacts' action. All PoC state (generation
     loop, nonce counter, stats) is managed in the API layer.
     
-    Before issuing the GPU work this method waits for every in-flight
-    inference request to complete.  This is required because
-    execute_poc_forward writes into KV-cache blocks starting from block 0;
-    if any request still holds those blocks the KV data is corrupted and
-    the model produces garbage for the rest of its lifetime.
+    Before issuing the GPU work this method aborts all in-flight inference
+    requests.  This is required because execute_poc_forward writes into
+    KV-cache blocks starting from block 0; if any request still holds
+    those blocks the KV data is corrupted and the model produces garbage
+    for the rest of its lifetime.
     
-    The API-level chat gating (api_router.py) prevents new requests from
-    arriving, so the drain is bounded by the longest in-flight generation.
+    The API-level 503 gating (chat and completion api_router.py) prevents
+    new requests from arriving while PoC is active.
     
     Args:
         action: The PoC action to perform (only 'generate_artifacts' supported)
@@ -71,28 +70,20 @@ async def poc_request(self, action: str, payload: dict, timeout_ms: int = 60000)
     if not nonces:
         return {"artifacts": []}
     
-    # Drain all in-flight inference before touching the GPU.
+    # Abort all in-flight inference before touching the GPU.
     # execute_poc_forward reuses KV-cache blocks from block 0, so any
     # request that still holds allocated blocks would get its KV data
     # destroyed, permanently corrupting model output.
-    # The API-level gating (api_router.py) already blocks new requests,
-    # so we only need to wait for existing ones to finish.
+    # The API-level 503 gating already blocks new requests, so only the
+    # first batch will typically find anything to abort.
     output_processor = getattr(self, 'output_processor', None)
     if output_processor is not None and output_processor.has_unfinished_requests():
-        n = output_processor.get_num_unfinished_requests()
-        logger.info("PoC waiting for %d in-flight inference request(s) to drain", n)
-        drain_start = asyncio.get_event_loop().time()
-        while output_processor.has_unfinished_requests():
-            await asyncio.sleep(0.1)
-            elapsed = asyncio.get_event_loop().time() - drain_start
-            if elapsed > timeout_ms / 1000.0:
-                n = output_processor.get_num_unfinished_requests()
-                logger.warning("PoC drain timed out after %.1fs with %d "
-                               "request(s) still in-flight, skipping",
-                               elapsed, n)
-                return {"artifacts": [], "skipped": True}
-        elapsed = asyncio.get_event_loop().time() - drain_start
-        logger.info("Inference drained in %.1fs, proceeding with PoC", elapsed)
+        request_ids = list(output_processor.request_states.keys())
+        if request_ids:
+            logger.info("PoC aborting %d in-flight inference request(s)",
+                        len(request_ids))
+            await self.abort(request_ids, internal=True)
+            await asyncio.sleep(0.05)
     
     # Get model config for hidden_size
     # V1 engine stores config differently

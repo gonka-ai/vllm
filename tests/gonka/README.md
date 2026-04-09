@@ -17,7 +17,7 @@ Tests for Gonka-specific features in the vLLM fork: Proof of Computation (PoC), 
 
 | File | What it tests |
 |------|---------------|
-| `test_live_chat_priority.py` | PoC activates → chat rejected 503 → PoC stops → chat resumes; long inference overlap with PoC |
+| `test_live_chat_priority.py` | PoC activates → chat rejected 503 → PoC stops → chat resumes; long inference aborted by PoC, engine survives |
 | `test_live_grammar_degradation.py` | Structured output + enforced tokens replay; corrupted tokens don't crash engine; distance2 with grammar |
 | `test_live_inference.py` | Basic chat, logprobs, structured output, temperature, seed determinism, max_tokens, top_logprobs |
 | `test_live_validation.py` | Enforced token replay across params (temperature, seed, grammar, prompt lengths); corrupted tokens; text match; distance2 |
