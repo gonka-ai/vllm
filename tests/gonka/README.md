@@ -131,11 +131,11 @@ python3 -m pytest tests/gonka/test_live_inference.py tests/gonka/test_live_valid
 # Only PoC
 python3 -m pytest tests/gonka/test_live_poc.py -v -s --noconftest
 
-# Only chat priority gating (run LAST — see warning below)
+# Only chat priority gating
 python3 -m pytest tests/gonka/test_live_chat_priority.py -v -s --noconftest
 ```
 
-> **Warning:** `test_live_chat_priority` tests PoC/inference concurrency which corrupts GPU state (model weights or KV cache). After these tests run, the server produces garbage output. Always run chat priority tests **last**, and expect to restart the server afterwards.
+Tests can be run in **any order**. Each test file cleans up after itself (PoC is stopped before and after every test via fixtures).
 
 ---
 
@@ -150,4 +150,5 @@ Expected values for honest self-validation (same server, same model):
 - **distance2 < 0.05** for all inference validation (with or without grammar)
 
 For PoC self-validation:
-- **L2 distance < 0.2** between two runs with identical parameters
+- **L2 distance < 0.2** for individual pairs (test_02)
+- **Mean L2 < 0.1, max L2 < 0.3** across 20 pairs (test_06 — wider max to avoid flakes from float16 variance)

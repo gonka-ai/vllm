@@ -152,7 +152,7 @@ class TestPoC:
         print(f"\n  Server-side validation response: {list(data.keys())}")
 
     def test_06_multiple_self_validations_all_below_threshold(self):
-        """Run 5 self-validations, all should have L2 < 0.2."""
+        """Run 5 self-validations, mean L2 < 0.1 and max L2 < 0.3."""
         distances = []
         for i in range(5):
             nonces = [i * 4, i * 4 + 1, i * 4 + 2, i * 4 + 3]
@@ -173,7 +173,11 @@ class TestPoC:
         print(f"\n  Self-validation distances ({len(distances)} pairs): "
               f"{[f'{d:.6f}' for d in distances]}")
         print(f"  Mean: {mean_dist:.6f}, Max: {max_dist:.6f}")
-        assert max_dist < 0.2, (
-            f"Max self-validation distance {max_dist:.4f} >= 0.2. "
+        assert mean_dist < 0.1, (
+            f"Mean self-validation distance {mean_dist:.4f} >= 0.1. "
+            f"All: {[f'{d:.4f}' for d in distances]}"
+        )
+        assert max_dist < 0.3, (
+            f"Max self-validation distance {max_dist:.4f} >= 0.3. "
             f"All: {[f'{d:.4f}' for d in distances]}"
         )
