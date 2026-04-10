@@ -25,11 +25,13 @@ class OpenAIServingValidate:
         self,
         engine_client: EngineClient,
         threshold: float,
+        toploc_validation_usage: bool,
     ):
         super().__init__()
 
         self.engine_client = engine_client
         self.threshold = threshold
+        self.toploc_validation_usage = toploc_validation_usage
 
     async def validate(
         self,
@@ -39,6 +41,9 @@ class OpenAIServingValidate:
         validation_artifacts: list[dict[str, str]] | None = None,
     ) -> ValidationResult | ErrorResponse:
         """Validate logprobs and optionally input artifacts."""
+        if self.toploc_validation_usage:
+            raise NotImplementedError("Toploc validation usage is not implemented")
+        # TODO: implement toploc validation usage
         try:
             return compare_logprobs(
                 original_logprobs,

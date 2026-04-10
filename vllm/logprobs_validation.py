@@ -19,6 +19,26 @@ from vllm.entrypoints.openai.protocol import (
 )
 
 SIMILARITY_THRESHOLD = 0.99
+TOPLOC_VALIDATION_USAGE = False
+
+
+def set_validation_runtime_config(
+    similarity_threshold: float | None = None,
+    toploc_validation_usage: bool | None = None,
+) -> None:
+    """Set runtime validation config from server CLI args."""
+    global SIMILARITY_THRESHOLD, TOPLOC_VALIDATION_USAGE
+
+    if similarity_threshold is not None:
+        if not 0.0 <= similarity_threshold <= 1.0:
+            raise ValueError(
+                "similarity_threshold must be in [0.0, 1.0], "
+                f"got {similarity_threshold!r}"
+            )
+        SIMILARITY_THRESHOLD = similarity_threshold
+
+    if toploc_validation_usage is not None:
+        TOPLOC_VALIDATION_USAGE = toploc_validation_usage
 
 
 @dataclass
@@ -93,28 +113,36 @@ def compare_logprobs(
             artifacts_match=False,
         )
 
-    if len(validation_logprobs) < len(original_logprobs):
-        return ValidationResult(
-            threshold=threshold,
-            similarity=0.0,
-            reason="different_length",
-            artifacts_match=artifacts_match,
+    # Important for quantization detection (int8 vs int4):
+    # even if sequence lengths / token ids differ, we still compute similarity
+    # on the common prefix to keep a usable numeric signal.
+    prefix_len = min(len(original_logprobs), len(validation_logprobs))
+    if prefix_len <= 0:
+        similarity = 0.0
+        tokens_match = False
+    else:
+        original_prefix = original_logprobs[:prefix_len]
+        validation_prefix = validation_logprobs[:prefix_len]
+        similarity_prefix = _custom_similarity(original_prefix, validation_prefix)
+        # Down-weight similarity if one side is shorter.
+        max_len = max(len(original_logprobs), len(validation_logprobs))
+        len_factor = prefix_len / max_len if max_len > 0 else 0.0
+        similarity = similarity_prefix * len_factor
+        tokens_match = all(
+            original_prefix[i].token == validation_prefix[i].token
+            for i in range(prefix_len)
         )
 
-    for i in range(len(original_logprobs)):
-        if original_logprobs[i].token != validation_logprobs[i].token:
-            return ValidationResult(
-                threshold=threshold,
-                similarity=0.0,
-                reason="different_tokens",
-                artifacts_match=artifacts_match,
-            )
-
-    similarity = _custom_similarity(original_logprobs, validation_logprobs)
+    if len(validation_logprobs) != len(original_logprobs):
+        reason: ValidationResult.reason = "different_length"
+    elif not tokens_match:
+        reason = "different_tokens"
+    else:
+        reason = "similarity"
     return ValidationResult(
         threshold=threshold,
         similarity=similarity,
-        reason="similarity",
+        reason=reason,
         artifacts_match=artifacts_match,
     )
 

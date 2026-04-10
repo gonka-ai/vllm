@@ -269,6 +269,18 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "Must be a YAML with the following options: "
         "https://docs.vllm.ai/en/latest/configuration/serve_args.html",
     )
+    parser.add_argument(
+        "--validation-similarity-threshold",
+        type=float,
+        default=0.99,
+        help="Similarity threshold for /v1/validate logprobs comparison.",
+    )
+    parser.add_argument(
+        "--toploc-validation-usage",
+        action="store_true",
+        default=False,
+        help="Enable toploc validation usage runtime flag.",
+    )
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
 
@@ -288,6 +300,10 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+    if not 0.0 <= args.validation_similarity_threshold <= 1.0:
+        raise TypeError(
+            "Error: --validation-similarity-threshold must be in [0.0, 1.0]"
+        )
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
