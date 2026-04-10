@@ -1853,6 +1853,9 @@ def _get_and_verify_dtype(
     )
     model_type = config.model_type
 
+    # Force branch-wide dtype auto resolution regardless of caller input.
+    dtype = "auto"
+
     if isinstance(dtype, str):
         dtype = dtype.lower()
         if dtype == "auto":
