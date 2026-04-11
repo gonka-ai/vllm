@@ -144,24 +144,34 @@ class XgrammarGrammar(StructuredOutputGrammar):
         default_factory=lambda: 0, repr=False, hash=False, init=False
     )
     _is_terminated: bool = field(default=False, repr=False, hash=False)
+    _grammar_failed: bool = field(default=False, repr=False, hash=False)
 
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
 
         Returns True if the FSM was advanced successfully.
         Returns False if the FSM failed to advance.
+
+        Grammar graceful degradation: when a token is rejected (e.g.
+        enforced tokens from validation replay that conflict with the
+        grammar FSM), grammar enforcement is disabled for the rest of
+        this request instead of causing a crash.
         """
         if self._is_terminated:
             return False
+        if self._grammar_failed:
+            return True
         for token in tokens:
             if not self.matcher.accept_token(token):
-                logger.error(
-                    "Failed to advance FSM for request %s "
-                    "for tokens %s. Please file an issue.",
-                    request_id,
+                logger.warning(
+                    "Grammar rejected token %d for request %s. "
+                    "Disabling grammar enforcement for this request "
+                    "(token may be from enforced replay).",
                     token,
+                    request_id,
                 )
-                return False
+                self._grammar_failed = True
+                return True
             self.num_processed_tokens += 1
         self._is_terminated = self.matcher.is_terminated()
         return True
@@ -184,11 +194,15 @@ class XgrammarGrammar(StructuredOutputGrammar):
         return accepted_tokens
 
     def rollback(self, num_tokens: int) -> None:
+        if self._grammar_failed:
+            return
         self.matcher.rollback(num_tokens)
         self.num_processed_tokens -= num_tokens
         self._is_terminated = self.matcher.is_terminated()
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
+        if self._grammar_failed:
+            return
         self.matcher.fill_next_token_bitmask(bitmask, idx)
 
     def is_terminated(self) -> bool:
@@ -196,6 +210,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
 
     def reset(self):
         self.num_processed_tokens = 0
+        self._grammar_failed = False
         self.matcher.reset()
 
 
