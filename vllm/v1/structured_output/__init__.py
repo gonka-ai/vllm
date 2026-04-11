@@ -316,9 +316,18 @@ class StructuredOutputManager:
                         if accepted:
                             state_advancements += 1
                         elif not post_reasoning_end_in_window:
-                            raise AssertionError(
-                                (token, req_id, scheduled_spec_decode_tokens)
+                            # gonka: grammar rejected a token during spec-decode
+                            # bitmask fill -> degrade gracefully instead of
+                            # crashing the engine. Disable the bitmask for this
+                            # request rather than raise.
+                            logger.warning(
+                                "Grammar rejected token %d for request %s "
+                                "during speculative decode bitmask fill. "
+                                "Disabling bitmask for this request.",
+                                token,
+                                req_id,
                             )
+                            apply_bitmask = False
                     cumulative_index += 1
                 # Diffusion LLMs don't sample a bonus token after the
                 # scheduled positions, so skip its bitmask in that case.
