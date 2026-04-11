@@ -48,8 +48,20 @@ class SamplingMetadata:
     # req_index -> list of token IDs to get logprobs for
     logprob_token_ids: dict[int, list[int]] | None = None
 
+    # Per-request logprobs mode: "raw_logprobs", "processed_logprobs",
+    # "mixed", or None (no sampled-token logprobs requested).
+    batch_logprobs_mode: str | None = None
+
+    # Per-row bool mask: True = processed, False = raw.
+    # Only materialized when batch_logprobs_mode == "mixed".
+    logprobs_is_processed: torch.Tensor | None = None
+
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
     # When non-None, use ``holder.has_tracked_requests()`` to see if this batch applies
     # thinking-token-budget logits (holder may exist with an empty tracking set).
     thinking_budget_state_holder: ThinkingBudgetStateHolder | None = None
+
+    # Enforced next token ids for validation replay (gonka PoC).
+    # Shape [num_reqs], -1 means no enforcement for that request.
+    enforced_next_token_ids: torch.Tensor | None = None
