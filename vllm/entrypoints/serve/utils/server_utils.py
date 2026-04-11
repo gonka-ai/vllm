@@ -563,6 +563,12 @@ async def lifespan(app: FastAPI):
                 serving = getattr(app.state, attr_name, None)
                 if serving is not None and hasattr(serving, "shutdown"):
                     serving.shutdown()
+            try:
+                from vllm.poc.generate_queue import clear_queue as clear_poc_queue
+
+                await clear_poc_queue()
+            except Exception as e:
+                logger.debug(f"Error clearing PoC queue: {e}")
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state

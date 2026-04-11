@@ -12,7 +12,7 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponse,
 )
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
     validate_json_request,
@@ -38,12 +38,34 @@ def completion(request: Request) -> OpenAIServingCompletion | None:
         HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
 @with_cancellation
 @load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
+    # Priority gating: reject inference while PoC generation is active.
+    try:
+        from vllm.poc.routes import is_poc_generation_active
+
+        if is_poc_generation_active():
+            return JSONResponse(
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+                content=ErrorResponse(
+                    error=ErrorInfo(
+                        message=(
+                            "PoC generation is active. Inference requests "
+                            "are temporarily unavailable."
+                        ),
+                        type="service_unavailable",
+                        code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+                    ),
+                ).model_dump(),
+            )
+    except ImportError:
+        pass
+
     metrics_header_format = raw_request.headers.get(
         ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
     )

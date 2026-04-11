@@ -47,6 +47,7 @@ from vllm.sampling_params import (
     ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
+from vllm.validation import EnforcedTokens
 
 logger = init_logger(__name__)
 
@@ -269,6 +270,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     prompt_logprobs: int | None = None
     allowed_token_ids: list[int] | None = None
     bad_words: list[str] = Field(default_factory=list)
+    logprobs_mode: Literal["raw_logprobs", "processed_logprobs"] | None = None
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]
@@ -437,6 +439,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
+    )
+
+    enforced_tokens: EnforcedTokens | None = Field(
+        default=None,
+        description="Enforced token sequence for validation (gonka-style).",
+    )
+    enforced_str: str | None = Field(
+        default=None,
+        description="Enforced output string for validation.",
     )
 
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
@@ -679,6 +690,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             stop_token_ids=stop_token_ids,
             logprobs=self.top_logprobs if self.logprobs else None,
             prompt_logprobs=prompt_logprobs,
+            logprobs_mode=self.logprobs_mode,
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
