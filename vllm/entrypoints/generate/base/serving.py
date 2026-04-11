@@ -256,18 +256,12 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         tokenizer: TokenizerLike | None,
         return_as_token_id: bool = False,
     ) -> str:
-        if return_as_token_id:
-            return format_token_id_placeholder(token_id)
-
-        if logprob.decoded_token is not None:
-            return logprob.decoded_token
-
-        if tokenizer is None:
-            raise ValueError(
-                "Unable to get tokenizer because `skip_tokenizer_init=True`"
-            )
-
-        return tokenizer.decode([token_id])
+        # gonka PoC v2: always return the raw token id as a numeric string so
+        # the downstream validator can do int(token) on EnforcedToken inputs
+        # and match by token id rather than by (tokenizer-dependent) text.
+        # Applied on the live 0.25 serving path -- the original commit targeted
+        # vllm/entrypoints/openai/engine/serving.py, which no longer exists.
+        return str(token_id)
 
 
 def format_token_id_placeholder(token_id: int) -> str:
