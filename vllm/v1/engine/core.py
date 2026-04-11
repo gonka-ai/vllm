@@ -369,6 +369,35 @@ class EngineCore:
             )
         return metadata
 
+    def borrow_poc_blocks(self, num_blocks: int) -> list[int] | None:
+        """Borrow `num_blocks` free KV-cache blocks for a PoC validation forward.
+
+        Lets a PoC validation write into KV blocks that are disjoint from any
+        in-flight inference, so inference need not be aborted (combine PoC and
+        inference). Returns block ids, or None if the pool cannot spare them.
+        """
+        block_pool = self.scheduler.kv_cache_manager.block_pool
+        if num_blocks <= 0 or num_blocks > block_pool.get_num_free_blocks():
+            return None
+        try:
+            blocks = block_pool.get_new_blocks(num_blocks)
+        except (ValueError, AssertionError):
+            return None
+        block_ids = [b.block_id for b in blocks if not b.is_null]
+        if len(block_ids) != num_blocks:
+            # A null/placeholder block slipped in — roll back rather than risk
+            # writing PoC K/V over the null block.
+            block_pool.free_blocks(blocks)
+            return None
+        return block_ids
+
+    def return_poc_blocks(self, block_ids: list[int]) -> None:
+        """Return blocks previously borrowed via borrow_poc_blocks."""
+        if not block_ids:
+            return
+        block_pool = self.scheduler.kv_cache_manager.block_pool
+        block_pool.free_blocks([block_pool.blocks[bid] for bid in block_ids])
+
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
 
