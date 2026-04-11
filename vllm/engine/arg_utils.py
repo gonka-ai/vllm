@@ -2209,7 +2209,7 @@ class EngineArgs:
             # For GPUs like H100 and MI300x, use larger default values.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
-                UsageContext.OPENAI_API_SERVER: 8192,
+                UsageContext.OPENAI_API_SERVER: 32768,
             }
             default_max_num_seqs = {
                 UsageContext.LLM_CLASS: 1024,
@@ -2219,7 +2219,7 @@ class EngineArgs:
             # TODO(woosuk): Tune the default values for other hardware.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 8192,
-                UsageContext.OPENAI_API_SERVER: 2048,
+                UsageContext.OPENAI_API_SERVER: 32768,
             }
             default_max_num_seqs = {
                 UsageContext.LLM_CLASS: 256,

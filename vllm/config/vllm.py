@@ -950,13 +950,7 @@ class VllmConfig:
             )
 
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
-            if (
-                self.compilation_config.backend == "inductor"
-                and self.compilation_config.mode != CompilationMode.NONE
-            ):
-                self.compilation_config.custom_ops.append("none")
-            else:
-                self.compilation_config.custom_ops.append("all")
+            self.compilation_config.custom_ops.append("all")
 
         # This populates IR op priorities,
         # must happen after compilation mode and backend are decided,
