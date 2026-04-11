@@ -1,0 +1,21 @@
+ARG BASE_IMAGE=vllm/vllm-openai:v0.19.0
+FROM ${BASE_IMAGE}
+
+ENV VLLM_ALLOW_INSECURE_SERIALIZATION=1
+# NVFP4 on Blackwell (B200 / RTX PRO 6000) — enable FlashInfer MoE NVFP4
+# and FP8 fast paths. Harmless on non-NVFP4 models / non-Blackwell GPUs.
+ENV VLLM_USE_FLASHINFER_MOE_FP4=1
+ENV VLLM_USE_FLASHINFER_MOE_FP8=1
+
+RUN pip install --no-cache-dir scipy
+
+# Copy local code to temp location.
+COPY ./vllm /tmp/vllm-src
+
+# Merge only .py files into existing vllm package (preserves .so files).
+# Self-healing: picks up any new/changed Python file in the source tree,
+# so adding files to vllm/poc/ or patching existing modules does not
+# require updating a hand-maintained COPY list.
+RUN cd /tmp/vllm-src \
+    && find . -name "*.py" | tar -cf - -T - | tar -xf - -C /usr/local/lib/python3.12/dist-packages/vllm/ \
+    && rm -rf /tmp/vllm-src
