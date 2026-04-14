@@ -136,6 +136,43 @@ def generate_inputs(
     return result
 
 
+def generate_inputs_concat_murmur(
+    block_hash: str,
+    public_key: str,
+    nonces: List[int],
+    dim: int,
+    seq_len: int,
+    device: torch.device,
+    dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """Generate deterministic input embeddings using concat-murmur (stronger RNG).
+
+    Uses all 256 bits of SHA256 by splitting into 8 × 32-bit sub-seeds.
+    Each sub-seed generates one segment of length ceil(n/8) via the existing
+    murmur3 pipeline; segments are concatenated.
+    """
+    batch_size = len(nonces)
+    result = torch.empty(batch_size, seq_len, dim, device=device, dtype=dtype)
+    n = seq_len * dim
+    seg_len = (n + 7) // 8  # ceil(n/8); last segment may be shorter
+
+    for i, nonce in enumerate(nonces):
+        h = hashlib.sha256(
+            f"{block_hash}_{public_key}_nonce{nonce}".encode()
+        ).digest()
+        sub_seeds = [int.from_bytes(h[j:j + 4], 'big') for j in range(0, 32, 4)]
+
+        segments = [
+            _normal(s, min(seg_len, n - k * seg_len), device)
+            for k, s in enumerate(sub_seeds)
+            if k * seg_len < n
+        ]
+        flat = torch.cat(segments)[:n]
+        result[i] = flat.view(seq_len, dim).to(dtype)
+
+    return result
+
+
 def generate_target(
     block_hash: str,
     public_key: str,
