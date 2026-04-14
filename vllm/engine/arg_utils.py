@@ -1390,7 +1390,7 @@ class EngineArgs:
             usage_context, model_config
         )
         if self.gpu_memory_utilization is None:
-            if usage_context == UsageContext.OPENAI_API_SERVER:
+            if getattr(usage_context, "value", usage_context) == "OPENAI_API_SERVER":
                 self.gpu_memory_utilization = 0.925
             else:
                 self.gpu_memory_utilization = CacheConfig.gpu_memory_utilization
