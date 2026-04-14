@@ -432,7 +432,7 @@ class EngineArgs:
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
-    gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
+    gpu_memory_utilization: float | None = None
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
@@ -909,7 +909,11 @@ class EngineArgs:
         )
         cache_group.add_argument("--block-size", **cache_kwargs["block_size"])
         cache_group.add_argument(
-            "--gpu-memory-utilization", **cache_kwargs["gpu_memory_utilization"]
+            "--gpu-memory-utilization",
+            **{
+                **cache_kwargs["gpu_memory_utilization"],
+                "default": None,
+            },
         )
         cache_group.add_argument(
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
@@ -1385,6 +1389,11 @@ class EngineArgs:
         self._set_default_max_num_seqs_and_batched_tokens_args(
             usage_context, model_config
         )
+        if self.gpu_memory_utilization is None:
+            if usage_context == UsageContext.OPENAI_API_SERVER:
+                self.gpu_memory_utilization = 0.925
+            else:
+                self.gpu_memory_utilization = CacheConfig.gpu_memory_utilization
 
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
