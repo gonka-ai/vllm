@@ -33,6 +33,7 @@ class GenerateJob:
     seq_len: int
     k_dim: int
     batch_size: int
+    poc_stronger_rng: bool = False
     validation_artifacts: Optional[Dict[int, str]] = None
     stat_test_dist_threshold: float = DEFAULT_DIST_THRESHOLD
     stat_test_p_mismatch: float = DEFAULT_P_MISMATCH
@@ -235,6 +236,7 @@ class GenerateQueue:
                             "public_key": job.public_key,
                             "seq_len": job.seq_len,
                             "k_dim": job.k_dim,
+                            "poc_stronger_rng": job.poc_stronger_rng,
                         }),
                         timeout=POC_GENERATE_CHUNK_TIMEOUT_SEC
                     )

@@ -20,4 +20,5 @@ class PoCConfig:
     batch_size: int = 32
     seq_len: int = 256
     k_dim: int = 12
+    poc_stronger_rng: bool = False
     callback_url: Optional[str] = None

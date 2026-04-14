@@ -66,6 +66,7 @@ async def poc_request(self, action: str, payload: dict, timeout_ms: int = 60000)
     public_key = payload.get("public_key", "")
     seq_len = payload.get("seq_len", 256)
     k_dim = payload.get("k_dim", 12)
+    poc_stronger_rng = payload.get("poc_stronger_rng", False)
     
     if not nonces:
         return {"artifacts": []}
@@ -112,6 +113,7 @@ async def poc_request(self, action: str, payload: dict, timeout_ms: int = 60000)
                 seq_len,
                 hidden_size,
                 k_dim,
+                poc_stronger_rng,
             ),
         )
         
