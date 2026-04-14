@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 
 from .gpu_random import (
     generate_inputs,
+    generate_inputs_concat_murmur,
     random_pick_indices,
     apply_haar_rotation,
 )
@@ -145,6 +146,7 @@ def execute_poc_forward(
     seq_len: int,
     hidden_size: int,
     k_dim: int = DEFAULT_K_DIM,
+    poc_stronger_rng: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Execute batched PoC forward pass on a V1 worker.
 
@@ -169,6 +171,7 @@ def execute_poc_forward(
                 "hidden_size": hidden_size,
                 "nonces": nonces,
                 "k_dim": k_dim,
+                "poc_stronger_rng": poc_stronger_rng,
             }, src=0)
         else:
             broadcast_data = broadcast_tensor_dict(src=0)
@@ -177,6 +180,7 @@ def execute_poc_forward(
             nonces = list(broadcast_data["nonces"])
             k_dim = int(broadcast_data["k_dim"])
             batch_size = len(nonces)
+            poc_stronger_rng = bool(broadcast_data["poc_stronger_rng"])
 
     pp_group = get_pp_group()
 
@@ -219,7 +223,8 @@ def execute_poc_forward(
                 del vals
             inputs_embeds = kv_scratch
         else:
-            inputs_embeds = generate_inputs(
+            _gen_fn = generate_inputs_concat_murmur if poc_stronger_rng else generate_inputs
+            inputs_embeds = _gen_fn(
                 block_hash, public_key, nonces,
                 dim=hidden_size, seq_len=seq_len,
                 device=device, dtype=dtype,
