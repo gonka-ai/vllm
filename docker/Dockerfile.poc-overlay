@@ -1,0 +1,41 @@
+# Overlay Dockerfile for PoC v2 V1 port.
+#
+# Applies Python-only patches on top of a pre-built vLLM v0.15.1 image,
+# skipping the ~30-60 min C extension compilation (csrc/ is unchanged).
+#
+# Usage:
+#   docker build -f docker/Dockerfile.poc-overlay \
+#     --build-arg BASE_IMAGE=vllm/vllm-openai:v0.15.1 .
+#
+# For custom base images (e.g. different CUDA/arch):
+#   docker build -f docker/Dockerfile.poc-overlay \
+#     --build-arg BASE_IMAGE=ghcr.io/gonka-ai/vllm:v0.15.1-custom .
+
+ARG BASE_IMAGE=vllm/vllm-openai:v0.15.1
+FROM ${BASE_IMAGE}
+
+ARG PYTHON_VERSION=3.12
+ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+
+ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_LINK_MODE=copy
+
+# Install uv + scipy (required by vllm.poc.data for binomtest)
+RUN pip install --no-cache-dir uv \
+    && uv pip install --system 'scipy>=1.13.0'
+
+# --- New module: vllm/poc/ (12 files) ---
+COPY vllm/poc/ ${SITE_PACKAGES}/vllm/poc/
+
+# --- New module: vllm/validation.py ---
+COPY vllm/validation.py ${SITE_PACKAGES}/vllm/validation.py
+
+# --- Patched vLLM files ---
+COPY vllm/sampling_params.py ${SITE_PACKAGES}/vllm/sampling_params.py
+COPY vllm/v1/sample/metadata.py ${SITE_PACKAGES}/vllm/v1/sample/metadata.py
+COPY vllm/v1/sample/sampler.py ${SITE_PACKAGES}/vllm/v1/sample/sampler.py
+COPY vllm/v1/worker/gpu_input_batch.py ${SITE_PACKAGES}/vllm/v1/worker/gpu_input_batch.py
+COPY vllm/entrypoints/openai/api_server.py ${SITE_PACKAGES}/vllm/entrypoints/openai/api_server.py
+COPY vllm/entrypoints/openai/chat_completion/protocol.py ${SITE_PACKAGES}/vllm/entrypoints/openai/chat_completion/protocol.py
+COPY vllm/entrypoints/openai/chat_completion/serving.py ${SITE_PACKAGES}/vllm/entrypoints/openai/chat_completion/serving.py
