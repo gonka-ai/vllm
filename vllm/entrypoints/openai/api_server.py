@@ -45,13 +45,13 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
 )
-from vllm.entrypoints.openai.protocol import (
-    ValidateRequest,
-)
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
+)
+from vllm.entrypoints.openai.protocol import (
+    ValidateRequest,
 )
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_validate import OpenAIServingValidate
@@ -128,7 +128,7 @@ async def lifespan(app: FastAPI):
 
                 await clear_poc_queue()
             except Exception as e:
-                logger.debug(f"Error clearing PoC queue: {e}")
+                logger.debug("Error clearing PoC queue: %s", e)
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state

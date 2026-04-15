@@ -133,7 +133,8 @@ python = "./.venv"
 extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*",
     "benchmarks/sonnet.txt", "tests/lora/data/*", "build/*",
     "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*", 
-    "docs/governance/process.md"]
+    "docs/governance/process.md",
+    "tests/data/experiments/**/*.jsonl"]
 ignore-hidden = true
 ignore-files = true
 ignore-dot = true

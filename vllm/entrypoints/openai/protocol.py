@@ -89,7 +89,10 @@ from pydantic import (
 )
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam, make_tool_call_id
-from vllm.entrypoints.pooling.score.utils import ScoreContentPartParam, ScoreMultiModalParam
+from vllm.entrypoints.pooling.score.utils import (
+    ScoreContentPartParam,
+    ScoreMultiModalParam,
+)
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 
