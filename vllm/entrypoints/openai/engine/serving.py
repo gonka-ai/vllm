@@ -25,14 +25,6 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     ConversationMessage,
-<<<<<<< HEAD:vllm/entrypoints/openai/serving_engine.py
-    apply_hf_chat_template,
-    apply_mistral_chat_template,
-    create_mm_artifacts,
-    parse_chat_messages_futures,
-    resolve_chat_template_content_format,
-=======
->>>>>>> dd1ddcef921b22c3778723d8e66638eaf307fe85:vllm/entrypoints/openai/engine/serving.py
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -134,7 +126,6 @@ from vllm.utils.async_utils import (
     merge_async_iterators,
 )
 from vllm.v1.engine import EngineCoreRequest
-from vllm.validation import EnforcedTokens
 
 
 class GenerationError(Exception):
@@ -251,7 +242,7 @@ class OpenAIServing:
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
-        return_tokens_as_token_ids: bool = True,
+        return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
     ):
         super().__init__()
@@ -1193,28 +1184,6 @@ class OpenAIServing:
         default_chat_template_kwargs: dict[str, Any] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
         add_special_tokens: bool = False,
-<<<<<<< HEAD:vllm/entrypoints/openai/serving_engine.py
-    ) -> tuple[
-        list[ConversationMessage],
-        Sequence[RequestPrompt],
-        list[EngineTokensPrompt],
-        list[dict[str, str]] | None,
-    ]:
-        model_config = self.model_config
-
-        resolved_content_format = resolve_chat_template_content_format(
-            chat_template,
-            tool_dicts,
-            chat_template_content_format,
-            tokenizer,
-            model_config=model_config,
-        )
-        conversation, mm_data_future, mm_uuids = parse_chat_messages_futures(
-            messages,
-            model_config,
-            tokenizer,
-            content_format=resolved_content_format,
-=======
     ) -> tuple[list[ConversationMessage], list[TokensPrompt]]:
         chat_template_kwargs = {
             "chat_template": chat_template,
@@ -1227,7 +1196,6 @@ class OpenAIServing:
         chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
             chat_template_kwargs,
             default_chat_template_kwargs,
->>>>>>> dd1ddcef921b22c3778723d8e66638eaf307fe85:vllm/entrypoints/openai/engine/serving.py
         )
 
         # Use the async tokenizer in `OpenAIServing` if possible.
@@ -1288,15 +1256,7 @@ class OpenAIServing:
             tokenizer = renderer.get_tokenizer()
             request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore
 
-<<<<<<< HEAD:vllm/entrypoints/openai/serving_engine.py
-        input_artifacts: list[dict[str, str]] | None = None
-        if getattr(request, "include_input_artifacts", False) and mm_data:
-            input_artifacts = create_mm_artifacts(mm_data)
-
-        return conversation, [request_prompt], [engine_prompt], input_artifacts
-=======
         return conversation, [engine_prompt]
->>>>>>> dd1ddcef921b22c3778723d8e66638eaf307fe85:vllm/entrypoints/openai/engine/serving.py
 
     async def _process_inputs(
         self,
@@ -1585,21 +1545,8 @@ class OpenAIServing:
         token_id: int,
         tokenizer: TokenizerLike | None,
         return_as_token_id: bool = False,
-        enforced_tokens: EnforcedTokens = None,
     ) -> str:
-<<<<<<< HEAD:vllm/entrypoints/openai/serving_engine.py
-        if return_as_token_id:
-            # Return token ids as plain strings for compatibility with older
-            # OpenAI-compatible vLLM variants and enforced-token validation
-            # utilities that expect int(token).
-            return str(token_id)
-
-        if logprob.decoded_token is not None:
-            return logprob.decoded_token
-        return tokenizer.decode(token_id)
-=======
         return str(token_id)
->>>>>>> dd1ddcef921b22c3778723d8e66638eaf307fe85:vllm/entrypoints/openai/engine/serving.py
 
     def _is_model_supported(self, model_name: str | None) -> bool:
         if not model_name:

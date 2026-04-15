@@ -661,9 +661,6 @@ class OpenAIServingCompletion(OpenAIServing):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 if should_return_as_token_id:
-<<<<<<< HEAD:vllm/entrypoints/openai/serving_completion.py
-                    token = str(token_id)
-=======
                     token = f"token_id:{token_id}"
                 else:
                     if tokenizer is None:
@@ -675,7 +672,6 @@ class OpenAIServingCompletion(OpenAIServing):
                         )
 
                     token = tokenizer.decode(token_id)
->>>>>>> dd1ddcef921b22c3778723d8e66638eaf307fe85:vllm/entrypoints/openai/completion/serving.py
 
                 out_tokens.append(token)
                 out_token_logprobs.append(None)

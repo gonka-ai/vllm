@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 
 import pytest
@@ -11,7 +13,6 @@ from tests.v1.sample.utils import (
 )
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
-from vllm.sampling_params import SamplingParams
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -37,15 +38,19 @@ def _create_enforced_sampling_metadata(
     """Create sampling metadata with enforced tokens."""
     output_token_ids: list[list[int]] = []
     prompt_token_ids: list[list[int]] = []
-    
+
     for i in range(batch_size):
         # For enforced requests, use shorter output to test step-based enforcement
         if i in enforced_req_ids:
-            output_token_ids.append([random.randint(0, vocab_size - 1) for _ in range(random.randint(0, 5))])
+            output_token_ids.append(
+                [random.randint(0, vocab_size - 1) for _ in range(random.randint(0, 5))]
+            )
         else:
-            output_token_ids.append([random.randint(0, vocab_size - 1) for _ in range(NUM_OUTPUT_TOKENS)])
+            output_token_ids.append(
+                [random.randint(0, vocab_size - 1) for _ in range(NUM_OUTPUT_TOKENS)]
+            )
         prompt_token_ids.append([random.randint(0, vocab_size - 1) for _ in range(10)])
-    
+
     logitsprocs = build_logitsprocs(
         vllm_config=VllmConfig(),
         device=device,
@@ -57,9 +62,11 @@ def _create_enforced_sampling_metadata(
     mixed_enforced = len(enforced_req_ids) > 0 and len(enforced_req_ids) < batch_size
     all_greedy = not all_enforced and not mixed_enforced
     all_random = False
-    
+
     sampling_metadata = SamplingMetadata(
-        temperature=torch.full((batch_size,), 0.0 if all_greedy else 1.0, device=device),
+        temperature=torch.full(
+            (batch_size,), 0.0 if all_greedy else 1.0, device=device
+        ),
         all_greedy=all_greedy,
         all_random=all_random,
         all_enforced=all_enforced,
@@ -68,7 +75,9 @@ def _create_enforced_sampling_metadata(
         top_k=None,
         generators={},
         max_num_logprobs=3 if enforced_tokens else 0,
-        prompt_token_ids=create_prompt_tokens_tensor(prompt_token_ids, vocab_size, device),
+        prompt_token_ids=create_prompt_tokens_tensor(
+            prompt_token_ids, vocab_size, device
+        ),
         output_token_ids=output_token_ids,
         frequency_penalties=create_penalty_tensor(batch_size, 0.0, device),
         presence_penalties=create_penalty_tensor(batch_size, 0.0, device),
@@ -97,7 +106,7 @@ def test_all_enforced_sampling(device: str, batch_size: int):
         i: [random.randint(0, VOCAB_SIZE - 1) for _ in range(5)]
         for i in range(batch_size)
     }
-    
+
     logits = create_fake_logits(batch_size, VOCAB_SIZE).to(device_obj)
     sampling_metadata = _create_enforced_sampling_metadata(
         batch_size, VOCAB_SIZE, device_obj, enforced_req_ids, enforced_token_ids
@@ -109,13 +118,15 @@ def test_all_enforced_sampling(device: str, batch_size: int):
     assert sampled.shape == (batch_size,)
     for i in range(batch_size):
         step = len(sampling_metadata.output_token_ids[i])
-        expected_token = enforced_token_ids[i][min(step, len(enforced_token_ids[i]) - 1)]
+        expected_token = enforced_token_ids[i][
+            min(step, len(enforced_token_ids[i]) - 1)
+        ]
         assert sampled[i].item() == expected_token, (
             f"Request {i}: expected token {expected_token} at step {step}, "
             f"got {sampled[i].item()}"
         )
 
- 
+
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("batch_size,num_enforced", [(8, 2), (16, 5), (32, 10)])
@@ -129,7 +140,7 @@ def test_mixed_enforced_sampling(device: str, batch_size: int, num_enforced: int
         i: [random.randint(0, VOCAB_SIZE - 1) for _ in range(5)]
         for i in enforced_req_ids
     }
-    
+
     logits = create_fake_logits(batch_size, VOCAB_SIZE).to(device_obj)
     for i in range(batch_size):
         if i not in enforced_req_ids:
@@ -138,14 +149,16 @@ def test_mixed_enforced_sampling(device: str, batch_size: int, num_enforced: int
     sampling_metadata = _create_enforced_sampling_metadata(
         batch_size, VOCAB_SIZE, device_obj, enforced_req_ids, enforced_token_ids
     )
-    
+
     sampler = Sampler()
     sampled, _ = sampler.sample(logits, sampling_metadata)
 
     assert sampled.shape == (batch_size,)
     for i in enforced_req_ids:
         step = len(sampling_metadata.output_token_ids[i])
-        expected_token = enforced_token_ids[i][min(step, len(enforced_token_ids[i]) - 1)]
+        expected_token = enforced_token_ids[i][
+            min(step, len(enforced_token_ids[i]) - 1)
+        ]
         assert sampled[i].item() == expected_token, (
             f"Enforced request {i}: expected token {expected_token} at step {step}, "
             f"got {sampled[i].item()}"
@@ -168,7 +181,7 @@ def test_enforced_tokens_with_logprobs(device: str):
     torch.set_default_device(device)
     device_obj = torch.device(device)
     batch_size = 4
-    
+
     enforced_req_ids = [0, 2]
     enforced_token_ids = {
         0: [10, 20, 30],
@@ -189,24 +202,33 @@ def test_enforced_tokens_with_logprobs(device: str):
 
     logits = create_fake_logits(batch_size, VOCAB_SIZE).to(device_obj)
     sampling_metadata = _create_enforced_sampling_metadata(
-        batch_size, VOCAB_SIZE, device_obj, enforced_req_ids, 
-        enforced_token_ids, enforced_tokens
+        batch_size,
+        VOCAB_SIZE,
+        device_obj,
+        enforced_req_ids,
+        enforced_token_ids,
+        enforced_tokens,
     )
-    
+
     sampler = Sampler()
     sampled, _ = sampler.sample(logits, sampling_metadata)
 
     for i in enforced_req_ids:
         step = len(sampling_metadata.output_token_ids[i])
-        expected_token = enforced_token_ids[i][min(step, len(enforced_token_ids[i]) - 1)]
+        expected_token = enforced_token_ids[i][
+            min(step, len(enforced_token_ids[i]) - 1)
+        ]
         assert sampled[i].item() == expected_token
-    
+
     logprobs = sampler.compute_logprobs(logits)
     logprobs_tensors = sampler.gather_logprobs(
         logprobs, 3, sampled.long(), sampling_metadata
     )
 
-    assert logprobs_tensors.logprob_token_ids.shape == (batch_size, 4)  # sampled + top 3
+    assert logprobs_tensors.logprob_token_ids.shape == (
+        batch_size,
+        4,
+    )  # sampled + top 3
     assert logprobs_tensors.logprobs.shape == (batch_size, 4)
     assert logprobs_tensors.selected_token_ranks.shape == (batch_size,)
 
@@ -219,24 +241,27 @@ def test_enforced_tokens_at_different_steps(device: str, step: int):
     torch.set_default_device(device)
     device_obj = torch.device(device)
     batch_size = 4
-    
+
     enforced_req_ids = [1]
     enforced_sequence = [100, 200, 300, 400, 500]
     enforced_token_ids = {1: enforced_sequence}
-    
+
     logits = create_fake_logits(batch_size, VOCAB_SIZE).to(device_obj)
     output_token_ids = [[] for _ in range(batch_size)]
     output_token_ids[1] = [0] * step  # Simulate 'step' tokens already generated
-    
-    prompt_token_ids = [[random.randint(0, VOCAB_SIZE - 1) for _ in range(10)] for _ in range(batch_size)]
-    
+
+    prompt_token_ids = [
+        [random.randint(0, VOCAB_SIZE - 1) for _ in range(10)]
+        for _ in range(batch_size)
+    ]
+
     logitsprocs = build_logitsprocs(
         vllm_config=VllmConfig(),
         device=device_obj,
         is_pin_memory=PIN_MEMORY_AVAILABLE,
         is_pooling_model=False,
     )
-    
+
     sampling_metadata = SamplingMetadata(
         temperature=torch.full((batch_size,), 1.0, device=device_obj),
         all_greedy=False,
@@ -247,7 +272,9 @@ def test_enforced_tokens_at_different_steps(device: str, step: int):
         top_k=None,
         generators={},
         max_num_logprobs=0,
-        prompt_token_ids=create_prompt_tokens_tensor(prompt_token_ids, VOCAB_SIZE, device_obj),
+        prompt_token_ids=create_prompt_tokens_tensor(
+            prompt_token_ids, VOCAB_SIZE, device_obj
+        ),
         output_token_ids=output_token_ids,
         frequency_penalties=create_penalty_tensor(batch_size, 0.0, device_obj),
         presence_penalties=create_penalty_tensor(batch_size, 0.0, device_obj),
@@ -260,7 +287,7 @@ def test_enforced_tokens_at_different_steps(device: str, step: int):
         enforced_token_ids=enforced_token_ids,
         enforced_tokens={},
     )
-    
+
     sampler = Sampler()
     sampled, _ = sampler.sample(logits, sampling_metadata)
     expected_token = enforced_sequence[min(step, len(enforced_sequence) - 1)]
@@ -276,22 +303,25 @@ def test_enforced_tokens_last_token_repeats(device: str):
     torch.set_default_device(device)
     device_obj = torch.device(device)
     batch_size = 2
-    
+
     enforced_req_ids = [0]
     enforced_sequence = [100, 200, 300]
     enforced_token_ids = {0: enforced_sequence}
-    
+
     logits = create_fake_logits(batch_size, VOCAB_SIZE).to(device_obj)
     output_token_ids = [[0] * 5, []]
-    prompt_token_ids = [[random.randint(0, VOCAB_SIZE - 1) for _ in range(10)] for _ in range(batch_size)]
-    
+    prompt_token_ids = [
+        [random.randint(0, VOCAB_SIZE - 1) for _ in range(10)]
+        for _ in range(batch_size)
+    ]
+
     logitsprocs = build_logitsprocs(
         vllm_config=VllmConfig(),
         device=device_obj,
         is_pin_memory=PIN_MEMORY_AVAILABLE,
         is_pooling_model=False,
     )
-    
+
     sampling_metadata = SamplingMetadata(
         temperature=torch.full((batch_size,), 1.0, device=device_obj),
         all_greedy=False,
@@ -302,7 +332,9 @@ def test_enforced_tokens_last_token_repeats(device: str):
         top_k=None,
         generators={},
         max_num_logprobs=0,
-        prompt_token_ids=create_prompt_tokens_tensor(prompt_token_ids, VOCAB_SIZE, device_obj),
+        prompt_token_ids=create_prompt_tokens_tensor(
+            prompt_token_ids, VOCAB_SIZE, device_obj
+        ),
         output_token_ids=output_token_ids,
         frequency_penalties=create_penalty_tensor(batch_size, 0.0, device_obj),
         presence_penalties=create_penalty_tensor(batch_size, 0.0, device_obj),
@@ -353,7 +385,7 @@ def test_enforced_tokens_ordering_after_condense(device: str):
     torch.set_default_device(device)
     device_obj = torch.device(device)
     batch_size = 4
-    
+
     # Enforced req_ids out of order (simulating post-condense state)
     enforced_req_ids = [2, 0, 3]
     enforced_token_ids = {
@@ -369,10 +401,12 @@ def test_enforced_tokens_ordering_after_condense(device: str):
 
     sampler = Sampler()
     sampled, _ = sampler.sample(logits, sampling_metadata)
-    
+
     for req_id in enforced_req_ids:
         step = len(sampling_metadata.output_token_ids[req_id])
-        expected_token = enforced_token_ids[req_id][min(step, len(enforced_token_ids[req_id]) - 1)]
+        expected_token = enforced_token_ids[req_id][
+            min(step, len(enforced_token_ids[req_id]) - 1)
+        ]
         assert sampled[req_id].item() == expected_token, (
             f"Request {req_id}: expected token {expected_token}, got {sampled[req_id].item()}"
         )

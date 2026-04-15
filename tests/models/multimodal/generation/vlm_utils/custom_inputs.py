@@ -102,7 +102,9 @@ def multi_video_multi_aspect_ratio_inputs(
 def different_patch_input_cases_internvl():
     images = [asset.pil_image.resize((896, 896)) for asset in IMAGE_ASSETS]
     formatter = (
-        lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n"  # noqa: E501
+        lambda img_prompt: (
+            f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n"
+        )  # noqa: E501
     )
     single_img_prompts = [
         "<image>\nWhat's the content in the center of the image?",
@@ -140,7 +142,7 @@ def video_with_metadata_glm4_1v():
     metadata = VIDEO_ASSETS[0].metadata
     question = "Describe the video."
     video_prompt = "<|begin_of_video|><|video|><|end_of_video|>"
-    formatted_prompt = f"<|user|>\n{video_prompt}{question}<|assistant|>\n"
+    formatted_prompt = f"[gMASK]<|user|>\n{video_prompt}{question}<|assistant|>\n"
 
     scales = [0.1, 0.2, 0.25]
     video_input = [

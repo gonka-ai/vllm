@@ -1,33 +1,32 @@
-from pydantic import BaseModel
-from typing import Any, Dict, Optional, List
-from pydantic import BaseModel, Field
-from typing import ClassVar
-from pydantic import ConfigDict, model_validator
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
+from typing import Any, ClassVar
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
 logger = logging.getLogger(__name__)
+
 
 class EnforcedToken(BaseModel):
     token: str
-    top_tokens: List[str] = Field(default_factory=list)
+    top_tokens: list[str] = Field(default_factory=list)
 
-    token_id: Optional[int] = Field(default=None, exclude=True)
-    top_token_ids: List[int] = Field(default_factory=list, exclude=True)
-
+    token_id: int | None = Field(default=None, exclude=True)
+    top_token_ids: list[int] = Field(default_factory=list, exclude=True)
 
 
 class EnforcedTokens(BaseModel):
-    tokens: List[EnforcedToken]
-
+    tokens: list[EnforcedToken]
 
     @classmethod
-    def from_content(cls, content: List[Dict[str, Any]]) -> "EnforcedTokens":
+    def from_content(cls, content: list[dict[str, Any]]) -> "EnforcedTokens":
         tokens = []
         for position in content:
             token = position["token"]
             top_tokens = [x["token"] for x in position["top_logprobs"]]
             tokens.append(EnforcedToken(token=token, top_tokens=top_tokens))
         return cls(tokens=tokens)
-
 
 
 class OpenAIBaseModel(BaseModel):
@@ -60,7 +59,6 @@ class OpenAIBaseModel(BaseModel):
                 data.keys() - field_names,
             )
         return result
-
 
 
 class ChatCompletionLogProb(OpenAIBaseModel):

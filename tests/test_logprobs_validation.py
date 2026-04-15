@@ -1,30 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for logprobs validation, ported from Go decentralized-api tests."""
 
 import json
 import os
-from typing import List
-
-import pytest
 
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbsContent,
 )
-from vllm.logprobs_validation import ValidationResult, compare_logprobs
+from vllm.logprobs_validation import compare_logprobs
 
-TESTDATA_DIR = os.path.join(os.path.dirname(__file__),
-                            "logprobs_validation_testdata")
+TESTDATA_DIR = os.path.join(os.path.dirname(__file__), "logprobs_validation_testdata")
 
 
-def load_logprobs_content(
-        path: str) -> List[ChatCompletionLogProbsContent]:
+def load_logprobs_content(path: str) -> list[ChatCompletionLogProbsContent]:
     with open(path) as f:
         data = json.load(f)
     content = data["choices"][0]["logprobs"]["content"]
-    return [
-        ChatCompletionLogProbsContent.model_validate(item)
-        for item in content
-    ]
+    return [ChatCompletionLogProbsContent.model_validate(item) for item in content]
 
 
 class TestCompareLogprobs:
@@ -33,9 +27,11 @@ class TestCompareLogprobs:
     def test_validation(self):
         """Same as Go TestValidation: standard float precision."""
         original = load_logprobs_content(
-            os.path.join(TESTDATA_DIR, "inference_response.json"))
+            os.path.join(TESTDATA_DIR, "inference_response.json")
+        )
         validation = load_logprobs_content(
-            os.path.join(TESTDATA_DIR, "validation_response.json"))
+            os.path.join(TESTDATA_DIR, "validation_response.json")
+        )
 
         result = compare_logprobs(original, validation)
         assert result.reason == "similarity"
@@ -45,9 +41,11 @@ class TestCompareLogprobs:
     def test_validation_quant(self):
         """Same as Go TestValidationQuant: int4 vs fp8."""
         original = load_logprobs_content(
-            os.path.join(TESTDATA_DIR, "inference_response_int4.json"))
+            os.path.join(TESTDATA_DIR, "inference_response_int4.json")
+        )
         validation = load_logprobs_content(
-            os.path.join(TESTDATA_DIR, "validation_response_fp8.json"))
+            os.path.join(TESTDATA_DIR, "validation_response_fp8.json")
+        )
 
         result = compare_logprobs(original, validation)
         assert result.reason == "similarity"
@@ -58,23 +56,20 @@ class TestCompareLogprobs:
             ChatCompletionLogProbsContent(
                 token="a",
                 logprob=-1.0,
-                top_logprobs=[
-                    ChatCompletionLogProb(token="a", logprob=-1.0)
-                ]),
+                top_logprobs=[ChatCompletionLogProb(token="a", logprob=-1.0)],
+            ),
             ChatCompletionLogProbsContent(
                 token="b",
                 logprob=-2.0,
-                top_logprobs=[
-                    ChatCompletionLogProb(token="b", logprob=-2.0)
-                ]),
+                top_logprobs=[ChatCompletionLogProb(token="b", logprob=-2.0)],
+            ),
         ]
         validation = [
             ChatCompletionLogProbsContent(
                 token="a",
                 logprob=-1.0,
-                top_logprobs=[
-                    ChatCompletionLogProb(token="a", logprob=-1.0)
-                ]),
+                top_logprobs=[ChatCompletionLogProb(token="a", logprob=-1.0)],
+            ),
         ]
         result = compare_logprobs(original, validation)
         assert result.reason == "different_length"
@@ -85,17 +80,15 @@ class TestCompareLogprobs:
             ChatCompletionLogProbsContent(
                 token="a",
                 logprob=-1.0,
-                top_logprobs=[
-                    ChatCompletionLogProb(token="a", logprob=-1.0)
-                ]),
+                top_logprobs=[ChatCompletionLogProb(token="a", logprob=-1.0)],
+            ),
         ]
         validation = [
             ChatCompletionLogProbsContent(
                 token="b",
                 logprob=-1.0,
-                top_logprobs=[
-                    ChatCompletionLogProb(token="b", logprob=-1.0)
-                ]),
+                top_logprobs=[ChatCompletionLogProb(token="b", logprob=-1.0)],
+            ),
         ]
         result = compare_logprobs(original, validation)
         assert result.reason == "different_tokens"
@@ -110,7 +103,8 @@ class TestCompareLogprobs:
                     ChatCompletionLogProb(token="hello", logprob=-0.5),
                     ChatCompletionLogProb(token="world", logprob=-2.0),
                     ChatCompletionLogProb(token="foo", logprob=-5.0),
-                ]),
+                ],
+            ),
         ]
         result = compare_logprobs(logprobs, logprobs)
         assert result.similarity == 1.0
@@ -125,7 +119,8 @@ class TestCompareLogprobs:
                 top_logprobs=[
                     ChatCompletionLogProb(token="a", logprob=-1.0),
                     ChatCompletionLogProb(token="b", logprob=-3.0),
-                ]),
+                ],
+            ),
         ]
         validation = [
             ChatCompletionLogProbsContent(
@@ -134,14 +129,16 @@ class TestCompareLogprobs:
                 top_logprobs=[
                     ChatCompletionLogProb(token="a", logprob=-1.0),
                     ChatCompletionLogProb(token="b", logprob=-3.0),
-                ]),
+                ],
+            ),
             ChatCompletionLogProbsContent(
                 token="c",
                 logprob=-0.1,
                 top_logprobs=[
                     ChatCompletionLogProb(token="c", logprob=-0.1),
                     ChatCompletionLogProb(token="d", logprob=-4.0),
-                ]),
+                ],
+            ),
         ]
         result = compare_logprobs(original, validation)
         assert result.reason == "similarity"

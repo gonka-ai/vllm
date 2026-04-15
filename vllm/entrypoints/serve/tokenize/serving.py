@@ -80,17 +80,8 @@ class OpenAIServingTokenization(OpenAIServing):
                 )
                 if error_check_ret is not None:
                     return error_check_ret
-<<<<<<< HEAD:vllm/entrypoints/openai/serving_tokenization.py
-                (
-                    _,
-                    _,
-                    engine_prompts,
-                    _,
-                ) = await self._preprocess_chat(
-=======
 
                 _, engine_prompts = await self._preprocess_chat(
->>>>>>> dd1ddcef921b22c3778723d8e66638eaf307fe85:vllm/entrypoints/serve/tokenize/serving.py
                     request,
                     self.renderer,
                     request.messages,

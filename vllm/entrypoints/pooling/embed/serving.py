@@ -79,16 +79,7 @@ class EmbeddingMixin(OpenAIServing):
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
             if isinstance(ctx.request, EmbeddingChatRequest):
-<<<<<<< HEAD:vllm/entrypoints/openai/serving_embedding.py
-                (
-                    _,
-                    _,
-                    ctx.engine_prompts,
-                    _,
-                ) = await self._preprocess_chat(
-=======
                 _, ctx.engine_prompts = await self._preprocess_chat(
->>>>>>> dd1ddcef921b22c3778723d8e66638eaf307fe85:vllm/entrypoints/pooling/embed/serving.py
                     ctx.request,
                     self.renderer,
                     ctx.request.messages,

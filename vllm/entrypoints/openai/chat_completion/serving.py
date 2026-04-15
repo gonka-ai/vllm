@@ -71,7 +71,6 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.validation import EnforcedToken, EnforcedTokens
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import (
     MistralTokenizer,
@@ -84,7 +83,6 @@ from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
 from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
-from vllm.validation import EnforcedTokens
 
 logger = init_logger(__name__)
 
@@ -296,20 +294,11 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 if error_check_ret is not None:
                     return error_check_ret
-<<<<<<< HEAD:vllm/entrypoints/openai/serving_chat.py
-                (
-                    conversation,
-                    request_prompts,
-                    engine_prompts,
-                    input_artifacts,
-                ) = await self._preprocess_chat(
-=======
 
                 chat_template_kwargs = request.chat_template_kwargs or {}
                 chat_template_kwargs.update(reasoning_effort=request.reasoning_effort)
 
                 conversation, engine_prompts = await self._preprocess_chat(
->>>>>>> dd1ddcef921b22c3778723d8e66638eaf307fe85:vllm/entrypoints/openai/chat_completion/serving.py
                     request,
                     renderer,
                     request.messages,
@@ -326,19 +315,10 @@ class OpenAIServingChat(OpenAIServing):
                 )
             else:
                 # For GPT-OSS.
-<<<<<<< HEAD:vllm/entrypoints/openai/serving_chat.py
-                (
-                    conversation,
-                    request_prompts,
-                    engine_prompts,
-                ) = self._make_request_with_harmony(request)
-                input_artifacts = None
-=======
                 should_include_tools = tool_dicts is not None
                 conversation, engine_prompts = self._make_request_with_harmony(
                     request, should_include_tools
                 )
->>>>>>> dd1ddcef921b22c3778723d8e66638eaf307fe85:vllm/entrypoints/openai/chat_completion/serving.py
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(e)
@@ -410,21 +390,11 @@ class OpenAIServingChat(OpenAIServing):
                     sampling_params = request.to_beam_search_params(
                         max_tokens, self.default_sampling_params
                     )
-                elif request.enforced_str or request.enforced_tokens:
-                    sampling_params = request.to_sampling_params(
-                        max_tokens,
-                        self.model_config.logits_processor_pattern,
-                        self.default_sampling_params,
-                        tokenizer,
-                    )
-
-                    request.return_tokens_as_token_ids = True
                 else:
                     sampling_params = request.to_sampling_params(
                         max_tokens,
                         self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
-                        tokenizer,
                     )
                     validate_logits_processors_parameters(
                         self.logits_processors,
@@ -441,17 +411,16 @@ class OpenAIServingChat(OpenAIServing):
                     elif request.enforced_tokens:
                         tokenizer = self.engine_client.renderer.tokenizer
                         request.enforced_tokens.encode(tokenizer)
-                        enforced_ids = (
-                            request.enforced_tokens.get_enforced_token_ids()
-                        )
+                        enforced_ids = request.enforced_tokens.get_enforced_token_ids()
                     if enforced_ids:
                         if enforced_ids[-1] != tokenizer.eos_token_id:
                             enforced_ids.append(tokenizer.eos_token_id)
                         sampling_params.enforced_token_ids = enforced_ids
-                        if (not sampling_params.logprobs_mode
-                                and request.enforced_tokens):
-                            detected = (request.enforced_tokens
-                                        .detect_logprobs_mode())
+                        if (
+                            not sampling_params.logprobs_mode
+                            and request.enforced_tokens
+                        ):
+                            detected = request.enforced_tokens.detect_logprobs_mode()
                             if detected:
                                 sampling_params.logprobs_mode = detected
 
@@ -518,7 +487,6 @@ class OpenAIServingChat(OpenAIServing):
                 conversation,
                 tokenizer,
                 request_metadata,
-                input_artifacts=input_artifacts,
             )
 
         try:
@@ -530,7 +498,6 @@ class OpenAIServingChat(OpenAIServing):
                 conversation,
                 tokenizer,
                 request_metadata,
-                input_artifacts=input_artifacts,
             )
         except GenerationError as e:
             return self._convert_generation_error_to_response(e)
@@ -690,7 +657,6 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
-        input_artifacts: list[dict[str, str]] | None = None,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -829,7 +795,6 @@ class OpenAIServingChat(OpenAIServing):
                                 if request.return_token_ids
                                 else None
                             ),
-                            input_artifacts=input_artifacts,
                         )
 
                         # if continuous usage stats are requested, add it
@@ -895,7 +860,6 @@ class OpenAIServingChat(OpenAIServing):
                             tokenizer=tokenizer,
                             num_output_top_logprobs=request.top_logprobs,
                             return_as_token_id=request.return_tokens_as_token_ids,
-                            enforced_tokens=request.enforced_tokens,
                         )
                     else:
                         logprobs = None
@@ -1355,11 +1319,8 @@ class OpenAIServingChat(OpenAIServing):
                         )
 
                         finish_reason_sent[i] = True
-<<<<<<< HEAD:vllm/entrypoints/openai/serving_chat.py
-=======
 
                     choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
->>>>>>> dd1ddcef921b22c3778723d8e66638eaf307fe85:vllm/entrypoints/openai/chat_completion/serving.py
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
@@ -1451,7 +1412,6 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
-        input_artifacts: list[dict[str, str]] | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
@@ -1489,7 +1449,6 @@ class OpenAIServingChat(OpenAIServing):
                     num_output_top_logprobs=request.top_logprobs,
                     tokenizer=tokenizer,
                     return_as_token_id=request.return_tokens_as_token_ids,
-                    enforced_tokens=request.enforced_tokens,
                 )
             else:
                 logprobs = None
@@ -1754,7 +1713,6 @@ class OpenAIServingChat(OpenAIServing):
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
             kv_transfer_params=final_res.kv_transfer_params,
-            input_artifacts=input_artifacts,
         )
 
         # Log complete response if output logging is enabled
@@ -1799,11 +1757,7 @@ class OpenAIServingChat(OpenAIServing):
         top_logprobs: int | None,
         tokenizer: TokenizerLike | None,
         should_return_as_token_id: bool,
-        enforced_tokens: EnforcedTokens | None = None,
     ) -> list[ChatCompletionLogProb]:
-        if enforced_tokens:
-            top_logprobs = len(logprobs)
-
         return [
             ChatCompletionLogProb(
                 token=(
@@ -1812,7 +1766,6 @@ class OpenAIServingChat(OpenAIServing):
                         p[0],
                         tokenizer,
                         return_as_token_id=should_return_as_token_id,
-                        enforced_tokens=enforced_tokens,
                     )
                 ),
                 logprob=max(p[1].logprob, -9999.0),
@@ -1829,7 +1782,6 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: TokenizerLike | None,
         num_output_top_logprobs: int | None = None,
         return_as_token_id: bool | None = None,
-        enforced_tokens: EnforcedTokens | None = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
         logprobs_content: list[ChatCompletionLogProbsContent] = []
@@ -1843,7 +1795,7 @@ class OpenAIServingChat(OpenAIServing):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
                 if should_return_as_token_id:
-                    token = str(token_id)
+                    token = f"token_id:{token_id}"
                 else:
                     if tokenizer is None:
                         raise ValueError(
@@ -1869,7 +1821,6 @@ class OpenAIServingChat(OpenAIServing):
                             token_id,
                             tokenizer,
                             should_return_as_token_id,
-                            enforced_tokens,
                         ),
                         logprob=max(step_token.logprob, -9999.0),
                         bytes=(
@@ -1882,7 +1833,6 @@ class OpenAIServingChat(OpenAIServing):
                             num_output_top_logprobs,
                             tokenizer,
                             should_return_as_token_id,
-                            enforced_tokens,
                         ),
                     )
                 )

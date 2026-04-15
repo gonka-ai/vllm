@@ -584,10 +584,6 @@ class OpenAIServingResponses(OpenAIServing):
     ):
         tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         # Construct the input messages.
-<<<<<<< HEAD:vllm/entrypoints/openai/serving_responses.py
-        messages = self._construct_input_messages(request, prev_response)
-        _, request_prompts, engine_prompts, _ = await self._preprocess_chat(
-=======
         messages = construct_input_messages(
             request_instructions=request.instructions,
             request_input=request.input,
@@ -605,7 +601,6 @@ class OpenAIServingResponses(OpenAIServing):
         )
 
         _, engine_prompts = await self._preprocess_chat(
->>>>>>> dd1ddcef921b22c3778723d8e66638eaf307fe85:vllm/entrypoints/openai/responses/serving.py
             request,
             renderer,
             messages,

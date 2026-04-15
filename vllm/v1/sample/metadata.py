@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.validation import EnforcedTokens
+
 
 @dataclass
 class SamplingMetadata:
@@ -15,10 +16,6 @@ class SamplingMetadata:
     all_random: bool
     all_enforced: bool
     mixed_enforced: bool
-
-    enforced_token_ids: dict[list[int]]
-    enforced_tokens: dict[EnforcedTokens]
-    enforced_req_ids: list[int]
 
     top_p: torch.Tensor | None
     top_k: torch.Tensor | None
@@ -46,5 +43,21 @@ class SamplingMetadata:
     # Loaded logits processors
     logitsprocs: LogitsProcessors
 
+    # Per-request logprobs mode: "raw_logprobs", "processed_logprobs",
+    # "mixed", or None (no sampled-token logprobs requested).
+    batch_logprobs_mode: str | None = None
+
+    # Per-row bool mask: True = processed, False = raw.
+    # Only materialized when batch_logprobs_mode == "mixed".
+    logprobs_is_processed: torch.Tensor | None = None
+
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
+
+    # Enforced next token ids for validation replay (gonka PoC).
+    # Shape [num_reqs], -1 means no enforcement for that request.
+    enforced_next_token_ids: torch.Tensor | None = None
+
+    enforced_token_ids: dict[int, list[int]] = field(default_factory=dict)
+    enforced_tokens: dict[int, EnforcedTokens] = field(default_factory=dict)
+    enforced_req_ids: list[int] = field(default_factory=list)

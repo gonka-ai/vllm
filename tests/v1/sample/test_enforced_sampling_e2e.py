@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
 import asyncio
-import aiohttp
-import random
-from ...utils import RemoteOpenAIServer
-import requests
 import json
+import random
 
-from vllm import LLM, SamplingParams
+import aiohttp
+import pytest
+import requests
+
+from ...utils import RemoteOpenAIServer
 
 MODEL = "hmellor/tiny-random-LlamaForCausalLM"
 SERVER_ARGS = [
@@ -20,6 +20,7 @@ SERVER_ARGS = [
 PROMPT = "Hello my name is Robert and I"
 
 VOCAB = [str(i) for i in range(1000, 1050)]
+
 
 def generate_random_enforced(max_tokens):
     n = max_tokens
@@ -35,10 +36,7 @@ def generate_random_enforced(max_tokens):
         top_two = random.choices(list(others), k=2)
         top = [tok] + top_two
 
-        tokens.append({
-            "token": tok,
-            "top_tokens": top
-        })
+        tokens.append({"token": tok, "top_tokens": top})
     return tokens
 
 
@@ -47,7 +45,7 @@ def validate_enforced_tokens(response_content, enforced_tokens):
     enforced = enforced_tokens
 
     if len(content) < len(enforced):
-        enforced = enforced[:len(content)]
+        enforced = enforced[: len(content)]
 
     for i, enforced_item in enumerate(enforced):
         exp_tok = enforced_item["token"]
@@ -61,9 +59,13 @@ def validate_enforced_tokens(response_content, enforced_tokens):
         else:
             model_top = {t["token"] for t in top_logits}
 
-        assert model_tok == exp_tok, f"token mismatch at position {i}: {model_tok} != {exp_tok}"
-        assert model_top.issubset(exp_top), f"top-logprobs mismatch at position {i}: {model_top} not subset of {exp_top}"
-        
+        assert model_tok == exp_tok, (
+            f"token mismatch at position {i}: {model_tok} != {exp_tok}"
+        )
+        assert model_top.issubset(exp_top), (
+            f"top-logprobs mismatch at position {i}: {model_top} not subset of {exp_top}"
+        )
+
 
 def test_enforced_tokens():
     max_tokens = 10
@@ -128,7 +130,7 @@ def test_enforced_tokens_batch_with_random_and_greedy():
         "top_logprobs": 3,
         "enforced_tokens": {"tokens": enforced},
     }
-    
+
     random_payload = {
         "model": MODEL,
         "messages": [{"role": "user", "content": PROMPT}],
@@ -137,7 +139,7 @@ def test_enforced_tokens_batch_with_random_and_greedy():
         "logprobs": True,
         "top_logprobs": 3,
     }
-    
+
     greedy_payload = {
         "model": MODEL,
         "messages": [{"role": "user", "content": PROMPT}],
@@ -159,7 +161,7 @@ def test_enforced_tokens_batch_with_random_and_greedy():
                 ]
                 responses = await asyncio.gather(*tasks)
                 return responses
-        
+
         responses = asyncio.run(send_requests())
 
         assert all(r.status == 200 for r in responses), "Some requests failed"

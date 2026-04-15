@@ -10,7 +10,8 @@ import torch
 import vllm.envs
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
+from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
@@ -55,6 +56,27 @@ class XgrammarBackend(StructuredOutputBackend):
                 vocab_size=self.vocab_size,
                 stop_token_ids=stop_token_ids,
                 add_prefix_space=True,
+            )
+        elif isinstance(self.tokenizer, DeepseekV32Tokenizer):
+            # copy from xgr.TokenizerInfo.from_huggingface()
+            # because we are using a custom tokenizer wrapper here.
+            vocab_dict = self.tokenizer.get_vocab()
+            tokenizer_vocab_size = max(len(vocab_dict), self.tokenizer.max_token_id + 1)
+            vocab_size = self.vocab_size or tokenizer_vocab_size
+            # maintain tokenizer's indexing
+            encoded_vocab = [""] * vocab_size
+            for token, idx in vocab_dict.items():
+                if idx < vocab_size:
+                    encoded_vocab[idx] = token
+            stop_token_ids = [self.tokenizer.eos_token_id]
+            backend_str = self.tokenizer.tokenizer.backend_tokenizer.to_str()  # type: ignore[attr-defined]
+            metadata = xgr.TokenizerInfo._detect_metadata_from_hf(backend_str)
+            tokenizer_info = xgr.TokenizerInfo(
+                encoded_vocab=encoded_vocab,
+                vocab_type=metadata["vocab_type"],
+                vocab_size=vocab_size,
+                stop_token_ids=stop_token_ids,
+                add_prefix_space=metadata["add_prefix_space"],
             )
         else:
             tokenizer_info = xgr.TokenizerInfo.from_huggingface(
@@ -144,24 +166,34 @@ class XgrammarGrammar(StructuredOutputGrammar):
         default_factory=lambda: 0, repr=False, hash=False, init=False
     )
     _is_terminated: bool = field(default=False, repr=False, hash=False)
+    _grammar_failed: bool = field(default=False, repr=False, hash=False)
 
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
 
         Returns True if the FSM was advanced successfully.
         Returns False if the FSM failed to advance.
+
+        Grammar graceful degradation: when a token is rejected (e.g.
+        enforced tokens from validation replay that conflict with the
+        grammar FSM), grammar enforcement is disabled for the rest of
+        this request instead of causing a crash.
         """
         if self._is_terminated:
             return False
+        if self._grammar_failed:
+            return True
         for token in tokens:
             if not self.matcher.accept_token(token):
-                logger.error(
-                    "Failed to advance FSM for request %s "
-                    "for tokens %s. Please file an issue.",
-                    request_id,
+                logger.warning(
+                    "Grammar rejected token %d for request %s. "
+                    "Disabling grammar enforcement for this request "
+                    "(token may be from enforced replay).",
                     token,
+                    request_id,
                 )
-                return False
+                self._grammar_failed = True
+                return True
             self.num_processed_tokens += 1
         self._is_terminated = self.matcher.is_terminated()
         return True
@@ -184,11 +216,15 @@ class XgrammarGrammar(StructuredOutputGrammar):
         return accepted_tokens
 
     def rollback(self, num_tokens: int) -> None:
+        if self._grammar_failed:
+            return
         self.matcher.rollback(num_tokens)
         self.num_processed_tokens -= num_tokens
         self._is_terminated = self.matcher.is_terminated()
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
+        if self._grammar_failed:
+            return
         self.matcher.fill_next_token_bitmask(bitmask, idx)
 
     def is_terminated(self) -> bool:
@@ -196,6 +232,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
 
     def reset(self):
         self.num_processed_tokens = 0
+        self._grammar_failed = False
         self.matcher.reset()
 
 
@@ -246,13 +283,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # Unsupported keywords for objects
         if obj.get("type") == "object" and any(
-            key in obj
-            for key in (
-                "minProperties",
-                "maxProperties",
-                "propertyNames",
-                "patternProperties",
-            )
+            key in obj for key in ("patternProperties", "propertyNames")
         ):
             return True
 

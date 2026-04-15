@@ -296,8 +296,8 @@ class TestEndpointPocRejection:
 
         app.state.openai_serving_chat = None
         app.state.openai_serving_tokenization = MagicMock()
-        app.state.openai_serving_tokenization.create_error_response = (
-            lambda message: MagicMock()
+        app.state.openai_serving_tokenization.create_error_response = lambda message: (
+            MagicMock()
         )
 
         with patch("vllm.poc.routes._poc_generation_active", True):
@@ -322,8 +322,8 @@ class TestEndpointPocRejection:
 
         app.state.openai_serving_completion = None
         app.state.openai_serving_tokenization = MagicMock()
-        app.state.openai_serving_tokenization.create_error_response = (
-            lambda message: MagicMock()
+        app.state.openai_serving_tokenization.create_error_response = lambda message: (
+            MagicMock()
         )
 
         with patch("vllm.poc.routes._poc_generation_active", True):

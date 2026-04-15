@@ -71,56 +71,139 @@ class Sampler(nn.Module):
         predict_bonus_token: bool = False,
         logprobs_mode_override: LogprobsMode | None = None,
     ) -> SamplerOutput:
-        logprobs_mode = logprobs_mode_override or self.logprobs_mode
+        num_logprobs = sampling_metadata.max_num_logprobs
+
+        # Determine effective logprobs mode.
+        # Priority: logprobs_mode_override (RejectionSampler) >
+        #           batch_logprobs_mode (per-request) > deployment default.
+        if logprobs_mode_override is not None:
+            effective_mode = logprobs_mode_override
+            is_mixed = False
+        else:
+            batch_mode = sampling_metadata.batch_logprobs_mode
+            if batch_mode is not None and batch_mode != self.logprobs_mode:
+                effective_mode = batch_mode
+                is_mixed = batch_mode == "mixed"
+            else:
+                effective_mode = self.logprobs_mode
+                is_mixed = False
+
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.
-        # This is different from the V0 sampler, which uses the logits that
-        # is used for sampling (after penalties and temperature scaling).
-        num_logprobs = sampling_metadata.max_num_logprobs
+        raw_logprobs = None
         if num_logprobs is not None:
-            if logprobs_mode == "raw_logprobs":
+            if effective_mode in ("raw_logprobs", "mixed"):
                 raw_logprobs = self.compute_logprobs(logits)
-            elif logprobs_mode == "raw_logits":
-                raw_logprobs = logits.clone()
+            elif effective_mode == "raw_logits":
+                if logits.dtype == torch.float32:
+                    raw_logprobs = logits.clone()
+                else:
+                    raw_logprobs = logits.to(torch.float32)
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
-        
+
         logits = self.apply_logits_processors(
-            logits, sampling_metadata, predict_bonus_token,
-            # sampling_metadata.output_token_ids_len_cpu
+            logits, sampling_metadata, predict_bonus_token
+        )
+
+        need_processed = num_logprobs is not None and effective_mode in (
+            "processed_logprobs",
+            "processed_logits",
+            "mixed",
         )
         # Sample the next token.
-        sampled, processed_logprobs = self.sample(logits, sampling_metadata)
-        if processed_logprobs is not None:
+        sampled, processed_logprobs = self.sample(
+            logits,
+            sampling_metadata,
+            logprobs_mode_override=logprobs_mode_override,
+            need_processed_logprobs=need_processed,
+        )
+
+        # For homogeneous batches, processed logprobs replace raw when the
+        # effective mode wants processed output.  When a per-request override
+        # selects raw_logprobs (or raw_logits), keep the raw values computed
+        # earlier and discard the processed logprobs the sampler produced as
+        # a side-effect of the deployment default.
+        if (
+            not is_mixed
+            and processed_logprobs is not None
+            and effective_mode not in ("raw_logprobs", "raw_logits")
+        ):
             raw_logprobs = processed_logprobs
+
         # Convert sampled token ids to int64 (long) type to ensure compatibility
         # with subsequent operations that may use these values as indices.
-        # This conversion is necessary because FlashInfer sampling operations
-        # return int32 (while PyTorch argmax and topk return int64).
         sampled = sampled.long()
+
+        # Override with enforced token ids where specified.
+        if sampling_metadata.enforced_next_token_ids is not None:
+            enforced = sampling_metadata.enforced_next_token_ids
+            mask = enforced != -1
+            if mask.any():
+                sampled[mask] = enforced[mask]
 
         if num_logprobs is None:
             logprobs_tensors = None
-        elif num_logprobs == -1:
-            # Return the full unsorted and unranked logprobs.
-            logprobs_tensors = LogprobsTensors(
-                torch.empty(0), raw_logprobs, torch.empty(0)
-            )
+        elif not is_mixed:
+            if num_logprobs == -1:
+                logprobs_tensors = LogprobsTensors(
+                    torch.empty(0), raw_logprobs, torch.empty(0)
+                )
+            else:
+                logprobs_tensors = self.gather_logprobs(
+                    raw_logprobs,
+                    num_logprobs,
+                    token_ids=sampled,
+                    sampling_metadata=sampling_metadata,
+                )
         else:
-            # Gather the logprobs and ranks of the topk and sampled token.
-            logprobs_tensors = self.gather_logprobs(
-                raw_logprobs, num_logprobs, token_ids=sampled, sampling_metadata=sampling_metadata
-            )
+            # Mixed mode: gather from both raw and processed, merge per row.
+            lp_mask = sampling_metadata.logprobs_is_processed
+            assert lp_mask is not None
+            if num_logprobs == -1:
+                lp = torch.where(
+                    lp_mask.unsqueeze(-1),
+                    processed_logprobs,
+                    raw_logprobs,
+                )
+                logprobs_tensors = LogprobsTensors(torch.empty(0), lp, torch.empty(0))
+            else:
+                raw_gathered = self.gather_logprobs(
+                    raw_logprobs,
+                    num_logprobs,
+                    token_ids=sampled,
+                    sampling_metadata=sampling_metadata,
+                )
+                proc_gathered = self.gather_logprobs(
+                    processed_logprobs,
+                    num_logprobs,
+                    token_ids=sampled,
+                    sampling_metadata=sampling_metadata,
+                )
+                mask_2d = lp_mask.unsqueeze(-1)
+                logprobs_tensors = LogprobsTensors(
+                    logprob_token_ids=torch.where(
+                        mask_2d,
+                        proc_gathered.logprob_token_ids,
+                        raw_gathered.logprob_token_ids,
+                    ),
+                    logprobs=torch.where(
+                        mask_2d,
+                        proc_gathered.logprobs,
+                        raw_gathered.logprobs,
+                    ),
+                    selected_token_ranks=torch.where(
+                        lp_mask,
+                        proc_gathered.selected_token_ranks,
+                        raw_gathered.selected_token_ranks,
+                    ),
+                )
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
 
-        # These are GPU tensors.
         sampler_output = SamplerOutput(
-            # The sampled tokens are expanded to 2D tensor with shape
-            # [num_requests, 1], where each row represents one generated
-            # token per request.
             sampled_token_ids=sampled.unsqueeze(-1),
             logprobs_tensors=logprobs_tensors,
         )
@@ -147,20 +230,25 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         logprobs_mode_override: LogprobsMode | None = None,
+        need_processed_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Sample logits based on sampling metadata.
 
         The various logits processing functions called in this method
         may update the logits tensor in-place.
         """
-        
+
         logprobs_mode = logprobs_mode_override or self.logprobs_mode
         assert not (sampling_metadata.all_greedy and sampling_metadata.all_random)
         assert not (sampling_metadata.all_greedy and sampling_metadata.all_enforced)
         assert not (sampling_metadata.all_random and sampling_metadata.all_enforced)
 
         if sampling_metadata.enforced_token_ids:
-            enforced_sampled = torch.empty((len(sampling_metadata.enforced_req_ids),), dtype=torch.int64, device=logits.device)
+            enforced_sampled = torch.empty(
+                (len(sampling_metadata.enforced_req_ids),),
+                dtype=torch.int64,
+                device=logits.device,
+            )
             enforced_map = sampling_metadata.enforced_token_ids
             for i, req_index in enumerate(sampling_metadata.enforced_req_ids):
                 seq = enforced_map[req_index]
@@ -177,10 +265,12 @@ class Sampler(nn.Module):
             if sampling_metadata.all_enforced:
                 # Reorder so result[pos] = token for batch position pos
                 # (enforced_req_ids may be out of order after condense)
-                result = torch.empty((logits.size(0),), dtype=torch.int64, device=logits.device)
+                result = torch.empty(
+                    (logits.size(0),), dtype=torch.int64, device=logits.device
+                )
                 for i, req_index in enumerate(sampling_metadata.enforced_req_ids):
                     result[req_index] = enforced_sampled[i]
-                return result, None                   
+                return result, None
         if sampling_metadata.all_random or sampling_metadata.mixed_enforced:
             greedy_sampled = None
         else:
@@ -190,7 +280,9 @@ class Sampler(nn.Module):
                 if sampling_metadata.max_num_logprobs is not None:
                     if logprobs_mode == "processed_logits":
                         processed_logprobs = logits
-                    elif logprobs_mode == "processed_logprobs":
+                    elif (
+                        logprobs_mode == "processed_logprobs" or need_processed_logprobs
+                    ):
                         processed_logprobs = self.compute_logprobs(logits)
                 return greedy_sampled, processed_logprobs
 
@@ -198,7 +290,9 @@ class Sampler(nn.Module):
 
         # Apply temperature.
         logits = self.apply_temperature(
-            logits, sampling_metadata.temperature, sampling_metadata.all_random or sampling_metadata.mixed_enforced
+            logits,
+            sampling_metadata.temperature,
+            sampling_metadata.all_random or sampling_metadata.mixed_enforced,
         )
 
         # Apply logits processors that only apply to random sampling
@@ -207,11 +301,12 @@ class Sampler(nn.Module):
             logits = processor.apply(logits)
 
         # Apply top_k and/or top_p.
-        random_sampled, processed_logprobs = self.topk_topp_sampler(
+        random_sampled, processed_logprobs = self.topk_topp_sampler.sample(
             logits,
             sampling_metadata.generators,
             sampling_metadata.top_k,
             sampling_metadata.top_p,
+            need_processed_logprobs=need_processed_logprobs,
         )
 
         if greedy_sampled is None:
@@ -226,7 +321,6 @@ class Sampler(nn.Module):
             random_sampled,
             out=greedy_sampled,  # Reuse tensor
         )
-       
 
         if sampling_metadata.enforced_token_ids:
             for i, req_index in enumerate(sampling_metadata.enforced_req_ids):
@@ -243,7 +337,7 @@ class Sampler(nn.Module):
         logprobs: torch.Tensor,
         num_logprobs: int,
         token_ids: torch.Tensor,
-        sampling_metadata: SamplingMetadata
+        sampling_metadata: SamplingMetadata | None = None,
     ) -> LogprobsTensors:
         """
         Gather logprobs for topk and sampled/prompt token.
@@ -264,11 +358,15 @@ class Sampler(nn.Module):
           Sampled token rank tensor, (num tokens)
         """
         assert token_ids.dtype == torch.int64
-        if sampling_metadata.enforced_tokens:
+        if sampling_metadata and sampling_metadata.enforced_tokens:
             enforced_top_map = sampling_metadata.enforced_tokens
             enforced_map = sampling_metadata.enforced_token_ids
-            
-            topk_indices_enforced = torch.empty((len(sampling_metadata.enforced_req_ids), num_logprobs), dtype=torch.int64, device=logprobs.device)
+
+            topk_indices_enforced = torch.empty(
+                (len(sampling_metadata.enforced_req_ids), num_logprobs),
+                dtype=torch.int64,
+                device=logprobs.device,
+            )
 
             for i, req_index in enumerate(sampling_metadata.enforced_req_ids):
                 seq = enforced_map[req_index]
@@ -286,18 +384,25 @@ class Sampler(nn.Module):
                     step = len(seq) - 1
                     next_top_tok = seq_top_tokens[step][next_tok]
 
-                topk_indices_enforced[i] = torch.tensor(next_top_tok, device=logprobs.device)
-            
+                topk_indices_enforced[i] = torch.tensor(
+                    next_top_tok, device=logprobs.device
+                )
 
             topk_logprobs_enforced = torch.gather(
                 logprobs[sampling_metadata.enforced_req_ids],
                 dim=1,
-                index=topk_indices_enforced
+                index=topk_indices_enforced,
             )
 
             if sampling_metadata.all_enforced:
-                topk_indices = torch.empty((logprobs.size(0), num_logprobs), dtype=torch.int64, device=logprobs.device)
-                topk_logprobs = torch.empty((logprobs.size(0), num_logprobs), device=logprobs.device)
+                topk_indices = torch.empty(
+                    (logprobs.size(0), num_logprobs),
+                    dtype=torch.int64,
+                    device=logprobs.device,
+                )
+                topk_logprobs = torch.empty(
+                    (logprobs.size(0), num_logprobs), device=logprobs.device
+                )
                 for i, req_index in enumerate(sampling_metadata.enforced_req_ids):
                     topk_indices[req_index] = topk_indices_enforced[i]
                     topk_logprobs[req_index] = topk_logprobs_enforced[i]
@@ -310,14 +415,20 @@ class Sampler(nn.Module):
                     logprobs[mask_normal], num_logprobs, dim=-1
                 )
 
-                topk_indices = torch.empty_like(logprobs, device=logprobs.device, dtype=torch.int64)[:, :num_logprobs]
-                topk_logprobs = torch.empty_like(logprobs, device=logprobs.device)[:, :num_logprobs]
+                topk_indices = torch.empty_like(
+                    logprobs, device=logprobs.device, dtype=torch.int64
+                )[:, :num_logprobs]
+                topk_logprobs = torch.empty_like(logprobs, device=logprobs.device)[
+                    :, :num_logprobs
+                ]
 
                 topk_indices[mask_normal] = topk_indices_normal
                 topk_logprobs[mask_normal] = topk_logprobs_normal
 
                 topk_indices[sampling_metadata.enforced_req_ids] = topk_indices_enforced
-                topk_logprobs[sampling_metadata.enforced_req_ids] = topk_logprobs_enforced
+                topk_logprobs[sampling_metadata.enforced_req_ids] = (
+                    topk_logprobs_enforced
+                )
         else:
             # Find the topK values.
             topk_logprobs, topk_indices = torch.topk(logprobs, num_logprobs, dim=-1)
@@ -329,7 +440,6 @@ class Sampler(nn.Module):
         # Compute the ranks of the actual token.
         token_ranks = batched_count_greater_than(logprobs, token_logprobs)
 
-    
         # Concatenate together with the topk.
         indices = torch.cat((token_ids, topk_indices), dim=1)
         logprobs = torch.cat((token_logprobs, topk_logprobs), dim=1)
