@@ -1,0 +1,99 @@
+{
+  "exp_name": "inference",
+  "timestamp": "2026-03-27T01:49:27.239419",
+  "artifact_dir": "/home/konovalenko_f/projects/gonka-vllm/tests/data/experiments/inference_2026-03-27_014927",
+  "inference_artifact": "/home/konovalenko_f/projects/gonka-vllm/tests/data/experiments/inference_2026-03-27_014927/inference_results.jsonl",
+  "n_prompts": 1000,
+  "multilingual": false,
+  "languages_used": [
+    "en"
+  ],
+  "vlm": false,
+  "model_info": {
+    "name": "/data/shared/CompressaAI/test_deploy/models/models/Qwen2-VL-2B-Instruct-GPTQ-Int4",
+    "url": "http://localhost:8008/",
+    "deploy_params": {}
+  },
+  "request_params": {
+    "max_tokens": 256,
+    "temperature": 0.99,
+    "seed": 42,
+    "additional_params": {},
+    "top_logprobs": 20,
+    "top_p": null,
+    "top_k": null,
+    "repetition_penalty": null,
+    "timeout_seconds": 300,
+    "retries_max_attempts": 3,
+    "retry_backoff_seconds_start": 1.0,
+    "retry_backoff_multiplier": 2.0
+  },
+  "vllm_runtime_probe": {
+    "base_url": "http://localhost:8008",
+    "models_url": "http://localhost:8008/v1/models",
+    "served_model_ids": [
+      "/data/shared/CompressaAI/test_deploy/models/models/Qwen2-VL-2B-Instruct-GPTQ-Int4"
+    ],
+    "raw_models_response": {
+      "object": "list",
+      "data": [
+        {
+          "id": "/data/shared/CompressaAI/test_deploy/models/models/Qwen2-VL-2B-Instruct-GPTQ-Int4",
+          "object": "model",
+          "created": 1774576167,
+          "owned_by": "vllm",
+          "root": "/data/shared/CompressaAI/test_deploy/models/models/Qwen2-VL-2B-Instruct-GPTQ-Int4",
+          "parent": null,
+          "max_model_len": 32768,
+          "permission": [
+            {
+              "id": "modelperm-c2f272572b834ca0bc98433248469141",
+              "object": "model_permission",
+              "created": 1774576167,
+              "allow_create_engine": false,
+              "allow_sampling": true,
+              "allow_logprobs": true,
+              "allow_search_indices": false,
+              "allow_view": true,
+              "allow_fine_tuning": false,
+              "organization": "*",
+              "group": null,
+              "is_blocking": false
+            }
+          ]
+        }
+      ]
+    },
+    "health_status_code": 200,
+    "version_status_code": 200,
+    "version_body": "{\"version\":\"0.8.2.dev5889+gf0b3f1a19\"}",
+    "timestamp": "2026-03-27T01:49:27.239074"
+  },
+  "cli": {
+    "url": "http://localhost:8008",
+    "model": "/data/shared/CompressaAI/test_deploy/models/models/Qwen2-VL-2B-Instruct-GPTQ-Int4",
+    "n_prompts": 1000,
+    "prompts_file": null,
+    "max_workers": 64,
+    "wait_timeout_s": 120,
+    "max_attempts": 3,
+    "retry_backoff_start_s": 1.0,
+    "retry_backoff_mult": 2.0,
+    "max_tokens": 256,
+    "temperature": 0.99,
+    "seed": 42,
+    "top_logprobs": 20,
+    "top_p": null,
+    "top_k": null,
+    "repetition_penalty": null,
+    "images": [],
+    "image_detail": null
+  },
+  "performance": {
+    "total_time_seconds": 239.156,
+    "n_prompts": 1000,
+    "total_output_tokens": 39000,
+    "output_tokens_per_second": 163.07,
+    "average_time_per_prompt_seconds": 0.239
+  }
+}

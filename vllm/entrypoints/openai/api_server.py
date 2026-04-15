@@ -113,7 +113,7 @@ from vllm.entrypoints.utils import (
     with_cancellation,
 )
 from vllm.logger import init_logger
-from vllm.logprobs_validation import SIMILARITY_THRESHOLD
+from vllm.logprobs_validation import set_validation_runtime_config
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS
 from vllm.usage.usage_lib import UsageContext
@@ -1678,6 +1678,11 @@ async def init_app_state(
     state: State,
     args: Namespace,
 ) -> None:
+    set_validation_runtime_config(
+        similarity_threshold=args.validation_similarity_threshold,
+        toploc_validation_usage=args.toploc_validation_usage,
+    )
+
     vllm_config = engine_client.vllm_config
 
     if args.served_model_name is not None:
@@ -1872,7 +1877,8 @@ async def init_app_state(
     )
     state.openai_serving_validate = OpenAIServingValidate(
         engine_client=engine_client,
-        threshold=SIMILARITY_THRESHOLD,
+        threshold=args.validation_similarity_threshold,
+        toploc_validation_usage=args.toploc_validation_usage,
     )
     state.anthropic_serving_messages = (
         AnthropicServingMessages(
