@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Live integration tests: PoC (Proof of Computation).
 
 Requires a running vLLM server on port 18199.
@@ -9,13 +11,13 @@ Tests:
   4. PoC batch generation (multiple nonces at once)
   5. PoC /generate with validation block (server-side L2 check)
 """
+
 import base64
 import struct
-import time
-import math
+
 import httpx
-import pytest
 import numpy as np
+import pytest
 
 from tests.gonka.live_conftest import BASE_URL, MODEL, require_server, stop_poc
 
@@ -37,8 +39,14 @@ def server_ready():
     stop_poc()
 
 
-def poc_generate(nonces, block_hash="TEST_BLOCK", wait=True, batch_size=4,
-                 validation=None, timeout=60):
+def poc_generate(
+    nonces,
+    block_hash="TEST_BLOCK",
+    wait=True,
+    batch_size=4,
+    validation=None,
+    timeout=60,
+):
     body = {
         **POC_BASE,
         "block_hash": block_hash,
@@ -49,9 +57,7 @@ def poc_generate(nonces, block_hash="TEST_BLOCK", wait=True, batch_size=4,
     }
     if validation:
         body["validation"] = validation
-    return httpx.post(
-        f"{BASE_URL}/api/v1/pow/generate", json=body, timeout=timeout
-    )
+    return httpx.post(f"{BASE_URL}/api/v1/pow/generate", json=body, timeout=timeout)
 
 
 def decode_vector(b64_str):
@@ -65,7 +71,6 @@ def l2_distance(v1, v2):
 
 
 class TestPoC:
-
     def test_01_generate_nonces(self):
         """Generate PoC artifacts with wait=true."""
         r = poc_generate(nonces=[0, 1, 2, 3])
@@ -77,7 +82,9 @@ class TestPoC:
         for art in data["artifacts"]:
             assert len(art["vector_b64"]) > 0
             vec = decode_vector(art["vector_b64"])
-            print(f"\n  Nonce {art['nonce']}: shape={vec.shape}, norm={np.linalg.norm(vec):.4f}")
+            print(
+                f"\n  Nonce {art['nonce']}: shape={vec.shape}, norm={np.linalg.norm(vec):.4f}"
+            )
             assert vec.shape[0] > 0
             assert np.all(np.isfinite(vec)), f"Nonce {art['nonce']} contains NaN/Inf"
 
@@ -96,7 +103,9 @@ class TestPoC:
             v2 = decode_vector(arts2[nonce]["vector_b64"])
             dist = l2_distance(v1, v2)
             print(f"\n  Nonce {nonce}: L2 distance={dist:.6f}, dims={v1.shape[0]}")
-            assert dist < 0.2, f"Nonce {nonce} self-validation distance too large: {dist:.4f}"
+            assert dist < 0.2, (
+                f"Nonce {nonce} self-validation distance too large: {dist:.4f}"
+            )
 
     def test_03_different_block_hash_different_vectors(self):
         """Different block_hash should produce meaningfully different vectors."""
@@ -170,8 +179,10 @@ class TestPoC:
 
         mean_dist = sum(distances) / len(distances)
         max_dist = max(distances)
-        print(f"\n  Self-validation distances ({len(distances)} pairs): "
-              f"{[f'{d:.6f}' for d in distances]}")
+        print(
+            f"\n  Self-validation distances ({len(distances)} pairs): "
+            f"{[f'{d:.6f}' for d in distances]}"
+        )
         print(f"  Mean: {mean_dist:.6f}, Max: {max_dist:.6f}")
         assert mean_dist < 0.1, (
             f"Mean self-validation distance {mean_dist:.4f} >= 0.1. "

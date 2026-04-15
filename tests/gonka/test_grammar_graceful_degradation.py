@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for Grammar Graceful Degradation.
 
 When enforced tokens conflict with the grammar FSM during validation replay,
@@ -9,16 +11,13 @@ Tests cover:
 3. reset() clears the failure flag
 4. structured_output/__init__.py speculative decode path
 """
-import pytest
-from unittest.mock import MagicMock, patch
-from dataclasses import dataclass, field
 
 import torch
-
 
 # ---------------------------------------------------------------------------
 # Mock xgrammar types so tests run without GPU / xgrammar installed
 # ---------------------------------------------------------------------------
+
 
 class MockGrammarMatcher:
     """Simulates xgr.GrammarMatcher behavior."""
@@ -65,10 +64,11 @@ class MockCompiledGrammar:
 # 1. XgrammarGrammar.accept_tokens() graceful degradation
 # ---------------------------------------------------------------------------
 
-class TestAcceptTokensGracefulDegradation:
 
+class TestAcceptTokensGracefulDegradation:
     def _make_grammar(self, accept_sequence):
         from vllm.v1.structured_output.backend_xgrammar import XgrammarGrammar
+
         matcher = MockGrammarMatcher(accept_sequence)
         return XgrammarGrammar(
             vocab_size=32000,
@@ -120,10 +120,11 @@ class TestAcceptTokensGracefulDegradation:
 # 2. fill_bitmask / rollback become no-ops after failure
 # ---------------------------------------------------------------------------
 
-class TestBitmaskAndRollbackAfterFailure:
 
+class TestBitmaskAndRollbackAfterFailure:
     def _make_grammar(self, accept_sequence):
         from vllm.v1.structured_output.backend_xgrammar import XgrammarGrammar
+
         matcher = MockGrammarMatcher(accept_sequence)
         return XgrammarGrammar(
             vocab_size=32000,
@@ -169,10 +170,11 @@ class TestBitmaskAndRollbackAfterFailure:
 # 3. reset() clears the failure flag
 # ---------------------------------------------------------------------------
 
-class TestResetClearsFailure:
 
+class TestResetClearsFailure:
     def _make_grammar(self, accept_sequence):
         from vllm.v1.structured_output.backend_xgrammar import XgrammarGrammar
+
         matcher = MockGrammarMatcher(accept_sequence)
         return XgrammarGrammar(
             vocab_size=32000,
@@ -210,6 +212,7 @@ class TestResetClearsFailure:
 # ---------------------------------------------------------------------------
 # 4. __init__.py speculative decode path — assert replaced with warning
 # ---------------------------------------------------------------------------
+
 
 class TestSpecDecodeGrammarHandling:
     """Test that the structured_output __init__.py doesn't crash on rejection."""
@@ -260,6 +263,7 @@ class TestSpecDecodeGrammarHandling:
         class FakeGrammar:
             def accept_tokens(self, req_id, tokens):
                 return True
+
             def is_terminated(self):
                 return False
 
@@ -283,6 +287,7 @@ class TestSpecDecodeGrammarHandling:
 # 5. End-to-end: enforced sampling with grammar doesn't crash
 # ---------------------------------------------------------------------------
 
+
 class TestEnforcedSamplingWithGrammar:
     """Simulate the full flow: enforced tokens + grammar active."""
 
@@ -300,7 +305,7 @@ class TestEnforcedSamplingWithGrammar:
 
         # First 5 tokens accepted
         for i in range(5):
-            assert g.accept_tokens(f"req1", [i]) is True
+            assert g.accept_tokens("req1", [i]) is True
         assert g._grammar_failed is False
         assert g.num_processed_tokens == 5
 

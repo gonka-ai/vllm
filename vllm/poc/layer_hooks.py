@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-round layer hooks for structure breaking.
 
 Applies transformations between transformer layers to break
@@ -6,12 +8,12 @@ the model learned output structure.
 PATCHED: Replaced ContextVar with simple global bool for torch.compile compatibility.
 torch.compile/dynamo cannot trace ContextVar.get() calls.
 """
+
 from contextlib import contextmanager
-from typing import List
 
 import torch
 
-from .gpu_random import generate_householder_vector, apply_householder
+from .gpu_random import apply_householder, generate_householder_vector
 
 # Simple global flag instead of ContextVar (dynamo-compatible)
 # Safe because PoC forward is synchronous and single-threaded
@@ -48,11 +50,11 @@ class LayerHouseholderHook:
         device: torch.device,
         hidden_size: int,
     ):
-        self.hooks: List = []
-        self.reflection_vectors: List[torch.Tensor] = []
+        self.hooks: list = []
+        self.reflection_vectors: list[torch.Tensor] = []
         self.block_hash = block_hash
 
-    def _find_layers(self, model: torch.nn.Module) -> List[torch.nn.Module]:
+    def _find_layers(self, model: torch.nn.Module) -> list[torch.nn.Module]:
         """Find transformer layers in a model-agnostic way."""
         if hasattr(model, "model") and hasattr(model.model, "layers"):
             return list(model.model.layers)
@@ -87,6 +89,7 @@ class LayerHouseholderHook:
         Hook only transforms when poc_forward_context is active.
         Uses simple global bool check instead of ContextVar for dynamo compat.
         """
+
         def hook(module, input, output):
             if not is_poc_forward_active():
                 return output

@@ -8,8 +8,6 @@ import time
 from dataclasses import replace
 from typing import Annotated, Any, ClassVar, Literal
 
-from vllm.validation import EnforcedTokens
-
 import torch
 from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
@@ -45,6 +43,7 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.utils import random_uuid
+from vllm.validation import EnforcedTokens
 
 logger = init_logger(__name__)
 

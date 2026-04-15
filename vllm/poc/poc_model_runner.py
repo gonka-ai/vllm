@@ -1,26 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """PoC model runner for vLLM 0.15.x V1 architecture.
 
 Full model forward pass with proper V1 attention metadata.
 Uses actual KV cache blocks for attention to work correctly.
 Batched forward pass — processes all nonces in a single forward call.
 """
+
 import math
+from typing import Any
+
+import numpy as np
 import torch
 import torch.distributed as dist
-import numpy as np
-from typing import List, Optional, Dict, Any
 
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.forward_context import set_forward_context
-from vllm.sequence import IntermediateTensors
 from vllm.logger import init_logger
+from vllm.sequence import IntermediateTensors
 
 from .gpu_random import (
+    apply_haar_rotation,
     generate_inputs,
     generate_inputs_concat_murmur,
     random_pick_indices,
-    apply_haar_rotation,
 )
 from .layer_hooks import LayerHouseholderHook, poc_forward_context
 
@@ -90,12 +94,8 @@ def _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker):
         torch.arange(batch_size + 1, dtype=torch.int32, device="cpu") * seq_len
     )
 
-    seq_lens_gpu = torch.full(
-        (batch_size,), seq_len, dtype=torch.int32, device=device
-    )
-    seq_lens_cpu = torch.full(
-        (batch_size,), seq_len, dtype=torch.int32, device="cpu"
-    )
+    seq_lens_gpu = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
+    seq_lens_cpu = torch.full((batch_size,), seq_len, dtype=torch.int32, device="cpu")
 
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=query_start_loc_gpu,
@@ -142,12 +142,12 @@ def execute_poc_forward(
     worker,
     block_hash: str,
     public_key: str,
-    nonces: List[int],
+    nonces: list[int],
     seq_len: int,
     hidden_size: int,
     k_dim: int = DEFAULT_K_DIM,
     poc_stronger_rng: bool = False,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Execute batched PoC forward pass on a V1 worker.
 
     Processes all nonces in a single forward call for maximum throughput.
@@ -165,14 +165,17 @@ def execute_poc_forward(
     if tp_group.world_size > 1:
         dist.barrier(group=tp_group.cpu_group)
         if is_tp_driver:
-            broadcast_tensor_dict({
-                "poc_go": True,
-                "seq_len": seq_len,
-                "hidden_size": hidden_size,
-                "nonces": nonces,
-                "k_dim": k_dim,
-                "poc_stronger_rng": poc_stronger_rng,
-            }, src=0)
+            broadcast_tensor_dict(
+                {
+                    "poc_go": True,
+                    "seq_len": seq_len,
+                    "hidden_size": hidden_size,
+                    "nonces": nonces,
+                    "k_dim": k_dim,
+                    "poc_stronger_rng": poc_stronger_rng,
+                },
+                src=0,
+            )
         else:
             broadcast_data = broadcast_tensor_dict(src=0)
             seq_len = int(broadcast_data["seq_len"])
@@ -211,23 +214,30 @@ def execute_poc_forward(
         for kv in kv_caches:
             if kv.numel() >= needed_elems:
                 kv_scratch = kv.flatten()[:needed_elems].view(
-                    batch_size, seq_len, hidden_size)
+                    batch_size, seq_len, hidden_size
+                )
                 break
         if kv_scratch is not None:
-            from .gpu_random import _seed_from_string, _normal
+            from .gpu_random import _normal, _seed_from_string
+
             for i, nonce in enumerate(nonces):
-                seed = _seed_from_string(
-                    f"{block_hash}_{public_key}_nonce{nonce}")
+                seed = _seed_from_string(f"{block_hash}_{public_key}_nonce{nonce}")
                 vals = _normal(seed, seq_len * hidden_size, device)
                 kv_scratch[i].copy_(vals.view(seq_len, hidden_size).to(dtype))
                 del vals
             inputs_embeds = kv_scratch
         else:
-            _gen_fn = generate_inputs_concat_murmur if poc_stronger_rng else generate_inputs
+            _gen_fn = (
+                generate_inputs_concat_murmur if poc_stronger_rng else generate_inputs
+            )
             inputs_embeds = _gen_fn(
-                block_hash, public_key, nonces,
-                dim=hidden_size, seq_len=seq_len,
-                device=device, dtype=dtype,
+                block_hash,
+                public_key,
+                nonces,
+                dim=hidden_size,
+                seq_len=seq_len,
+                device=device,
+                dtype=dtype,
             )
     else:
         intermediate_tensors = IntermediateTensors(
@@ -235,7 +245,8 @@ def execute_poc_forward(
         )
 
     with set_forward_context(
-        attn_metadata, vllm_config,
+        attn_metadata,
+        vllm_config,
         num_tokens=batch_size * seq_len,
         slot_mapping=slot_mapping_dict,
         skip_compiled=True,
@@ -245,7 +256,9 @@ def execute_poc_forward(
                 input_ids=None,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds.view(-1, hidden_size) if inputs_embeds is not None else None,
+                inputs_embeds=inputs_embeds.view(-1, hidden_size)
+                if inputs_embeds is not None
+                else None,
             )
 
     # PP: send to next rank if not last
@@ -283,7 +296,9 @@ def execute_poc_forward(
     last_hidden = last_hidden / (last_hidden.norm(dim=-1, keepdim=True) + 1e-8)
 
     # Batched k-dim pick + Haar rotation
-    indices = random_pick_indices(block_hash, public_key, nonces, hidden_size, k_dim, device)
+    indices = random_pick_indices(
+        block_hash, public_key, nonces, hidden_size, k_dim, device
+    )
     xk = torch.gather(last_hidden, 1, indices)
     yk = apply_haar_rotation(block_hash, public_key, nonces, xk, device)
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Live integration tests: Chat Priority Gating.
 
 Requires a running vLLM server on port 18199.
@@ -11,14 +13,20 @@ Tests:
      quickly, not drained
   5. Chat completions produce correct output after PoC stops
 """
+
 import json
-import time
 import threading
+import time
+
 import httpx
 import pytest
 
 from tests.gonka.live_conftest import (
-    BASE_URL, MODEL, require_server, stop_poc, chat_request,
+    BASE_URL,
+    MODEL,
+    chat_request,
+    require_server,
+    stop_poc,
 )
 
 POC_INIT_BODY = {
@@ -49,7 +57,6 @@ def cleanup_poc():
 
 
 class TestChatPriorityGating:
-
     def test_01_baseline_chat_works(self):
         r = chat_request(
             [{"role": "user", "content": "Say hello in one word."}],
@@ -127,9 +134,7 @@ class TestChatPriorityGating:
         assert r.status_code == 200, f"init/generate failed: {r.text}"
 
         time.sleep(0.3)
-        r = chat_request(
-            [{"role": "user", "content": "hi"}], max_tokens=3, timeout=10
-        )
+        r = chat_request([{"role": "user", "content": "hi"}], max_tokens=3, timeout=10)
         assert r.status_code == 503, (
             f"Expected 503 while PoC active, got {r.status_code}"
         )
@@ -143,16 +148,12 @@ class TestChatPriorityGating:
         #   - HTTP 200 with truncated output (abort fires at the engine
         #     level; for non-streaming requests vLLM V1 still returns 200
         #     with whatever tokens were generated before the abort).
-        if "error" in inference_result:
-            aborted = True
-        elif inference_result.get("status") != 200:
+        if "error" in inference_result or inference_result.get("status") != 200:
             aborted = True
         else:
             try:
                 body = __import__("json").loads(inference_result["text"])
-                n_tokens = len(
-                    body["choices"][0]["logprobs"]["content"]
-                )
+                n_tokens = len(body["choices"][0]["logprobs"]["content"])
                 aborted = n_tokens < 300
             except Exception:
                 aborted = True
@@ -164,9 +165,7 @@ class TestChatPriorityGating:
 
         # Engine must survive abort + PoC stop and serve new requests.
         time.sleep(2)
-        r = chat_request(
-            [{"role": "user", "content": "Still alive?"}], max_tokens=5
-        )
+        r = chat_request([{"role": "user", "content": "Still alive?"}], max_tokens=5)
         assert r.status_code == 200, (
             f"Engine died after abort: {r.status_code}: {r.text}"
         )
@@ -226,7 +225,9 @@ class TestChatPriorityGating:
         # With abort, the inference should resolve within 10s of PoC start.
         # Without abort, 2000 tokens on 235B/A100 takes 30-60+ seconds.
         print(f"  Time from PoC init to inference done: {poc_to_done:.1f}s")
-        print(f"  Total inference wall time: {inference_result.get('elapsed', -1):.1f}s")
+        print(
+            f"  Total inference wall time: {inference_result.get('elapsed', -1):.1f}s"
+        )
         assert poc_to_done < 15, (
             f"Abort too slow — inference took {poc_to_done:.1f}s after PoC "
             f"started (expected <15s). Looks like drain, not abort."
@@ -246,9 +247,7 @@ class TestChatPriorityGating:
 
         # Engine still healthy.
         time.sleep(2)
-        r = chat_request(
-            [{"role": "user", "content": "Quick check"}], max_tokens=5
-        )
+        r = chat_request([{"role": "user", "content": "Quick check"}], max_tokens=5)
         assert r.status_code == 200, (
             f"Engine died after fast abort: {r.status_code}: {r.text}"
         )
@@ -265,9 +264,7 @@ class TestChatPriorityGating:
 
         time.sleep(3)
 
-        r = chat_request(
-            [{"role": "user", "content": "hi"}], max_tokens=3, timeout=10
-        )
+        r = chat_request([{"role": "user", "content": "hi"}], max_tokens=3, timeout=10)
         assert r.status_code == 503, (
             f"Expected 503 while PoC active, got {r.status_code}"
         )
@@ -278,8 +275,12 @@ class TestChatPriorityGating:
 
         # First request: verify basic 200 and non-empty content.
         r = chat_request(
-            [{"role": "user", "content": "What is 2 + 2? Answer with "
-             "just the number."}],
+            [
+                {
+                    "role": "user",
+                    "content": "What is 2 + 2? Answer with just the number.",
+                }
+            ],
             max_tokens=10,
         )
         assert r.status_code == 200, (
@@ -288,14 +289,16 @@ class TestChatPriorityGating:
         data = r.json()
         text1 = data["choices"][0]["message"]["content"]
         print(f"  Post-PoC response 1: {text1!r}")
-        assert "4" in text1, (
-            f"Expected '4' in response, got: {text1!r}"
-        )
+        assert "4" in text1, f"Expected '4' in response, got: {text1!r}"
 
         # Second request: longer generation to confirm model is coherent.
         r = chat_request(
-            [{"role": "user", "content": "List the first 5 prime numbers, "
-             "separated by commas."}],
+            [
+                {
+                    "role": "user",
+                    "content": "List the first 5 prime numbers, separated by commas.",
+                }
+            ],
             max_tokens=30,
         )
         assert r.status_code == 200, (
@@ -305,9 +308,7 @@ class TestChatPriorityGating:
         text2 = data["choices"][0]["message"]["content"]
         print(f"  Post-PoC response 2: {text2!r}")
         for prime in ["2", "3", "5", "7", "11"]:
-            assert prime in text2, (
-                f"Expected '{prime}' in primes list, got: {text2!r}"
-            )
+            assert prime in text2, f"Expected '{prime}' in primes list, got: {text2!r}"
 
         # Third request: verify logprobs are returned (not corrupted).
         r = chat_request(
@@ -319,7 +320,6 @@ class TestChatPriorityGating:
         content = data["choices"][0]["logprobs"]["content"]
         assert len(content) > 0, "No logprobs content after PoC"
         assert all(
-            "top_logprobs" in pos and len(pos["top_logprobs"]) > 0
-            for pos in content
+            "top_logprobs" in pos and len(pos["top_logprobs"]) > 0 for pos in content
         ), "Logprobs structure broken after PoC"
         print(f"  Post-PoC response 3: logprobs OK ({len(content)} tokens)")

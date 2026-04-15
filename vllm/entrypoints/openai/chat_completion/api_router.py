@@ -49,13 +49,14 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
     # to prevent GPU contention / NCCL deadlocks.
     try:
         from vllm.poc.routes import is_poc_generation_active
+
         if is_poc_generation_active():
             return JSONResponse(
                 status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
                 content=ErrorResponse(
                     error=ErrorInfo(
                         message="PoC generation is active. Inference requests "
-                                "are temporarily unavailable.",
+                        "are temporarily unavailable.",
                         type="service_unavailable",
                         code=HTTPStatus.SERVICE_UNAVAILABLE.value,
                     ),
