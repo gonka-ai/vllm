@@ -291,7 +291,6 @@ class SamplingParams(
         structured_outputs: StructuredOutputsParams | None = None,
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
-        enforced_token_ids: list[int] | None = None,
         enforced_tokens: list[dict[int, list[int]]] | None = None,
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,

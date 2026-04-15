@@ -163,7 +163,11 @@ def create_whisper_attention_backend_with_block_pooling(
         attention_backend_cls=underlying_attn_backend,
         overrides={
             "get_builder_cls": lambda: WhisperCausalAttentionWithBlockPoolingBuilder,
-            "get_kv_cache_shape": lambda num_blocks, block_size, num_kv_heads, head_size, cache_dtype_str: (
+            "get_kv_cache_shape": lambda num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+            cache_dtype_str: (
                 2,
                 num_blocks,
                 # we stretch each block by `block_pool_size`

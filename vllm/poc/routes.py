@@ -7,6 +7,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -258,7 +259,7 @@ async def _compute_artifacts_chunk(
     k_dim: int,
     poc_stronger_rng: bool = False,
     timeout_sec: float = POC_GENERATE_CHUNK_TIMEOUT_SEC,
-    check_cancelled: callable | None = None,
+    check_cancelled: Callable | None = None,
 ) -> list[dict]:
     """Compute artifacts for a chunk with backoff on skip."""
     chunk_start_time = time.time()

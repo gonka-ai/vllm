@@ -44,6 +44,8 @@ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
+)
+from vllm.entrypoints.openai.protocol import (
     ValidateRequest,
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
