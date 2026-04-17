@@ -5,6 +5,7 @@ Uses actual KV cache blocks for attention to work correctly.
 Batched forward pass — processes all nonces in a single forward call.
 """
 import math
+import os
 import torch
 import torch.distributed as dist
 import numpy as np
@@ -27,6 +28,17 @@ from .layer_hooks import LayerHouseholderHook, poc_forward_context
 logger = init_logger(__name__)
 
 DEFAULT_K_DIM = 12
+_NAN_KILL_THRESHOLD = int(os.environ.get("POC_NAN_KILL_THRESHOLD", "3"))
+
+
+def _reject_bad_batch(worker, reason: str, bad_count: int, batch_size: int) -> dict:
+    worker._poc_bad_batches = getattr(worker, "_poc_bad_batches", 0) + 1
+    logger.error(f"NaN/Inf in {bad_count}/{batch_size} {reason} - batch rejected "
+                 f"[{worker._poc_bad_batches}/{_NAN_KILL_THRESHOLD} consecutive]")
+    if worker._poc_bad_batches >= _NAN_KILL_THRESHOLD:
+        logger.critical(f"Persistent GPU fault: {worker._poc_bad_batches} consecutive bad batches — exiting")
+        os._exit(1)
+    return {"nonces": [], "vectors": []}
 
 # NOTE: attention metadata must NOT be cached across PoC calls.
 # The metadata builder's internal state (workspace buffers, page-table
@@ -264,20 +276,11 @@ def execute_poc_forward(
     hidden_states = hidden_states.view(batch_size, seq_len, -1)
     last_hidden = hidden_states[:, -1, :].float()  # [batch_size, hidden_size]
 
-    # NaN detection
-    nan_mask = torch.isnan(last_hidden).any(dim=-1)  # [batch_size]
-    if nan_mask.any():
-        clean_idx = (~nan_mask).nonzero(as_tuple=True)[0]
-        nan_count = nan_mask.sum().item()
-        logger.warning("NaN in %d/%d hidden states (GPU fault?)", nan_count, batch_size)
-
-        if clean_idx.numel() == 0:
-            logger.error("All %d nonces produced NaN — batch rejected", batch_size)
-            return {"nonces": [], "vectors": np.empty((0, k_dim), dtype=np.float16)}
-
-        last_hidden = last_hidden[clean_idx]
-        nonces = [nonces[i] for i in clean_idx.tolist()]
-        batch_size = len(nonces)
+    # Reject entire batch on any NaN/Inf — matches Go validator ValidateFP16Vector
+    # which treats exponent==0x1f (NaN or Inf) as permanent failure.
+    if not torch.isfinite(last_hidden).all():
+        bad_count = (~torch.isfinite(last_hidden).all(dim=-1)).sum().item()
+        return _reject_bad_batch(worker, "hidden states", bad_count, batch_size)
 
     # Normalize to unit sphere
     last_hidden = last_hidden / (last_hidden.norm(dim=-1, keepdim=True) + 1e-8)
@@ -293,13 +296,12 @@ def execute_poc_forward(
     # Convert to FP16
     vectors_f16 = yk.half().cpu().numpy()  # [batch_size, k_dim]
 
-    # Late NaN check after FP16 conversion
-    nan_out = np.isnan(vectors_f16).any(axis=1)
-    if nan_out.any():
-        clean = ~nan_out
-        vectors_f16 = vectors_f16[clean]
-        nonces = [n for n, c in zip(nonces, clean) if c]
-        logger.warning("NaN in FP16 output — %d nonces filtered", nan_out.sum())
+    # Reject entire batch if FP16 conversion produced any NaN or Inf.
+    if not np.isfinite(vectors_f16).all():
+        bad_count = int((~np.isfinite(vectors_f16).all(axis=1)).sum())
+        return _reject_bad_batch(worker, "FP16 vectors", bad_count, batch_size)
+
+    worker._poc_bad_batches = 0
 
     return {
         "nonces": nonces,
