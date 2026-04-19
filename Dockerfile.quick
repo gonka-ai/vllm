@@ -1,0 +1,23 @@
+ARG BASE_IMAGE=vllm/vllm-openai:v0.19.0
+FROM ${BASE_IMAGE}
+
+ENV VLLM_ALLOW_INSECURE_SERIALIZATION=1
+
+# Note: VLLM_USE_FLASHINFER_MOE_FP4 / VLLM_USE_FLASHINFER_MOE_FP8 are
+# intentionally NOT set here. The optimal value depends on model +
+# GPU topology (e.g. Qwen3-235B-A22B FP8 on H100 is fastest with
+# FP8=0 / TRITON; MiniMax-M2.7 rejects both backends). Downstream
+# images (e.g. kaitakuai/mlnode) set them per their deployment target.
+
+RUN pip install --no-cache-dir scipy
+
+# Copy local code to temp location.
+COPY ./vllm /tmp/vllm-src
+
+# Merge only .py files into existing vllm package (preserves .so files).
+# Self-healing: picks up any new/changed Python file in the source tree,
+# so adding files to vllm/poc/ or patching existing modules does not
+# require updating a hand-maintained COPY list.
+RUN cd /tmp/vllm-src \
+    && find . -name "*.py" | tar -cf - -T - | tar -xf - -C /usr/local/lib/python3.12/dist-packages/vllm/ \
+    && rm -rf /tmp/vllm-src

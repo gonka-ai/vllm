@@ -888,13 +888,7 @@ class VllmConfig:
                 self.compilation_config.mode = CompilationMode.NONE
 
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
-            if (
-                self.compilation_config.backend == "inductor"
-                and self.compilation_config.mode != CompilationMode.NONE
-            ):
-                self.compilation_config.custom_ops.append("none")
-            else:
-                self.compilation_config.custom_ops.append("all")
+            self.compilation_config.custom_ops.append("all")
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)

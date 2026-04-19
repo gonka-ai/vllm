@@ -95,6 +95,7 @@ class InputBatch:
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
         cp_kv_cache_interleave_size: int = 1,
+        logprobs_mode_default: str = "raw_logprobs",
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -234,6 +235,8 @@ class InputBatch:
         self.generators: dict[int, torch.Generator] = {}
 
         self.num_logprobs: dict[str, int] = {}
+        self.logprobs_mode_default = logprobs_mode_default
+        self.logprobs_modes: dict[str, str] = {}
 
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
@@ -256,6 +259,9 @@ class InputBatch:
         self.logits_processing_needs_token_ids = np.zeros(max_num_reqs, dtype=bool)
 
         self.req_output_token_ids: list[list[int] | None] = []
+
+        # Enforced next-token IDs keyed by req_id (gonka PoC v2 replay).
+        self.req_enforced_token_ids: dict[str, list[int] | None] = {}
 
         # Store provided logitsprocs. If none are provided, initialize empty
         # data structure
@@ -320,13 +326,23 @@ class InputBatch:
         req_index = self._register_add_request(request)
 
         req_id = request.req_id
+        enforced = (
+            getattr(request.sampling_params, "enforced_token_ids", None)
+            if request.sampling_params
+            else None
+        )
+
         if req_index == len(self._req_ids):
             self._req_ids.append(req_id)
             self.req_output_token_ids.append(request.output_token_ids)
+            if enforced:
+                self.req_enforced_token_ids[req_id] = enforced
             self.spec_token_ids.append([])
         else:
             self._req_ids[req_index] = req_id
             self.req_output_token_ids[req_index] = request.output_token_ids
+            if enforced:
+                self.req_enforced_token_ids[req_id] = enforced
             self.spec_token_ids[req_index].clear()
 
         self.req_id_to_index[req_id] = req_index
@@ -393,6 +409,9 @@ class InputBatch:
                     self.vocab_size
                     if sampling_params.logprobs == -1
                     else sampling_params.logprobs
+                )
+                self.logprobs_modes[req_id] = (
+                    sampling_params.logprobs_mode or self.logprobs_mode_default
                 )
 
             if sampling_params.allowed_token_ids:
@@ -495,6 +514,7 @@ class InputBatch:
         self.batch_update_builder.removed_append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
+        self.req_enforced_token_ids.pop(req_id, None)
         self.spec_token_ids[req_index].clear()
         self.block_table.clear_row(req_index)
 
@@ -522,6 +542,7 @@ class InputBatch:
         self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
+        self.logprobs_modes.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
         if self.prev_req_id_to_index is not None:
             self.prev_req_id_to_index.pop(req_id, None)
@@ -778,6 +799,45 @@ class InputBatch:
         del self.req_output_token_ids[num_reqs:]
         del self.spec_token_ids[num_reqs:]
 
+    def _build_enforced_tensor(self) -> "torch.Tensor | None":
+        """Build enforced_next_token_ids tensor from current batch state.
+
+        Returns None if no requests have enforced tokens.
+        Shape [num_reqs], -1 means no enforcement for that request.
+        """
+        num_reqs = self.num_reqs
+        if num_reqs == 0 or not self.req_enforced_token_ids:
+            return None
+        enforced_list: list[int] = []
+        has_any = False
+        for i in range(num_reqs):
+            req_id = self._req_ids[i]
+            etids = (
+                self.req_enforced_token_ids.get(req_id)
+                if req_id is not None
+                else None
+            )
+            if etids:
+                out = self.req_output_token_ids[i]
+                out_len = len(out) if out else 0
+                enforced_list.append(
+                    etids[out_len] if out_len < len(etids) else etids[-1]
+                )
+                has_any = True
+            else:
+                enforced_list.append(-1)
+        if not has_any:
+            return None
+        return torch.tensor(enforced_list, dtype=torch.long, device=self.device)
+
+    def _update_enforced_tensor(self) -> None:
+        """Update enforced_next_token_ids on sampling_metadata each step."""
+        if self.sampling_metadata is None:
+            return
+        self.sampling_metadata.enforced_next_token_ids = (
+            self._build_enforced_tensor()
+        )
+
     def refresh_metadata(self):
         """Apply any batch updates to sampling metadata."""
 
@@ -795,6 +855,9 @@ class InputBatch:
             logit_proc.update_state(batch_update)
         if batch_update:
             self.sampling_metadata = self._make_sampling_metadata()
+        # Always update enforced tokens (they advance each step).
+        if self.req_enforced_token_ids:
+            self._update_enforced_tensor()
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
@@ -865,6 +928,19 @@ class InputBatch:
             )
             allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
 
+        batch_mode = self.batch_logprobs_mode
+        logprobs_is_processed: torch.Tensor | None = None
+        if batch_mode == "mixed":
+            logprobs_is_processed = torch.zeros(
+                num_reqs, dtype=torch.bool, device=self.device
+            )
+            for i in range(num_reqs):
+                req_id = self._req_ids[i]
+                if req_id is not None:
+                    logprobs_is_processed[i] = (
+                        self.logprobs_modes.get(req_id) == "processed_logprobs"
+                    )
+
         return SamplingMetadata(
             temperature=temperature,
             all_greedy=self.all_greedy,
@@ -883,6 +959,9 @@ class InputBatch:
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
+            batch_logprobs_mode=batch_mode,
+            logprobs_is_processed=logprobs_is_processed,
+            enforced_next_token_ids=self._build_enforced_tensor(),
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:
@@ -1060,6 +1139,21 @@ class InputBatch:
     @property
     def max_num_logprobs(self) -> int | None:
         return max(self.num_logprobs.values()) if self.num_logprobs else None
+
+    @property
+    def batch_logprobs_mode(self) -> str | None:
+        """Aggregate per-request logprobs modes into a batch-level mode.
+
+        Returns None when no request in the batch requested logprobs,
+        the single shared mode when all requests agree, or "mixed" when
+        the batch contains more than one distinct mode.
+        """
+        if not self.logprobs_modes:
+            return None
+        modes = set(self.logprobs_modes.values())
+        if len(modes) == 1:
+            return next(iter(modes))
+        return "mixed"
 
     @property
     def no_allowed_token_ids(self) -> bool:
