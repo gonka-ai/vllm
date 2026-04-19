@@ -2,10 +2,12 @@ ARG BASE_IMAGE=vllm/vllm-openai:v0.19.0
 FROM ${BASE_IMAGE}
 
 ENV VLLM_ALLOW_INSECURE_SERIALIZATION=1
-# NVFP4 on Blackwell (B200 / RTX PRO 6000) — enable FlashInfer MoE NVFP4
-# and FP8 fast paths. Harmless on non-NVFP4 models / non-Blackwell GPUs.
-ENV VLLM_USE_FLASHINFER_MOE_FP4=1
-ENV VLLM_USE_FLASHINFER_MOE_FP8=1
+
+# Note: VLLM_USE_FLASHINFER_MOE_FP4 / VLLM_USE_FLASHINFER_MOE_FP8 are
+# intentionally NOT set here. The optimal value depends on model +
+# GPU topology (e.g. Qwen3-235B-A22B FP8 on H100 is fastest with
+# FP8=0 / TRITON; MiniMax-M2.7 rejects both backends). Downstream
+# images (e.g. kaitakuai/mlnode) set them per their deployment target.
 
 RUN pip install --no-cache-dir scipy
 
