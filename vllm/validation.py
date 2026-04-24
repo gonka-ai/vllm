@@ -1,17 +1,14 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """EnforcedToken support for gonka-style inference validation."""
 
-from typing import Any
-
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
 class EnforcedToken(BaseModel):
     token: str
-    top_tokens: list[str] = Field(default_factory=list)
-    token_id: int | None = Field(default=None, exclude=True)
-    top_token_ids: list[int] = Field(default_factory=list, exclude=True)
+    top_tokens: List[str] = Field(default_factory=list)
+    token_id: Optional[int] = Field(default=None, exclude=True)
+    top_token_ids: List[int] = Field(default_factory=list, exclude=True)
 
     def encode(self, tokenizer) -> None:
         """Convert token strings to token IDs.
@@ -31,14 +28,14 @@ class EnforcedToken(BaseModel):
 
 
 class EnforcedTokens(BaseModel):
-    tokens: list[EnforcedToken]
+    tokens: List[EnforcedToken]
 
     def encode(self, tokenizer) -> None:
         for token in self.tokens:
             token.encode(tokenizer)
 
     @classmethod
-    def from_content(cls, content: list[dict[str, Any]]) -> "EnforcedTokens":
+    def from_content(cls, content: List[Dict[str, Any]]) -> "EnforcedTokens":
         tokens = []
         for position in content:
             token = position["token"]
@@ -46,12 +43,12 @@ class EnforcedTokens(BaseModel):
             tokens.append(EnforcedToken(token=token, top_tokens=top_tokens))
         return cls(tokens=tokens)
 
-    def get_enforced_token_ids(self) -> list[int]:
+    def get_enforced_token_ids(self) -> List[int]:
         if not self.tokens or self.tokens[0].token_id is None:
             raise ValueError("Enforced tokens are not encoded")
         return [token.token_id for token in self.tokens]
 
-    def detect_logprobs_mode(self, threshold: float = 0.10) -> str | None:
+    def detect_logprobs_mode(self, threshold: float = 0.10) -> Optional[str]:
         """Classify original inference logprobs mode from top_token_ids.
 
         In processed-logprobs results, empty top-k slots are padded with the

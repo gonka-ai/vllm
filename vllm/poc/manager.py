@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """PoC Manager - handles artifact generation for proof of compute.
 
 NOTE: This class uses synchronous collective_rpc and was designed for V0
@@ -11,8 +9,7 @@ This is a minimal, stateless manager that only provides the generate_artifacts
 operation. All state (generation loop, nonce counter, stats) is managed in
 the API layer (routes.py).
 """
-
-from typing import TYPE_CHECKING, Any
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
 
 from .data import Artifact, encode_vector
 
@@ -23,7 +20,7 @@ if TYPE_CHECKING:
 
 class PoCManager:
     """Manages PoC artifact generation (stateless)."""
-
+    
     def __init__(
         self,
         model_executor: "ExecutorBase",
@@ -33,22 +30,22 @@ class PoCManager:
         self.model_executor = model_executor
         self.model_config = model_config
         self.vllm_config = vllm_config
-
+    
     def _run_forward(
         self,
         block_hash: str,
         public_key: str,
-        nonces: list[int],
+        nonces: List[int],
         seq_len: int,
         k_dim: int,
         poc_stronger_rng: bool = False,
-    ) -> dict[str, Any] | None:
+    ) -> Optional[Dict[str, Any]]:
         """Run forward pass via collective_rpc.
-
+        
         Returns dict with 'nonces' and 'vectors' (FP16 numpy array).
         """
         from .poc_model_runner import execute_poc_forward
-
+        
         results = self.model_executor.collective_rpc(
             execute_poc_forward,
             args=(
@@ -61,21 +58,21 @@ class PoCManager:
                 poc_stronger_rng,
             ),
         )
-
+        
         # Only the last PP rank returns a result
         return next((r for r in results if r is not None), None)
-
+    
     def generate_artifacts(
         self,
-        nonces: list[int],
+        nonces: List[int],
         block_hash: str,
         public_key: str,
         seq_len: int,
         k_dim: int,
         poc_stronger_rng: bool = False,
-    ) -> list[Artifact]:
+    ) -> List[Artifact]:
         """Generate artifacts for specific nonces.
-
+        
         This is the only public API. The caller provides nonces explicitly;
         nonce progression logic lives in the API layer.
         """
@@ -87,14 +84,14 @@ class PoCManager:
             k_dim,
             poc_stronger_rng,
         )
-
+        
         if result is None:
             return []
-
+        
         vectors = result["vectors"]  # FP16 numpy array
         artifacts = []
         for i, nonce in enumerate(result["nonces"]):
             vector_b64 = encode_vector(vectors[i])
             artifacts.append(Artifact(nonce=nonce, vector_b64=vector_b64))
-
+        
         return artifacts

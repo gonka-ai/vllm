@@ -1,7 +1,6 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
 
 
 class PoCState(Enum):
@@ -13,7 +12,6 @@ class PoCState(Enum):
 @dataclass
 class PoCConfig:
     """Configuration for a PoC generation round."""
-
     block_hash: str
     block_height: int
     public_key: str
@@ -23,4 +21,4 @@ class PoCConfig:
     seq_len: int = 256
     k_dim: int = 12
     poc_stronger_rng: bool = False
-    callback_url: str | None = None
+    callback_url: Optional[str] = None

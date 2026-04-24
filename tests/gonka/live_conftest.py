@@ -1,15 +1,11 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared helpers for live integration tests against a running vLLM server.
 
 Uses the same EnforcedTokens format and distance2 metric as the production
 validation pipeline (see benchmarks/src/validation/utils.py).
 """
-
 import math
 import os
 import time
-
 import httpx
 import pytest
 
@@ -51,7 +47,9 @@ def chat_request(messages, max_tokens=20, extra=None, timeout=60):
     }
     if extra:
         body.update(extra)
-    return httpx.post(f"{BASE_URL}/v1/chat/completions", json=body, timeout=timeout)
+    return httpx.post(
+        f"{BASE_URL}/v1/chat/completions", json=body, timeout=timeout
+    )
 
 
 def build_enforced_tokens(content):
@@ -70,13 +68,14 @@ def extract_result(response_json):
     content = response_json["choices"][0]["logprobs"]["content"]
     results = []
     for position in content:
-        logprobs = {str(lp["token"]): lp["logprob"] for lp in position["top_logprobs"]}
-        results.append(
-            {
-                "token": str(position["token"]),
-                "logprobs": logprobs,
-            }
-        )
+        logprobs = {
+            str(lp["token"]): lp["logprob"]
+            for lp in position["top_logprobs"]
+        }
+        results.append({
+            "token": str(position["token"]),
+            "logprobs": logprobs,
+        })
     return results
 
 

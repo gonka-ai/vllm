@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Live integration tests: Inference Validation (enforced tokens).
 
 Requires a running vLLM server on port 18199.
@@ -16,18 +14,14 @@ Tests:
   9. Enforced replay text matches original
   10. Long sequence replay → distance stays small
 """
-
+import json
 import time
-
+import httpx
 import pytest
 
 from tests.gonka.live_conftest import (
-    build_enforced_tokens,
-    chat_request,
-    distance2,
-    extract_result,
-    require_server,
-    stop_poc,
+    BASE_URL, MODEL, require_server, stop_poc,
+    chat_request, build_enforced_tokens, extract_result, distance2,
 )
 
 
@@ -60,7 +54,8 @@ def _replay(prompt, enforced, max_tokens=30, extra=None):
     return r
 
 
-def _infer_and_replay(prompt, max_tokens=30, replay_extra=None, infer_extra=None):
+def _infer_and_replay(prompt, max_tokens=30, replay_extra=None,
+                       infer_extra=None):
     """Run inference then exact replay. Returns (dist, matches, inf_len, val_len)."""
     data1 = _infer(prompt, max_tokens=max_tokens, extra=infer_extra)
     inf = extract_result(data1)
@@ -75,6 +70,7 @@ def _infer_and_replay(prompt, max_tokens=30, replay_extra=None, infer_extra=None
 
 
 class TestValidation:
+
     def test_01_exact_replay_distance_zero(self):
         """Exact token replay → distance2 ~ 0."""
         dist, matches, n_inf, n_val = _infer_and_replay(
@@ -146,18 +142,15 @@ class TestValidation:
         prompts = [
             ("Hi", 10),
             ("Explain quantum computing in simple terms.", 30),
-            (
-                "Write a detailed paragraph about the solar system, covering "
-                "all eight planets and their key characteristics.",
-                60,
-            ),
+            ("Write a detailed paragraph about the solar system, covering "
+             "all eight planets and their key characteristics.", 60),
         ]
         for prompt, max_tok in prompts:
-            dist, matches, n_inf, n_val = _infer_and_replay(prompt, max_tokens=max_tok)
-            print(
-                f"\n  Prompt({len(prompt)} chars, {max_tok} max_tok): "
-                f"dist={dist:.6f}, tokens={n_inf}"
+            dist, matches, n_inf, n_val = _infer_and_replay(
+                prompt, max_tokens=max_tok
             )
+            print(f"\n  Prompt({len(prompt)} chars, {max_tok} max_tok): "
+                  f"dist={dist:.6f}, tokens={n_inf}")
             assert dist >= 0, f"Token mismatch for prompt: {prompt[:30]}..."
             assert dist < 0.05, f"Distance too large: {dist:.6f}"
 
@@ -228,9 +221,7 @@ class TestValidation:
             "Write a detailed explanation of how computers work.",
             max_tokens=100,
         )
-        print(
-            f"\n  Long sequence: distance2={dist:.6f}, matches={matches:.4f}, "
-            f"tokens={n_inf}"
-        )
+        print(f"\n  Long sequence: distance2={dist:.6f}, matches={matches:.4f}, "
+              f"tokens={n_inf}")
         assert dist >= 0, f"Token mismatch (inf={n_inf}, val={n_val})"
         assert dist < 0.05, f"Long sequence distance too large: {dist:.6f}"

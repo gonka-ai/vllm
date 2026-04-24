@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Live integration tests: Grammar Graceful Degradation (Inference Validation).
 
 Requires a running vLLM server on port 18199.
@@ -14,19 +12,13 @@ Tests:
 Uses the same EnforcedTokens format and distance2 metric as the production
 validation pipeline (see benchmarks/src/validation/utils.py).
 """
-
 import json
 import time
-
 import pytest
 
 from tests.gonka.live_conftest import (
-    build_enforced_tokens,
-    chat_request,
-    distance2,
-    extract_result,
-    require_server,
-    stop_poc,
+    BASE_URL, require_server, stop_poc, chat_request,
+    build_enforced_tokens, extract_result, distance2,
 )
 
 
@@ -48,13 +40,14 @@ def _inference_with_grammar(prompt, schema, schema_name="test_schema"):
             },
         },
     )
-    assert r.status_code == 200, f"Grammar inference failed ({r.status_code}): {r.text}"
+    assert r.status_code == 200, (
+        f"Grammar inference failed ({r.status_code}): {r.text}"
+    )
     return r.json()
 
 
-def _replay_with_enforced(
-    prompt, enforced_tokens, max_tokens=60, schema=None, schema_name="test_schema"
-):
+def _replay_with_enforced(prompt, enforced_tokens, max_tokens=60,
+                            schema=None, schema_name="test_schema"):
     extra = {"enforced_tokens": enforced_tokens}
     if schema:
         extra["response_format"] = {
@@ -70,6 +63,7 @@ def _replay_with_enforced(
 
 
 class TestGrammarGracefulDegradation:
+
     def test_01_structured_output_baseline(self):
         """Structured output inference produces valid JSON."""
         schema = {
@@ -80,7 +74,9 @@ class TestGrammarGracefulDegradation:
             },
             "required": ["name", "age"],
         }
-        data = _inference_with_grammar("Return JSON: name=Alice, age=30", schema)
+        data = _inference_with_grammar(
+            "Return JSON: name=Alice, age=30", schema
+        )
         content = data["choices"][0]["message"]["content"]
         assert content.strip().startswith("{"), (
             f"Expected JSON-like output, got: {content[:100]}"
@@ -90,10 +86,8 @@ class TestGrammarGracefulDegradation:
             assert "name" in parsed and "age" in parsed
             print(f"\n  Parsed JSON: {parsed}")
         except json.JSONDecodeError:
-            print(
-                f"\n  Grammar constrained output (not fully parseable with small model): "
-                f"{content[:120]}"
-            )
+            print(f"\n  Grammar constrained output (not fully parseable with small model): "
+                  f"{content[:120]}")
 
     def test_02_exact_replay_no_grammar_small_distance(self):
         """Exact token replay WITHOUT grammar: distance2 should be ~0."""
@@ -115,9 +109,7 @@ class TestGrammarGracefulDegradation:
         dist, matches = distance2(inf_results, val_results)
         print(f"\n  [No grammar] distance2={dist:.6f}, matches_ratio={matches:.4f}")
         print(f"  Tokens inf={len(inf_results)}, val={len(val_results)}")
-        assert dist >= 0, (
-            f"Token mismatch (dist={dist}), inf={len(inf_results)} val={len(val_results)}"
-        )
+        assert dist >= 0, f"Token mismatch (dist={dist}), inf={len(inf_results)} val={len(val_results)}"
         assert dist < 0.05, f"Distance too large without grammar: {dist:.6f}"
 
     def test_03_exact_replay_with_grammar_small_distance(self):
@@ -145,9 +137,7 @@ class TestGrammarGracefulDegradation:
         val_results = extract_result(r2.json())
 
         dist, matches = distance2(inf_results, val_results)
-        print(
-            f"\n  [With grammar, exact replay] distance2={dist:.6f}, matches={matches:.4f}"
-        )
+        print(f"\n  [With grammar, exact replay] distance2={dist:.6f}, matches={matches:.4f}")
         print(f"  Tokens: {len(inf_results)}")
         assert dist >= 0, f"Token mismatch (dist={dist})"
         assert dist < 0.05, f"Grammar replay distance too large: {dist:.6f}"
@@ -174,11 +164,15 @@ class TestGrammarGracefulDegradation:
         enforced["tokens"][corrupt_idx]["token"] = "99999"
 
         r2 = _replay_with_enforced(prompt, enforced, schema=schema)
-        assert r2.status_code in (200, 400, 422), f"Got {r2.status_code}: {r2.text}"
+        assert r2.status_code in (200, 400, 422), (
+            f"Got {r2.status_code}: {r2.text}"
+        )
         print(f"\n  Corrupted replay status: {r2.status_code}")
 
         time.sleep(0.5)
-        r3 = chat_request([{"role": "user", "content": "Still alive?"}], max_tokens=5)
+        r3 = chat_request(
+            [{"role": "user", "content": "Still alive?"}], max_tokens=5
+        )
         assert r3.status_code == 200, (
             f"Engine crashed after corrupted enforced+grammar: {r3.text}"
         )
@@ -217,15 +211,11 @@ class TestGrammarGracefulDegradation:
             dist, matches = distance2(inf_results, val_results)
             distances.append(dist)
             print(f"\n  Prompt: {prompt[:50]}")
-            print(
-                f"  distance2={dist:.6f}, matches={matches:.4f}, "
-                f"tokens={len(inf_results)}"
-            )
+            print(f"  distance2={dist:.6f}, matches={matches:.4f}, "
+                  f"tokens={len(inf_results)}")
 
         mean_dist = sum(distances) / len(distances)
-        print(
-            f"\n  === Mean distance2 across {len(prompts)} prompts: {mean_dist:.6f} ==="
-        )
+        print(f"\n  === Mean distance2 across {len(prompts)} prompts: {mean_dist:.6f} ===")
         assert all(d >= 0 for d in distances), "Some prompts had token mismatch"
         assert mean_dist < 0.05, (
             f"Mean distance2 too large: {mean_dist:.6f}. "

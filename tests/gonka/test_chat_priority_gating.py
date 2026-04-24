@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for Chat Priority Gating (PoC ↔ Chat coexistence).
 
 Tests cover:
@@ -7,16 +5,13 @@ Tests cover:
 2. api_router.py: chat and completion endpoints reject requests when PoC active
 3. routes.py: _poc_generation_active flag lifecycle (set/cleared correctly)
 """
-
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
-
 import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # 1. Engine patch: poc_request aborts in-flight inference then proceeds
 # ---------------------------------------------------------------------------
-
 
 class TestPocRequestChatGating:
     """Test that poc_request aborts in-flight inference requests and proceeds
@@ -33,32 +28,20 @@ class TestPocRequestChatGating:
         mock_output_processor = MagicMock()
         mock_output_processor.has_unfinished_requests.return_value = True
         mock_output_processor.request_states = {
-            "req-1": MagicMock(),
-            "req-2": MagicMock(),
-            "req-3": MagicMock(),
+            "req-1": MagicMock(), "req-2": MagicMock(), "req-3": MagicMock(),
         }
         mock_self.output_processor = mock_output_processor
         mock_self.abort = AsyncMock()
 
-        mock_self.collective_rpc = AsyncMock(
-            return_value=[
-                {
-                    "vectors": __import__("numpy").zeros((2, 12), dtype="float16"),
-                    "nonces": [0, 1],
-                }
-            ]
-        )
+        mock_self.collective_rpc = AsyncMock(return_value=[{
+            "vectors": __import__("numpy").zeros((2, 12), dtype="float16"),
+            "nonces": [0, 1],
+        }])
 
         result = await poc_request(
-            mock_self,
-            "generate_artifacts",
-            {
-                "nonces": [0, 1],
-                "block_hash": "abc",
-                "public_key": "pk",
-                "seq_len": 256,
-                "k_dim": 12,
-            },
+            mock_self, "generate_artifacts",
+            {"nonces": [0, 1], "block_hash": "abc", "public_key": "pk",
+             "seq_len": 256, "k_dim": 12},
         )
 
         mock_self.abort.assert_called_once()
@@ -83,25 +66,15 @@ class TestPocRequestChatGating:
         mock_self.output_processor = mock_output_processor
         mock_self.abort = AsyncMock()
 
-        mock_self.collective_rpc = AsyncMock(
-            return_value=[
-                {
-                    "vectors": __import__("numpy").zeros((1, 12), dtype="float16"),
-                    "nonces": [0],
-                }
-            ]
-        )
+        mock_self.collective_rpc = AsyncMock(return_value=[{
+            "vectors": __import__("numpy").zeros((1, 12), dtype="float16"),
+            "nonces": [0],
+        }])
 
         result = await poc_request(
-            mock_self,
-            "generate_artifacts",
-            {
-                "nonces": [0],
-                "block_hash": "abc",
-                "public_key": "pk",
-                "seq_len": 256,
-                "k_dim": 12,
-            },
+            mock_self, "generate_artifacts",
+            {"nonces": [0], "block_hash": "abc", "public_key": "pk",
+             "seq_len": 256, "k_dim": 12},
         )
 
         mock_self.abort.assert_not_called()
@@ -121,25 +94,15 @@ class TestPocRequestChatGating:
         mock_self.output_processor = mock_output_processor
         mock_self.abort = AsyncMock()
 
-        mock_self.collective_rpc = AsyncMock(
-            return_value=[
-                {
-                    "vectors": __import__("numpy").zeros((1, 12), dtype="float16"),
-                    "nonces": [0],
-                }
-            ]
-        )
+        mock_self.collective_rpc = AsyncMock(return_value=[{
+            "vectors": __import__("numpy").zeros((1, 12), dtype="float16"),
+            "nonces": [0],
+        }])
 
         result = await poc_request(
-            mock_self,
-            "generate_artifacts",
-            {
-                "nonces": [0],
-                "block_hash": "abc",
-                "public_key": "pk",
-                "seq_len": 256,
-                "k_dim": 12,
-            },
+            mock_self, "generate_artifacts",
+            {"nonces": [0], "block_hash": "abc", "public_key": "pk",
+             "seq_len": 256, "k_dim": 12},
         )
 
         mock_self.abort.assert_not_called()
@@ -162,15 +125,9 @@ class TestPocRequestChatGating:
 
         with pytest.raises(RuntimeError, match="engine dead"):
             await poc_request(
-                mock_self,
-                "generate_artifacts",
-                {
-                    "nonces": [0],
-                    "block_hash": "abc",
-                    "public_key": "pk",
-                    "seq_len": 256,
-                    "k_dim": 12,
-                },
+                mock_self, "generate_artifacts",
+                {"nonces": [0], "block_hash": "abc", "public_key": "pk",
+                 "seq_len": 256, "k_dim": 12},
             )
 
         mock_self.collective_rpc.assert_not_called()
@@ -184,25 +141,15 @@ class TestPocRequestChatGating:
         mock_self.vllm_config.model_config.get_hidden_size.return_value = 4096
         mock_self.output_processor = None
 
-        mock_self.collective_rpc = AsyncMock(
-            return_value=[
-                {
-                    "vectors": __import__("numpy").zeros((1, 12), dtype="float16"),
-                    "nonces": [0],
-                }
-            ]
-        )
+        mock_self.collective_rpc = AsyncMock(return_value=[{
+            "vectors": __import__("numpy").zeros((1, 12), dtype="float16"),
+            "nonces": [0],
+        }])
 
         result = await poc_request(
-            mock_self,
-            "generate_artifacts",
-            {
-                "nonces": [0],
-                "block_hash": "abc",
-                "public_key": "pk",
-                "seq_len": 256,
-                "k_dim": 12,
-            },
+            mock_self, "generate_artifacts",
+            {"nonces": [0], "block_hash": "abc", "public_key": "pk",
+             "seq_len": 256, "k_dim": 12},
         )
 
         assert len(result["artifacts"]) == 1
@@ -213,8 +160,7 @@ class TestPocRequestChatGating:
 
         mock_self = AsyncMock()
         result = await poc_request(
-            mock_self,
-            "generate_artifacts",
+            mock_self, "generate_artifacts",
             {"nonces": [], "block_hash": "abc", "public_key": "pk"},
         )
         assert result == {"artifacts": []}
@@ -230,15 +176,9 @@ class TestPocRequestChatGating:
 
         with pytest.raises(TimeoutError, match="timed out"):
             await poc_request(
-                mock_self,
-                "generate_artifacts",
-                {
-                    "nonces": [0],
-                    "block_hash": "abc",
-                    "public_key": "pk",
-                    "seq_len": 256,
-                    "k_dim": 12,
-                },
+                mock_self, "generate_artifacts",
+                {"nonces": [0], "block_hash": "abc", "public_key": "pk",
+                 "seq_len": 256, "k_dim": 12},
                 timeout_ms=100,
             )
 
@@ -257,18 +197,13 @@ class TestPocRequestChatGating:
         mock_self = AsyncMock()
         mock_self.vllm_config.model_config.get_hidden_size.return_value = 4096
         mock_self.output_processor = None
-        mock_self.collective_rpc = AsyncMock(side_effect=RuntimeError("GPU error"))
+        mock_self.collective_rpc = AsyncMock(
+            side_effect=RuntimeError("GPU error"))
 
         result = await poc_request(
-            mock_self,
-            "generate_artifacts",
-            {
-                "nonces": [0],
-                "block_hash": "abc",
-                "public_key": "pk",
-                "seq_len": 256,
-                "k_dim": 12,
-            },
+            mock_self, "generate_artifacts",
+            {"nonces": [0], "block_hash": "abc", "public_key": "pk",
+             "seq_len": 256, "k_dim": 12},
         )
         assert result["skipped"] is True
 
@@ -277,14 +212,13 @@ class TestPocRequestChatGating:
 # 2. Chat and completion endpoints reject requests when PoC is active
 # ---------------------------------------------------------------------------
 
-
 class TestEndpointPocRejection:
     """Test that /v1/chat/completions and /v1/completions return 503 when
     PoC generation is active."""
 
     @pytest.mark.asyncio
     async def test_chat_rejected_when_poc_active(self):
-        from fastapi import FastAPI
+        from fastapi import FastAPI, Request
         from fastapi.testclient import TestClient
 
         from vllm.entrypoints.openai.chat_completion.api_router import (
@@ -296,15 +230,16 @@ class TestEndpointPocRejection:
 
         app.state.openai_serving_chat = None
         app.state.openai_serving_tokenization = MagicMock()
-        app.state.openai_serving_tokenization.create_error_response = lambda message: (
-            MagicMock()
+        app.state.openai_serving_tokenization.create_error_response = (
+            lambda message: MagicMock()
         )
 
         with patch("vllm.poc.routes._poc_generation_active", True):
             client = TestClient(app)
             resp = client.post(
                 "/v1/chat/completions",
-                json={"model": "test", "messages": [{"role": "user", "content": "hi"}]},
+                json={"model": "test", "messages": [{"role": "user",
+                                                      "content": "hi"}]},
             )
             assert resp.status_code == 503
             body = resp.json()
@@ -322,8 +257,8 @@ class TestEndpointPocRejection:
 
         app.state.openai_serving_completion = None
         app.state.openai_serving_tokenization = MagicMock()
-        app.state.openai_serving_tokenization.create_error_response = lambda message: (
-            MagicMock()
+        app.state.openai_serving_tokenization.create_error_response = (
+            lambda message: MagicMock()
         )
 
         with patch("vllm.poc.routes._poc_generation_active", True):
@@ -340,7 +275,6 @@ class TestEndpointPocRejection:
     async def test_chat_allowed_when_poc_not_active(self):
         """Chat should proceed normally when PoC is not generating."""
         from vllm.poc.routes import _poc_generation_active
-
         assert not _poc_generation_active  # default is False
 
 
@@ -348,13 +282,11 @@ class TestEndpointPocRejection:
 # 3. _poc_generation_active flag lifecycle
 # ---------------------------------------------------------------------------
 
-
 class TestPocGenerationActiveFlag:
     """Test the _poc_generation_active flag is set/cleared correctly."""
 
     def test_flag_starts_false(self):
         import vllm.poc.routes as routes
-
         assert routes._poc_generation_active is False
 
     @pytest.mark.asyncio
@@ -430,12 +362,10 @@ class TestPocGenerationActiveFlag:
     async def test_stop_endpoint_clears_flag(self):
         """POST /stop should clear the flag."""
         import vllm.poc.routes as routes
-
         routes._poc_generation_active = True
 
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
-
         from vllm.poc.routes import router
 
         app = FastAPI()
@@ -453,7 +383,6 @@ class TestPocGenerationActiveFlag:
 # 4. Generation loop handles skipped responses
 # ---------------------------------------------------------------------------
 
-
 class TestGenerationLoopSkipHandling:
     """Test _generation_loop handles skipped and timeout responses."""
 
@@ -465,16 +394,9 @@ class TestGenerationLoopSkipHandling:
         stop = asyncio.Event()
         stats = {"start_time": 0, "total_processed": 0}
         config = {
-            "node_id": 0,
-            "node_count": 1,
-            "group_id": 0,
-            "n_groups": 1,
-            "batch_size": 4,
-            "block_hash": "h",
-            "block_height": 1,
-            "public_key": "pk",
-            "seq_len": 256,
-            "k_dim": 12,
+            "node_id": 0, "node_count": 1, "group_id": 0, "n_groups": 1,
+            "batch_size": 4, "block_hash": "h", "block_height": 1,
+            "public_key": "pk", "seq_len": 256, "k_dim": 12,
         }
 
         call_count = 0
@@ -502,16 +424,9 @@ class TestGenerationLoopSkipHandling:
         stop = asyncio.Event()
         stats = {"start_time": 0, "total_processed": 0}
         config = {
-            "node_id": 0,
-            "node_count": 1,
-            "group_id": 0,
-            "n_groups": 1,
-            "batch_size": 4,
-            "block_hash": "h",
-            "block_height": 1,
-            "public_key": "pk",
-            "seq_len": 256,
-            "k_dim": 12,
+            "node_id": 0, "node_count": 1, "group_id": 0, "n_groups": 1,
+            "batch_size": 4, "block_hash": "h", "block_height": 1,
+            "public_key": "pk", "seq_len": 256, "k_dim": 12,
         }
 
         call_count = 0
