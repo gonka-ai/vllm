@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Live integration tests: logprobs_mode behavior.
 
 Requires a running vLLM server on port 18199.
@@ -11,12 +13,18 @@ Tests that logprobs_mode actually changes what's returned:
   6. Validation replay with matching logprobs_mode → distance ~ 0
   7. Validation replay with mismatched logprobs_mode → distance > 0
 """
+
 import httpx
 import pytest
 
 from tests.gonka.live_conftest import (
-    BASE_URL, MODEL, require_server, stop_poc,
-    chat_request, build_enforced_tokens, extract_result, distance2,
+    BASE_URL,
+    MODEL,
+    build_enforced_tokens,
+    distance2,
+    extract_result,
+    require_server,
+    stop_poc,
 )
 
 
@@ -44,14 +52,11 @@ def _chat(prompt, max_tokens=15, logprobs_mode=None, extra=None):
         body["logprobs_mode"] = logprobs_mode
     if extra:
         body.update(extra)
-    r = httpx.post(
-        f"{BASE_URL}/v1/chat/completions", json=body, timeout=30
-    )
+    r = httpx.post(f"{BASE_URL}/v1/chat/completions", json=body, timeout=30)
     return r
 
 
 class TestLogprobsMode:
-
     def test_01_default_mode_returns_token_ids_as_strings(self):
         """Default (processed_logprobs) returns token IDs as strings."""
         r = _chat("Say hello.")
@@ -88,8 +93,7 @@ class TestLogprobsMode:
             raw_values.append(rp["logprob"])
 
         n_different = sum(
-            1 for p, r in zip(proc_values, raw_values)
-            if abs(p - r) > 1e-3
+            1 for p, r in zip(proc_values, raw_values) if abs(p - r) > 1e-3
         )
         print(f"\n  Processed logprobs: {proc_values[:5]}")
         print(f"  Raw logprobs:       {raw_values[:5]}")
@@ -102,13 +106,17 @@ class TestLogprobsMode:
             "properties": {"x": {"type": "integer"}},
             "required": ["x"],
         }
-        r = _chat("Return JSON: x=5", logprobs_mode="processed_logprobs", extra={
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": "s", "schema": schema},
+        r = _chat(
+            "Return JSON: x=5",
+            logprobs_mode="processed_logprobs",
+            extra={
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "s", "schema": schema},
+                },
+                "max_tokens": 30,
             },
-            "max_tokens": 30,
-        })
+        )
         assert r.status_code == 200
         content = r.json()["choices"][0]["logprobs"]["content"]
 
@@ -127,9 +135,13 @@ class TestLogprobsMode:
 
     def test_04_raw_logprobs_not_clamped(self):
         """raw_logprobs should NOT be clamped to -9999 (true model distribution)."""
-        r = _chat("Hello world", logprobs_mode="raw_logprobs", extra={
-            "max_tokens": 10,
-        })
+        r = _chat(
+            "Hello world",
+            logprobs_mode="raw_logprobs",
+            extra={
+                "max_tokens": 10,
+            },
+        )
         if r.status_code != 200:
             pytest.skip(f"raw_logprobs not supported: {r.status_code}")
 
@@ -171,9 +183,13 @@ class TestLogprobsMode:
         inf = extract_result(d1)
         enforced = build_enforced_tokens(d1["choices"][0]["logprobs"]["content"])
 
-        r2 = _chat(prompt, logprobs_mode="processed_logprobs", extra={
-            "enforced_tokens": enforced,
-        })
+        r2 = _chat(
+            prompt,
+            logprobs_mode="processed_logprobs",
+            extra={
+                "enforced_tokens": enforced,
+            },
+        )
         assert r2.status_code == 200
         val = extract_result(r2.json())
 
@@ -191,9 +207,13 @@ class TestLogprobsMode:
         inf = extract_result(d1)
         enforced = build_enforced_tokens(d1["choices"][0]["logprobs"]["content"])
 
-        r2 = _chat(prompt, logprobs_mode="raw_logprobs", extra={
-            "enforced_tokens": enforced,
-        })
+        r2 = _chat(
+            prompt,
+            logprobs_mode="raw_logprobs",
+            extra={
+                "enforced_tokens": enforced,
+            },
+        )
         if r2.status_code != 200:
             pytest.skip(f"raw_logprobs replay not supported: {r2.status_code}")
 
@@ -202,9 +222,13 @@ class TestLogprobsMode:
         print(f"\n  Mismatched mode: distance2={dist:.6f}, matches={matches:.4f}")
 
         # Compare with same-mode distance
-        r3 = _chat(prompt, logprobs_mode="processed_logprobs", extra={
-            "enforced_tokens": enforced,
-        })
+        r3 = _chat(
+            prompt,
+            logprobs_mode="processed_logprobs",
+            extra={
+                "enforced_tokens": enforced,
+            },
+        )
         assert r3.status_code == 200
         val_same = extract_result(r3.json())
         dist_same, _ = distance2(inf, val_same)

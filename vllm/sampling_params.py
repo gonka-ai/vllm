@@ -257,6 +257,7 @@ class SamplingParams(
 
     # Enforced token IDs for gonka-style validation
     enforced_token_ids: list[int] | None = None
+    enforced_tokens: dict[int, list[int]] | None = None
 
     skip_reading_prefix_cache: bool | None = None
 
@@ -291,7 +292,7 @@ class SamplingParams(
         structured_outputs: StructuredOutputsParams | None = None,
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
-        enforced_tokens: list[dict[int, list[int]]] | None = None,
+        enforced_tokens: dict[int, list[int]] | None = None,
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
     ) -> "SamplingParams":
@@ -335,6 +336,7 @@ class SamplingParams(
             structured_outputs=structured_outputs,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
+            enforced_tokens=enforced_tokens,
             extra_args=extra_args,
             skip_clone=skip_clone,
         )
@@ -638,7 +640,8 @@ class SamplingParams(
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"structured_outputs={self.structured_outputs}, "
             f"extra_args={self.extra_args}, "
-            f"enforced_token_ids={self.enforced_token_ids})"
+            f"enforced_token_ids={self.enforced_token_ids}, "
+            f"enforced_tokens={self.enforced_tokens})"
         )
 
 

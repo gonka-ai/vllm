@@ -173,7 +173,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
 
         Returns True if the FSM was advanced successfully.
         Returns False if the FSM failed to advance.
-        
+
         Grammar graceful degradation: when a token is rejected (e.g.
         enforced tokens from validation replay that conflict with the
         grammar FSM), grammar enforcement is disabled for the rest of
