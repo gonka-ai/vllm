@@ -105,17 +105,11 @@ class TopKTopPSampler(nn.Module):
         """
         if need_processed_logprobs and self.forward is not self.forward_native:
             return self.forward_native(
-                logits,
-                generators,
-                k,
-                p,
+                logits, generators, k, p,
                 need_processed_logprobs=True,
             )
         return self.forward(
-            logits,
-            generators,
-            k,
-            p,
+            logits, generators, k, p,
             need_processed_logprobs=need_processed_logprobs,
         )
 
@@ -161,10 +155,7 @@ class TopKTopPSampler(nn.Module):
                     "PyTorch-native implementation."
                 )
             return self.forward_native(
-                logits,
-                generators,
-                k,
-                p,
+                logits, generators, k, p,
                 need_processed_logprobs=need_processed_logprobs,
             )
         assert self.logprobs_mode not in ("processed_logits", "processed_logprobs"), (
@@ -224,10 +215,7 @@ class TopKTopPSampler(nn.Module):
                     "falling back to PyTorch-native."
                 )
             return self.forward_native(
-                logits,
-                generators,
-                k,
-                p,
+                logits, generators, k, p,
                 need_processed_logprobs=need_processed_logprobs,
             )
         assert self.logprobs_mode not in (
@@ -236,10 +224,7 @@ class TopKTopPSampler(nn.Module):
         ), "aiter sampler does not support returning logits/logprobs."
         if DISABLE_AITER_SAMPLER:
             return self.forward_native(
-                logits,
-                generators,
-                k,
-                p,
+                logits, generators, k, p,
                 need_processed_logprobs=need_processed_logprobs,
             )
         return self.aiter_sample(logits, k, p, generators), None

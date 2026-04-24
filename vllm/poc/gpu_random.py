@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Deterministic GPU-based random generation for PoC.
 
 Core primitives for generating reproducible random tensors seeded by
@@ -7,9 +5,9 @@ Core primitives for generating reproducible random tensors seeded by
 
 OPTIMIZED: Serial Python loops replaced with batched GPU operations.
 """
-
 import hashlib
 import math
+from typing import List
 
 import torch
 
@@ -87,11 +85,7 @@ def _batched_normal(seeds: list, n: int, device: torch.device) -> torch.Tensor:
     n_pairs = (n + 1) // 2
     total = n_pairs * 2
 
-    indices = (
-        torch.arange(total, device=device, dtype=torch.int32)
-        .unsqueeze(0)
-        .expand(batch_size, -1)
-    )
+    indices = torch.arange(total, device=device, dtype=torch.int32).unsqueeze(0).expand(batch_size, -1)
     seed_tensor = torch.tensor(seeds, dtype=torch.int64, device=device).unsqueeze(1)
 
     h = _batched_murmur3_32(indices, seed_tensor)
@@ -125,7 +119,7 @@ def _normal(seed: int, n: int, device: torch.device) -> torch.Tensor:
 def generate_inputs(
     block_hash: str,
     public_key: str,
-    nonces: list[int],
+    nonces: List[int],
     dim: int,
     seq_len: int,
     device: torch.device,
@@ -145,7 +139,7 @@ def generate_inputs(
 def generate_inputs_concat_murmur(
     block_hash: str,
     public_key: str,
-    nonces: list[int],
+    nonces: List[int],
     dim: int,
     seq_len: int,
     device: torch.device,
@@ -163,8 +157,10 @@ def generate_inputs_concat_murmur(
     seg_len = (n + 7) // 8  # ceil(n/8); last segment may be shorter
 
     for i, nonce in enumerate(nonces):
-        h = hashlib.sha256(f"{block_hash}_{public_key}_nonce{nonce}".encode()).digest()
-        sub_seeds = [int.from_bytes(h[j : j + 4], "big") for j in range(0, 32, 4)]
+        h = hashlib.sha256(
+            f"{block_hash}_{public_key}_nonce{nonce}".encode()
+        ).digest()
+        sub_seeds = [int.from_bytes(h[j:j + 4], 'big') for j in range(0, 32, 4)]
 
         segments = [
             _normal(s, min(seg_len, n - k * seg_len), device)
@@ -216,7 +212,7 @@ def apply_householder(
 def random_pick_indices(
     block_hash: str,
     public_key: str,
-    nonces: list[int],
+    nonces: List[int],
     dim: int,
     k: int,
     device: torch.device,
@@ -229,15 +225,11 @@ def random_pick_indices(
 
     seeds = []
     for nonce in nonces:
-        seeds.append(
-            _seed_from_string(f"{block_hash}_{public_key}_nonce_{nonce}_pick_{k}")
-        )
+        seeds.append(_seed_from_string(
+            f"{block_hash}_{public_key}_nonce_{nonce}_pick_{k}"
+        ))
 
-    all_idx = (
-        torch.arange(dim, device=device, dtype=torch.int32)
-        .unsqueeze(0)
-        .expand(batch_size, -1)
-    )
+    all_idx = torch.arange(dim, device=device, dtype=torch.int32).unsqueeze(0).expand(batch_size, -1)
     seed_tensor = torch.tensor(seeds, dtype=torch.int64, device=device).unsqueeze(1)
     scores = _batched_murmur3_32(all_idx, seed_tensor)
 
@@ -248,7 +240,7 @@ def random_pick_indices(
 def apply_haar_rotation(
     block_hash: str,
     public_key: str,
-    nonces: list[int],
+    nonces: List[int],
     x: torch.Tensor,
     device: torch.device,
 ) -> torch.Tensor:
@@ -263,11 +255,9 @@ def apply_haar_rotation(
     for j in range(k - 1):
         step_seeds = []
         for nonce in nonces:
-            step_seeds.append(
-                _seed_from_string(
-                    f"{block_hash}_{public_key}_nonce_{nonce}_haar_hh_{k}_{j}"
-                )
-            )
+            step_seeds.append(_seed_from_string(
+                f"{block_hash}_{public_key}_nonce_{nonce}_haar_hh_{k}_{j}"
+            ))
         all_seeds_by_step.append(step_seeds)
 
     for j in range(k - 1):
