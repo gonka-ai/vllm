@@ -200,6 +200,7 @@ def generate_householder_vector(
     return v / v.norm()
 
 
+@torch.compile(dynamic=False, fullgraph=True)
 def apply_householder(
     x: torch.Tensor,
     v: torch.Tensor,
