@@ -582,6 +582,26 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
             cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
 
 
+class Qwen3MoeForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        compilation_config = vllm_config.compilation_config
+        if not compilation_config.custom_ops:
+            compilation_config.custom_ops = [
+                "+quant_fp8",
+                "+rms_norm",
+                "+silu_and_mul",
+                "+fused_moe",
+                "+rotary_embedding",
+                "+apply_rotary_emb",
+                "none",
+            ]
+            logger.info(
+                "Setting default custom_ops for Qwen3 MoE: %s",
+                compilation_config.custom_ops,
+            )
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
@@ -603,4 +623,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "FalconMambaForCausalLM": MambaModelConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
+    "Qwen3MoeForCausalLM": Qwen3MoeForCausalLMConfig,
 }

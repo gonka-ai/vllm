@@ -1,0 +1,17 @@
+ARG BASE_IMAGE=vllm/vllm-openai:v0.15.1
+FROM ${BASE_IMAGE}
+
+ENV VLLM_ALLOW_INSECURE_SERIALIZATION=1
+
+RUN pip install --no-cache-dir scipy
+
+# Copy local code to temp location.
+COPY ./vllm /tmp/vllm-src
+
+# Note: We use PyTorch MoE fallback instead of upgrading Triton
+# (which breaks inductor in our setup).
+
+# Merge only .py files into existing vllm package (preserves .so files).
+RUN cd /tmp/vllm-src \
+    && find . -name "*.py" | tar -cf - -T - | tar -xf - -C /usr/local/lib/python3.12/dist-packages/vllm/ \
+    && rm -rf /tmp/vllm-src

@@ -71,6 +71,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.validation import EnforcedToken, EnforcedTokens
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import (
     MistralTokenizer,
@@ -400,6 +401,30 @@ class OpenAIServingChat(OpenAIServing):
                         self.logits_processors,
                         sampling_params,
                     )
+
+                    # Enforced tokens support (gonka validation)
+                    enforced_ids = None
+                    if request.enforced_str:
+                        tokenizer = self.engine_client.renderer.tokenizer
+                        enforced_ids = tokenizer.encode(
+                            request.enforced_str, add_special_tokens=False
+                        )
+                    elif request.enforced_tokens:
+                        tokenizer = self.engine_client.renderer.tokenizer
+                        request.enforced_tokens.encode(tokenizer)
+                        enforced_ids = (
+                            request.enforced_tokens.get_enforced_token_ids()
+                        )
+                    if enforced_ids:
+                        if enforced_ids[-1] != tokenizer.eos_token_id:
+                            enforced_ids.append(tokenizer.eos_token_id)
+                        sampling_params.enforced_token_ids = enforced_ids
+                        if (not sampling_params.logprobs_mode
+                                and request.enforced_tokens):
+                            detected = (request.enforced_tokens
+                                        .detect_logprobs_mode())
+                            if detected:
+                                sampling_params.logprobs_mode = detected
 
                 self._log_inputs(
                     sub_request_id,

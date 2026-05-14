@@ -89,12 +89,37 @@ class TopKTopPSampler(nn.Module):
 
         self.apply_top_k_top_p = apply_top_k_top_p
 
+    def sample(
+        self,
+        logits: torch.Tensor,
+        generators: dict[int, torch.Generator],
+        k: torch.Tensor | None,
+        p: torch.Tensor | None,
+        need_processed_logprobs: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Sample with optional processed logprobs.
+
+        When need_processed_logprobs is True and the active forward
+        implementation cannot produce them (FlashInfer / aiter fast
+        paths), this falls back to forward_native transparently.
+        """
+        if need_processed_logprobs and self.forward is not self.forward_native:
+            return self.forward_native(
+                logits, generators, k, p,
+                need_processed_logprobs=True,
+            )
+        return self.forward(
+            logits, generators, k, p,
+            need_processed_logprobs=need_processed_logprobs,
+        )
+
     def forward_native(
         self,
         logits: torch.Tensor,
         generators: dict[int, torch.Generator],
         k: torch.Tensor | None,
         p: torch.Tensor | None,
+        need_processed_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         PyTorch-native implementation of top-k and top-p sampling.
@@ -105,7 +130,7 @@ class TopKTopPSampler(nn.Module):
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
-        elif self.logprobs_mode == "processed_logprobs":
+        elif self.logprobs_mode == "processed_logprobs" or need_processed_logprobs:
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         return random_sample(probs, generators), logits_to_return
@@ -116,6 +141,7 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: torch.Tensor | None,
         p: torch.Tensor | None,
+        need_processed_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """More optimized implementation for top-k and top-p sampling."""
         # We prefer `random_sample` over `flashinfer_sample` when sorting is
@@ -128,7 +154,10 @@ class TopKTopPSampler(nn.Module):
                     "per-request generators. Falling back to "
                     "PyTorch-native implementation."
                 )
-            return self.forward_native(logits, generators, k, p)
+            return self.forward_native(
+                logits, generators, k, p,
+                need_processed_logprobs=need_processed_logprobs,
+            )
         assert self.logprobs_mode not in ("processed_logits", "processed_logprobs"), (
             "FlashInfer does not support returning logits/logprobs"
         )
@@ -143,6 +172,7 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: torch.Tensor | None,
         p: torch.Tensor | None,
+        need_processed_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         PyTorch-native implementation of top-k and top-p sampling for CPU.
@@ -153,7 +183,7 @@ class TopKTopPSampler(nn.Module):
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
-        elif self.logprobs_mode == "processed_logprobs":
+        elif self.logprobs_mode == "processed_logprobs" or need_processed_logprobs:
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
         if len(generators) != logits.shape[0]:
@@ -173,6 +203,7 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: torch.Tensor | None,
         p: torch.Tensor | None,
+        need_processed_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # FIXME: Fix aiter_sampler's accuracy issue and remove this flag
         DISABLE_AITER_SAMPLER = True
@@ -183,13 +214,19 @@ class TopKTopPSampler(nn.Module):
                     "aiter sampler does not support per-request generators; "
                     "falling back to PyTorch-native."
                 )
-            return self.forward_native(logits, generators, k, p)
+            return self.forward_native(
+                logits, generators, k, p,
+                need_processed_logprobs=need_processed_logprobs,
+            )
         assert self.logprobs_mode not in (
             "processed_logits",
             "processed_logprobs",
         ), "aiter sampler does not support returning logits/logprobs."
         if DISABLE_AITER_SAMPLER:
-            return self.forward_native(logits, generators, k, p)
+            return self.forward_native(
+                logits, generators, k, p,
+                need_processed_logprobs=need_processed_logprobs,
+            )
         return self.aiter_sample(logits, k, p, generators), None
 
     def aiter_sample(

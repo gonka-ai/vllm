@@ -205,7 +205,7 @@ class ModelConfig:
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
     vocab_size) logprobs are allowed to be returned and it may cause OOM."""
-    logprobs_mode: LogprobsMode = "raw_logprobs"
+    logprobs_mode: LogprobsMode = "processed_logprobs"
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
     1) raw_logprobs, 2) processed_logprobs, 3) raw_logits, 4) processed_logits.
@@ -1852,6 +1852,9 @@ def _get_and_verify_dtype(
         config, model_id, revision=revision
     )
     model_type = config.model_type
+
+    # Force branch-wide dtype auto resolution regardless of caller input.
+    dtype = "auto"
 
     if isinstance(dtype, str):
         dtype = dtype.lower()
