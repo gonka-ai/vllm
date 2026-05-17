@@ -70,6 +70,18 @@ Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
 - [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
 - [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
 
+For inference-validation workflows, you can run the OpenAI API server with
+explicit validation parameters:
+
+```bash
+python -m vllm.entrypoints.openai.api_server \
+  --model <model> \
+  --validation-similarity-threshold 0.985 \
+  --toploc-validation-usage
+```
+
+If `--toploc-validation-usage` is omitted, it defaults to `False`.
+
 ## Contributing
 
 We welcome and value any contributions and collaborations.

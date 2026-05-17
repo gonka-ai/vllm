@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
 from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.validation import EnforcedTokens
 
 
 @dataclass
@@ -13,6 +14,8 @@ class SamplingMetadata:
     temperature: torch.Tensor | None
     all_greedy: bool
     all_random: bool
+    all_enforced: bool
+    mixed_enforced: bool
 
     top_p: torch.Tensor | None
     top_k: torch.Tensor | None
@@ -54,3 +57,7 @@ class SamplingMetadata:
     # Enforced next token ids for validation replay (gonka PoC).
     # Shape [num_reqs], -1 means no enforcement for that request.
     enforced_next_token_ids: torch.Tensor | None = None
+
+    enforced_token_ids: dict[int, list[int]] = field(default_factory=dict)
+    enforced_tokens: dict[int, EnforcedTokens] = field(default_factory=dict)
+    enforced_req_ids: list[int] = field(default_factory=list)

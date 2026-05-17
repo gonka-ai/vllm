@@ -143,10 +143,10 @@ class FrontendArgs:
     is provided, vLLM will add it to the server using
     `@app.middleware('http')`. If a class is provided, vLLM will
     add it to the server using `app.add_middleware()`."""
-    return_tokens_as_token_ids: bool = False
+    return_tokens_as_token_ids: bool = True
     """When `--max-logprobs` is specified, represents single tokens as
-    strings of the form 'token_id:{token_id}' so that tokens that are not
-    JSON-encodable can be identified."""
+    plain token-id strings (e.g. '641') for compatibility with enforced-token
+    validation utilities and older vLLM variants."""
     disable_frontend_multiprocessing: bool = False
     """If specified, will run the OpenAI frontend server in the same process as
     the model serving engine."""
@@ -296,6 +296,18 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "Must be a YAML with the following options: "
         "https://docs.vllm.ai/en/latest/configuration/serve_args.html",
     )
+    parser.add_argument(
+        "--validation-similarity-threshold",
+        type=float,
+        default=0.99,
+        help="Similarity threshold for /v1/validate logprobs comparison.",
+    )
+    parser.add_argument(
+        "--toploc-validation-usage",
+        action="store_true",
+        default=False,
+        help="Enable toploc validation usage runtime flag.",
+    )
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
 
@@ -315,6 +327,10 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+    if not 0.0 <= args.validation_similarity_threshold <= 1.0:
+        raise TypeError(
+            "Error: --validation-similarity-threshold must be in [0.0, 1.0]"
+        )
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

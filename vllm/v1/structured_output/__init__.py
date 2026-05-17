@@ -273,7 +273,9 @@ class StructuredOutputManager:
                                 "Grammar rejected token %d for request %s "
                                 "during speculative decode bitmask fill. "
                                 "Disabling bitmask for this request.",
-                                token, req_id)
+                                token,
+                                req_id,
+                            )
                             apply_bitmask = False
                             continue
                         state_advancements += 1

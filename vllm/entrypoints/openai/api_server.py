@@ -22,7 +22,7 @@ from typing import Any
 import model_hosting_container_standards.sagemaker as sagemaker_standards
 import pydantic
 import uvloop
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -50,11 +50,20 @@ from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
+from vllm.entrypoints.openai.protocol import (
+    ValidateRequest,
+)
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+from vllm.entrypoints.openai.serving_validate import OpenAIServingValidate
 from vllm.entrypoints.openai.translations.serving import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
 )
+from vllm.entrypoints.openai.utils import validate_json_request
+from vllm.entrypoints.pooling.classify.serving import ServingClassification
+from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
+from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
+from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.entrypoints.serve.disagg.serving import ServingTokens
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     ScalingMiddleware,
@@ -69,6 +78,7 @@ from vllm.entrypoints.utils import (
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.logprobs_validation import set_validation_runtime_config
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
@@ -76,6 +86,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs, set_ulimit
+from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.version import __version__ as VLLM_VERSION
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
@@ -114,9 +125,10 @@ async def lifespan(app: FastAPI):
                 task.cancel()
             try:
                 from vllm.poc.generate_queue import clear_queue as clear_poc_queue
+
                 await clear_poc_queue()
             except Exception as e:
-                logger.debug(f"Error clearing PoC queue: {e}")
+                logger.debug("Error clearing PoC queue: %s", e)
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state
@@ -219,12 +231,107 @@ def base(request: Request) -> OpenAIServing:
     return tokenization(request)
 
 
+def models(request: Request) -> OpenAIServingModels:
+    return request.app.state.openai_serving_models
+
+
+def responses(request: Request) -> OpenAIServingResponses | None:
+    return request.app.state.openai_serving_responses
+
+
+def messages(request: Request) -> AnthropicServingMessages:
+    return request.app.state.anthropic_serving_messages
+
+
+def chat(request: Request) -> OpenAIServingChat | None:
+    return request.app.state.openai_serving_chat
+
+
+def completion(request: Request) -> OpenAIServingCompletion | None:
+    return request.app.state.openai_serving_completion
+
+
+def pooling(request: Request) -> OpenAIServingPooling | None:
+    return request.app.state.openai_serving_pooling
+
+
+def embedding(request: Request) -> OpenAIServingEmbedding | None:
+    return request.app.state.openai_serving_embedding
+
+
+def score(request: Request) -> ServingScores | None:
+    return request.app.state.openai_serving_scores
+
+
+def classify(request: Request) -> ServingClassification | None:
+    return request.app.state.openai_serving_classification
+
+
+def rerank(request: Request) -> ServingScores | None:
+    return request.app.state.openai_serving_scores
+
+
 def tokenization(request: Request) -> OpenAIServingTokenization:
     return request.app.state.openai_serving_tokenization
 
 
+def transcription(request: Request) -> OpenAIServingTranscription:
+    return request.app.state.openai_serving_transcription
+
+
+def translation(request: Request) -> OpenAIServingTranslation:
+    return request.app.state.openai_serving_translation
+
+
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
+
+
+def validate_client(request: Request) -> OpenAIServingValidate:
+    return request.app.state.openai_serving_validate
+
+
+@router.post(
+    "/v1/validate",
+    dependencies=[Depends(validate_json_request)],
+)
+async def validate(request: ValidateRequest, raw_request: Request):
+    handler = validate_client(raw_request)
+
+    if handler is None:
+        return JSONResponse(
+            content={"error": "Validation client not found"}, status_code=404
+        )
+
+    result = await handler.validate(
+        request.original_logprobs,
+        request.validation_logprobs,
+        original_artifacts=request.original_artifacts,
+        validation_artifacts=request.validation_artifacts,
+    )
+
+    if isinstance(result, ErrorResponse):
+        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+
+    return JSONResponse(
+        content={
+            "valid": result.is_successful,
+            "reason": result.reason,
+            "similarity": result.similarity,
+            "threshold": result.threshold,
+            "artifacts_match": result.artifacts_match,
+        }
+    )
+
+
+@router.get("/health", response_class=Response)
+async def health(raw_request: Request) -> Response:
+    """Health check."""
+    try:
+        await engine_client(raw_request).check_health()
+        return Response(status_code=200)
+    except EngineDeadError:
+        return Response(status_code=503)
 
 
 @router.get("/load")
@@ -536,6 +643,7 @@ def build_app(args: Namespace) -> FastAPI:
     app.include_router(router)
 
     from vllm.poc.routes import router as poc_router
+
     app.include_router(poc_router)
 
     app.root_path = args.root_path
@@ -649,6 +757,11 @@ async def init_app_state(
     state: State,
     args: Namespace,
 ) -> None:
+    set_validation_runtime_config(
+        similarity_threshold=args.validation_similarity_threshold,
+        toploc_validation_usage=args.toploc_validation_usage,
+    )
+
     vllm_config = engine_client.vllm_config
 
     if args.served_model_name is not None:
@@ -794,6 +907,11 @@ async def init_app_state(
         )
         if "transcription" in supported_tasks
         else None
+    )
+    state.openai_serving_validate = OpenAIServingValidate(
+        engine_client=engine_client,
+        threshold=args.validation_similarity_threshold,
+        toploc_validation_usage=args.toploc_validation_usage,
     )
     state.anthropic_serving_messages = (
         AnthropicServingMessages(

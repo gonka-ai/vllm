@@ -34,6 +34,17 @@ Serve over a Unix domain socket:
 vllm serve meta-llama/Llama-2-7b-hf --uds /tmp/vllm.sock
 ```
 
+For inference validation, you can also set validation-specific runtime flags:
+
+```bash
+python -m vllm.entrypoints.openai.api_server \
+  --model <model> \
+  --validation-similarity-threshold 0.985 \
+  --toploc-validation-usage
+```
+
+If `--toploc-validation-usage` is omitted, it defaults to `False`.
+
 Check with --help for more options:
 
 ```bash

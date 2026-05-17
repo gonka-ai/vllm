@@ -3081,8 +3081,8 @@ class GPUModelRunner(
         )
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+        dispatch_cudagraph = lambda num_tokens, disable_full: (
+            self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
@@ -4794,6 +4794,7 @@ class GPUModelRunner(
             temperature=dummy_tensors(0.5),
             all_greedy=False,
             all_random=False,
+            all_enforced=False,
             top_p=dummy_tensors(0.9),
             top_k=dummy_tensors(logits.size(1) - 1),
             generators={},
@@ -4808,6 +4809,7 @@ class GPUModelRunner(
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
             logitsprocs=LogitsProcessors(),
+            mixed_enforced=False,
         )
         try:
             sampler_output = self.sampler(

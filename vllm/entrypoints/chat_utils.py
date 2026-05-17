@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import base64
 import json
 import warnings
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Iterable
 from functools import cached_property, lru_cache, partial
+from io import BytesIO
 from itertools import accumulate
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar, cast
@@ -96,6 +98,44 @@ MODALITY_PLACEHOLDERS_MAP = {
     "audio": "<##AUDIO##>",
     "video": "<##VIDEO##>",
 }
+
+IMAGE_ARTIFACT_SIZE = (224, 224)
+IMAGE_ARTIFACT_QUALITY = 85
+
+
+def create_image_artifact(
+    image: Image.Image,
+    size: tuple[int, int] = IMAGE_ARTIFACT_SIZE,
+    quality: int = IMAGE_ARTIFACT_QUALITY,
+) -> str:
+    """Resize to fixed size and return base64 JPEG for consistent artifact storage."""
+    thumb = image.resize(size, Image.Resampling.LANCZOS)
+    buffer = BytesIO()
+    thumb.save(buffer, "JPEG", quality=quality)
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def create_mm_artifacts(
+    mm_data: MultiModalDataDict | None,
+    size: tuple[int, int] = IMAGE_ARTIFACT_SIZE,
+    quality: int = IMAGE_ARTIFACT_QUALITY,
+) -> list[dict[str, str]] | None:
+    """Create normalized artifacts for all images in mm_data (fixed size per image)."""
+    if not mm_data or "image" not in mm_data:
+        return None
+    images = mm_data["image"]
+    if not isinstance(images, list):
+        images = [images]
+    artifacts: list[dict[str, str]] = []
+    for img in images:
+        if img is not None and isinstance(img, Image.Image):
+            artifacts.append(
+                {
+                    "modality": "image",
+                    "artifact": create_image_artifact(img, size=size, quality=quality),
+                }
+            )
+    return artifacts if artifacts else None
 
 
 class AudioURL(TypedDict, total=False):
