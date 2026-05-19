@@ -109,6 +109,7 @@ def _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker):
         slot_mapping=slot_mapping,
         causal=True,
         _seq_lens_cpu=seq_lens_cpu,
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
         _num_computed_tokens_cpu=torch.zeros(
             batch_size, dtype=torch.int32, device="cpu"
         ),
