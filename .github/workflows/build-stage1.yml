@@ -1,0 +1,157 @@
+name: build-stage1
+
+# Builds and publishes the kaitakuai/vllm PoC v2 image (Stage 1 of the
+# kaitakuai/mlnode-foundry 4-stage pipeline) to ghcr.io/kaitakuai/vllm.
+#
+# This is an *overlay* build (Dockerfile.quick):
+#   FROM vllm/vllm-openai:v<X.Y.Z>
+#   COPY ./vllm/*.py over the installed vllm package
+# It does NOT recompile CUDA / .so artifacts, so each rebuild is ~3-5 min
+# regardless of total image size.
+#
+# Tag scheme:
+#   <vllm-version>-pocv2          mutable; points at the branch HEAD
+#   <vllm-version>-pocv2-<sha9>   immutable; points at the specific commit
+#
+# The mlnode-foundry consumer always pins by digest (tools/stage2.lock.cue),
+# so the mutable tag is operational convenience for humans / docker pull, not
+# part of the build chain's integrity model. cosign keyless signatures are
+# attached to BOTH tags via the published digest.
+#
+# Historically this image was built and pushed by hand from a developer
+# laptop. This workflow makes the rebuild reproducible and traceable
+# (provenance attestation, SBOM, immutable commit-pinned tag).
+
+on:
+  push:
+    branches:
+      - 'mb/feat/port-pocv2-vllm-*'
+    paths:
+      - 'vllm/**'
+      - 'Dockerfile.quick'
+      - '.github/workflows/build-stage1.yml'
+  workflow_dispatch:
+    inputs:
+      vllm_version:
+        description: 'vLLM upstream version (e.g., 0.20.0). If empty, derived from branch suffix.'
+        required: false
+      base_image:
+        description: 'BASE_IMAGE override. If empty: vllm/vllm-openai:v<vllm_version>.'
+        required: false
+
+permissions:
+  id-token: write       # cosign keyless OIDC + SLSA provenance
+  packages: write       # GHCR push
+  attestations: write   # SLSA provenance attestation
+  contents: read
+
+concurrency:
+  group: build-stage1-${{ github.ref }}
+  cancel-in-progress: false   # don't interrupt mid-publish
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+
+      - name: Derive tag + BASE_IMAGE
+        id: tag
+        env:
+          INPUT_VLLM_VERSION: ${{ inputs.vllm_version }}
+          INPUT_BASE_IMAGE: ${{ inputs.base_image }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VLLM_VERSION="${INPUT_VLLM_VERSION:-}"
+          if [ -z "$VLLM_VERSION" ]; then
+            # branches: mb/feat/port-pocv2-vllm-0.20 → 0.20.0
+            #          mb/feat/port-pocv2-vllm-0.19 → 0.19.0
+            if [[ "$REF_NAME" =~ port-pocv2-vllm-([0-9]+\.[0-9]+) ]]; then
+              VLLM_VERSION="${BASH_REMATCH[1]}.0"
+            else
+              echo "::error::Cannot derive vllm_version from ref '$REF_NAME'; pass workflow_dispatch input"
+              exit 1
+            fi
+          fi
+          BASE_IMAGE="${INPUT_BASE_IMAGE:-vllm/vllm-openai:v${VLLM_VERSION}}"
+          SHA9="${GITHUB_SHA:0:9}"
+          MUTABLE_TAG="ghcr.io/${GITHUB_REPOSITORY}:${VLLM_VERSION}-pocv2"
+          IMMUTABLE_TAG="ghcr.io/${GITHUB_REPOSITORY}:${VLLM_VERSION}-pocv2-${SHA9}"
+          {
+            echo "vllm_version=$VLLM_VERSION"
+            echo "base_image=$BASE_IMAGE"
+            echo "mutable_tag=$MUTABLE_TAG"
+            echo "immutable_tag=$IMMUTABLE_TAG"
+            echo "sha9=$SHA9"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved: BASE_IMAGE=$BASE_IMAGE → $MUTABLE_TAG (also $IMMUTABLE_TAG)"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+
+      - name: Build and push Stage 1
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.quick
+          push: true
+          tags: |
+            ${{ steps.tag.outputs.mutable_tag }}
+            ${{ steps.tag.outputs.immutable_tag }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=registry,ref=${{ steps.tag.outputs.mutable_tag }}-buildcache
+          cache-to: type=registry,ref=${{ steps.tag.outputs.mutable_tag }}-buildcache,mode=max
+          build-args: |
+            BASE_IMAGE=${{ steps.tag.outputs.base_image }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
+            org.opencontainers.image.description=kaitakuai/vllm PoC v2 overlay (BASE: ${{ steps.tag.outputs.base_image }})
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Cosign keyless sign
+        run: |
+          cosign sign --yes "${{ steps.tag.outputs.mutable_tag }}@${{ steps.build.outputs.digest }}"
+          cosign sign --yes "${{ steps.tag.outputs.immutable_tag }}@${{ steps.build.outputs.digest }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Stage 1 build summary"
+            echo ""
+            echo "- **vLLM version**: \`${{ steps.tag.outputs.vllm_version }}\`"
+            echo "- **BASE_IMAGE**: \`${{ steps.tag.outputs.base_image }}\`"
+            echo "- **Mutable tag**: \`${{ steps.tag.outputs.mutable_tag }}\`"
+            echo "- **Immutable tag**: \`${{ steps.tag.outputs.immutable_tag }}\`"
+            echo "- **Digest**: \`${{ steps.build.outputs.digest }}\`"
+            echo "- **Commit**: [\`${{ github.sha }}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})"
+            echo ""
+            echo "Next step: bump \`tools/stage2.lock.cue\` stage1.digest in kaitakuai/mlnode-foundry."
+          } >> "$GITHUB_STEP_SUMMARY"
