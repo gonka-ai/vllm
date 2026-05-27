@@ -138,6 +138,33 @@ def _get_or_create_attn_metadata(batch_size, seq_len, block_size, device, worker
     return _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker)
 
 
+# TODO: Should we get rid of this apprach?
+def _select_poc_kv_scratch(
+    kv_caches: list,
+    dtype: torch.dtype,
+    needed_elems: int,
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+) -> Optional[torch.Tensor]:
+    """Return a no-copy scratch view into KV cache memory, if safe.
+
+    KV cache storage may use packed dtypes (e.g. ``uint8`` for FP8) or
+    backend-specific non-contiguous layouts. Only reuse memory that already
+    matches model embedding dtype and is contiguous so ``view(-1)`` does not
+    allocate a copy.
+    """
+    for kv in kv_caches:
+        if kv.dtype != dtype:
+            continue
+        if not kv.is_contiguous():
+            continue
+        if kv.numel() < needed_elems:
+            continue
+        return kv.view(-1)[:needed_elems].view(batch_size, seq_len, hidden_size)
+    return None
+
+
 @torch.inference_mode()
 def execute_poc_forward(
     worker,
@@ -207,13 +234,10 @@ def execute_poc_forward(
 
     if pp_group.is_first_rank:
         kv_caches = getattr(worker.model_runner, "kv_caches", [])
-        kv_scratch = None
         needed_elems = batch_size * seq_len * hidden_size
-        for kv in kv_caches:
-            if kv.numel() >= needed_elems:
-                kv_scratch = kv.flatten()[:needed_elems].view(
-                    batch_size, seq_len, hidden_size)
-                break
+        kv_scratch = _select_poc_kv_scratch(
+            kv_caches, dtype, needed_elems, batch_size, seq_len, hidden_size,
+        )
         if kv_scratch is not None:
             from .gpu_random import _seed_from_string, _normal
             for i, nonce in enumerate(nonces):
