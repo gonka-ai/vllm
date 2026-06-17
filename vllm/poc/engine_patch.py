@@ -22,11 +22,23 @@ Usage:
 import asyncio
 import math
 import time
+from contextlib import asynccontextmanager
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 POC_BORROW_TIMEOUT_MS = 10_000
+
+# Serializes PoC validations within this API-server process: at most one KV
+# reservation (and its forwards) is live at a time, so concurrent /generate
+# validations queue instead of stacking N×R reservations (peak stays 1×R).
+# asyncio.Lock is FIFO and unbounded, so queued validations WAIT rather than
+# trip reserve_poc_blocks' abort-inference escalation.
+#
+# Scope: this lock is per API-server process. With --api-server-count > 1 the
+# bound degrades to P×R; a cross-process cap must live in EngineCore (the single
+# owner of the block pool, see borrow_poc_blocks there). Single process today.
+_poc_reservation_lock = asyncio.Lock()
 
 _patched = False
 
@@ -194,6 +206,29 @@ async def reserve_poc_blocks(self, num_nonces: int, seq_len: int,
         block_ids = await _borrow_blocks(self, num_nonces, seq_len, timeout_ms)
     return block_ids
 
+@asynccontextmanager
+async def poc_reservation(self, num_nonces: int, seq_len: int,
+                          timeout_ms: int = POC_BORROW_TIMEOUT_MS):
+    """Serialized KV reservation for one PoC validation request.
+
+    Holds _poc_reservation_lock across reserve → (caller's forwards) → return,
+    so concurrent validations queue and peak KV reservation stays 1×R. Yields
+    the reserved block ids, or None if the pool could not spare blocks even
+    after aborting inference (caller then runs the legacy in-place path). The
+    lock and the block return both live here, so every validation entrypoint —
+    not just the HTTP route — gets the same guarantee."""
+    async with _poc_reservation_lock:
+        block_ids = await reserve_poc_blocks(self, num_nonces, seq_len, timeout_ms)
+        try:
+            yield block_ids
+        finally:
+            if block_ids is not None:
+                try:
+                    await return_poc_blocks(self, block_ids)
+                except Exception as e:
+                    logger.error("PoC failed to return %d reserved blocks: %s",
+                                 len(block_ids), e)
+
 def apply_patch():
     """Apply the PoC patch to vLLM V1 AsyncLLM class."""
     global _patched
@@ -211,6 +246,9 @@ def apply_patch():
         AsyncLLM.borrow_poc_blocks = borrow_poc_blocks
         AsyncLLM.return_poc_blocks = return_poc_blocks
         AsyncLLM.reserve_poc_blocks = reserve_poc_blocks
+        # Serialized reserve→forwards→return context manager (the public API the
+        # /generate route uses; the validation lock lives inside it).
+        AsyncLLM.poc_reservation = poc_reservation
 
         _patched = True
         logger.info("PoC engine patch applied successfully to AsyncLLM (V1)")
