@@ -56,7 +56,8 @@ def _get_block_size(worker):
     return worker.cache_config.block_size
 
 
-def _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker):
+def _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker,
+                             borrowed_block_ids=None):
     """Create attention metadata for batch_size sequences.
 
     Uses the worker's metadata builders to create the correct metadata
@@ -68,18 +69,29 @@ def _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker):
     blocks_per_seq = math.ceil(seq_len / block_size)
     total_tokens = batch_size * seq_len
 
-    # slot_mapping: each sequence gets its own block range
+    # Physical block ids: borrowed (disjoint from inference) for /generate
+    # validation, else block 0 for the aborted /init/generate path.
+    needed = batch_size * blocks_per_seq
+    if borrowed_block_ids is not None:
+        if len(borrowed_block_ids) < needed:
+            raise ValueError(
+                f"PoC needs {needed} blocks but only "
+                f"{len(borrowed_block_ids)} were borrowed")
+        block_ids = list(borrowed_block_ids[:needed])
+    else:
+        block_ids = list(range(needed))
+
+    # slot_mapping: physical token slot for each (seq, position)
     all_slots = []
     for seq_idx in range(batch_size):
-        base_block = seq_idx * blocks_per_seq
         for t in range(seq_len):
-            block_idx = base_block + t // block_size
+            block_idx = block_ids[seq_idx * blocks_per_seq + t // block_size]
             all_slots.append(block_idx * block_size + t % block_size)
     slot_mapping = torch.tensor(all_slots, dtype=torch.long, device=device)
 
     # block_table: [batch_size, blocks_per_seq]
-    block_table = torch.arange(
-        batch_size * blocks_per_seq, dtype=torch.int32, device=device
+    block_table = torch.tensor(
+        block_ids, dtype=torch.int32, device=device
     ).view(batch_size, blocks_per_seq)
 
     # query_start_loc: [0, seq_len, 2*seq_len, ..., batch_size*seq_len]
@@ -133,9 +145,11 @@ def _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker):
     return attn_metadata_dict, slot_mapping_dict
 
 
-def _get_or_create_attn_metadata(batch_size, seq_len, block_size, device, worker):
+def _get_or_create_attn_metadata(batch_size, seq_len, block_size, device, worker,
+                                 borrowed_block_ids=None):
     """Create fresh attention metadata for the given parameters."""
-    return _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker)
+    return _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker,
+                                    borrowed_block_ids=borrowed_block_ids)
 
 
 # TODO: Should we get rid of this apprach?
@@ -175,6 +189,7 @@ def execute_poc_forward(
     hidden_size: int,
     k_dim: int = DEFAULT_K_DIM,
     poc_stronger_rng: bool = False,
+    borrowed_block_ids: Optional[List[int]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Execute batched PoC forward pass on a V1 worker.
 
@@ -200,6 +215,8 @@ def execute_poc_forward(
                 "nonces": nonces,
                 "k_dim": k_dim,
                 "poc_stronger_rng": poc_stronger_rng,
+                "has_borrowed": borrowed_block_ids is not None,
+                "borrowed_block_ids": borrowed_block_ids or [],
             }, src=0)
         else:
             broadcast_data = broadcast_tensor_dict(src=0)
@@ -209,6 +226,10 @@ def execute_poc_forward(
             k_dim = int(broadcast_data["k_dim"])
             batch_size = len(nonces)
             poc_stronger_rng = bool(broadcast_data["poc_stronger_rng"])
+            borrowed_block_ids = (
+                list(broadcast_data["borrowed_block_ids"])
+                if broadcast_data.get("has_borrowed") else None
+            )
 
     pp_group = get_pp_group()
 
@@ -222,7 +243,8 @@ def execute_poc_forward(
     # Get block_size and prepare attention metadata (cached, reused)
     block_size = _get_block_size(worker)
     attn_metadata, slot_mapping_dict = _get_or_create_attn_metadata(
-        batch_size, seq_len, block_size, device, worker
+        batch_size, seq_len, block_size, device, worker,
+        borrowed_block_ids=borrowed_block_ids,
     )
 
     # Positions for the batch
@@ -233,27 +255,16 @@ def execute_poc_forward(
     inputs_embeds = None
 
     if pp_group.is_first_rank:
-        kv_caches = getattr(worker.model_runner, "kv_caches", [])
-        needed_elems = batch_size * seq_len * hidden_size
-        kv_scratch = _select_poc_kv_scratch(
-            kv_caches, dtype, needed_elems, batch_size, seq_len, hidden_size,
+        # Scratchpad (KV-cache reuse for inputs_embeds) removed: it saved very
+        # little memory and clobbered inference KV (block-0 region). Always
+        # allocate a fresh buffer — the produced vectors are numerically
+        # identical to the old scratchpad path (same _seed_from_string/_normal).
+        _gen_fn = generate_inputs_concat_murmur if poc_stronger_rng else generate_inputs
+        inputs_embeds = _gen_fn(
+            block_hash, public_key, nonces,
+            dim=hidden_size, seq_len=seq_len,
+            device=device, dtype=dtype,
         )
-        if kv_scratch is not None:
-            from .gpu_random import _seed_from_string, _normal
-            for i, nonce in enumerate(nonces):
-                seed = _seed_from_string(
-                    f"{block_hash}_{public_key}_nonce{nonce}")
-                vals = _normal(seed, seq_len * hidden_size, device)
-                kv_scratch[i].copy_(vals.view(seq_len, hidden_size).to(dtype))
-                del vals
-            inputs_embeds = kv_scratch
-        else:
-            _gen_fn = generate_inputs_concat_murmur if poc_stronger_rng else generate_inputs
-            inputs_embeds = _gen_fn(
-                block_hash, public_key, nonces,
-                dim=hidden_size, seq_len=seq_len,
-                device=device, dtype=dtype,
-            )
     else:
         intermediate_tensors = IntermediateTensors(
             pp_group.recv_tensor_dict(all_gather_group=get_tp_group())
