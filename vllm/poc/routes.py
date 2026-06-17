@@ -3,6 +3,7 @@ import asyncio
 import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +29,13 @@ POC_BATCH_SIZE_DEFAULT = int(os.environ.get("POC_BATCH_SIZE_DEFAULT", "32"))
 
 _poc_tasks: Dict[int, Dict[str, Any]] = {}
 _poc_generation_active: bool = False
+
+
+@asynccontextmanager
+async def _null_reservation():
+    """Fallback for engines without poc_reservation: no KV reservation, the
+    legacy in-place PoC path (borrowed_block_ids=None) runs instead."""
+    yield None
 
 
 def is_poc_generation_active() -> bool:
@@ -234,6 +242,7 @@ async def _compute_artifacts_chunk(
     poc_stronger_rng: bool = False,
     timeout_sec: float = POC_GENERATE_CHUNK_TIMEOUT_SEC,
     check_cancelled: Optional[callable] = None,
+    borrowed_block_ids: Optional[List[int]] = None,
 ) -> List[Dict]:
     """Compute artifacts for a chunk with backoff on skip."""
     chunk_start_time = time.time()
@@ -249,7 +258,7 @@ async def _compute_artifacts_chunk(
             "seq_len": seq_len,
             "k_dim": k_dim,
             "poc_stronger_rng": poc_stronger_rng,
-        })
+        }, borrowed_block_ids=borrowed_block_ids)
         
         if not result.get("skipped"):
             return result.get("artifacts", [])
@@ -496,27 +505,38 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
     
     start_time = time.time()
     computed_artifacts = []
-    
-    for i in range(0, total_nonces, body.batch_size):
-        chunk = body.nonces[i:i + body.batch_size]
-        chunk_idx = i // body.batch_size
-        
-        def check_cancelled():
-            return False
-        
-        while _is_generation_active(app_id):
-            await asyncio.sleep(0.1)
-        
-        try:
-            artifacts = await _compute_artifacts_chunk(
-                engine_client, chunk, body.block_hash, body.public_key,
-                body.params.seq_len, body.params.k_dim, body.poc_stronger_rng,
-                POC_GENERATE_CHUNK_TIMEOUT_SEC, check_cancelled
-            )
-            computed_artifacts.extend(artifacts)
-            logger.debug(f"PoC /generate: chunk {chunk_idx+1}/{n_chunks} done ({len(chunk)} nonces)")
-        except RuntimeError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+
+    # Serialize concurrent validations and reserve disjoint KV once for the whole
+    # request: the engine's poc_reservation context manager holds the validation
+    # lock across reserve → forwards → free, so only one validation owns a KV
+    # reservation at a time (peak = 1×R, not N×R) and the blocks are returned on
+    # exit. Falls back to the legacy in-place path if the engine is too old to
+    # expose poc_reservation.
+    reservation = (engine_client.poc_reservation(body.batch_size, body.params.seq_len)
+                   if hasattr(engine_client, "poc_reservation")
+                   else _null_reservation())
+    async with reservation as reserved_block_ids:
+        for i in range(0, total_nonces, body.batch_size):
+            chunk = body.nonces[i:i + body.batch_size]
+            chunk_idx = i // body.batch_size
+
+            def check_cancelled():
+                return False
+
+            while _is_generation_active(app_id):
+                await asyncio.sleep(0.1)
+
+            try:
+                artifacts = await _compute_artifacts_chunk(
+                    engine_client, chunk, body.block_hash, body.public_key,
+                    body.params.seq_len, body.params.k_dim, body.poc_stronger_rng,
+                    POC_GENERATE_CHUNK_TIMEOUT_SEC, check_cancelled,
+                    borrowed_block_ids=reserved_block_ids,
+                )
+                computed_artifacts.extend(artifacts)
+                logger.debug(f"PoC /generate: chunk {chunk_idx+1}/{n_chunks} done ({len(chunk)} nonces)")
+            except RuntimeError as e:
+                raise HTTPException(status_code=503, detail=str(e))
     
     elapsed = time.time() - start_time
     rate = total_nonces / elapsed if elapsed > 0 else 0
@@ -579,3 +599,13 @@ async def stop_round(request: Request) -> dict:
 
     _poc_generation_active = False
     return {"status": "OK", "pow_status": {"status": "STOPPED"}}
+
+
+@router.get("/versions")
+async def get_versions() -> dict:
+    """Build versions"""
+    from vllm.version import __version__ as vllm_version
+    return {
+        "vllm_version": vllm_version,
+        "poc_validation_inference": True,
+    }
