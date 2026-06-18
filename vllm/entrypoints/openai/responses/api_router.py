@@ -8,7 +8,7 @@ from http import HTTPStatus
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
     ResponsesResponse,
@@ -52,12 +52,33 @@ async def _convert_stream_to_sse_events(
         HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
 @with_cancellation
 @load_aware_call
 async def create_responses(request: ResponsesRequest, raw_request: Request):
+    try:
+        from vllm.poc.routes import is_poc_generation_active
+
+        if is_poc_generation_active():
+            return JSONResponse(
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+                content=ErrorResponse(
+                    error=ErrorInfo(
+                        message=(
+                            "PoC generation is active. Inference requests "
+                            "are temporarily unavailable."
+                        ),
+                        type="service_unavailable",
+                        code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+                    ),
+                ).model_dump(mode="json", by_alias=True),
+            )
+    except ImportError:
+        pass
+
     handler = responses(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Responses API")

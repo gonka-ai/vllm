@@ -301,6 +301,26 @@ class OpenAIServingChat(OpenAIServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+                enforced_ids: list[int] | None = None
+                if request.enforced_str:
+                    enforced_ids = tokenizer.encode(
+                        request.enforced_str, add_special_tokens=False
+                    )
+                elif request.enforced_tokens:
+                    request.enforced_tokens.encode(tokenizer)
+                    enforced_ids = request.enforced_tokens.get_enforced_token_ids()
+
+                if enforced_ids:
+                    if enforced_ids[-1] != tokenizer.eos_token_id:
+                        enforced_ids.append(tokenizer.eos_token_id)
+                    sampling_params.enforced_token_ids = enforced_ids
+                    if (
+                        sampling_params.logprobs_mode is None
+                        and request.enforced_tokens is not None
+                    ):
+                        detected = request.enforced_tokens.detect_logprobs_mode()
+                        if detected:
+                            sampling_params.logprobs_mode = detected
 
             self._log_inputs(
                 sub_request_id,

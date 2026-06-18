@@ -51,10 +51,21 @@ class Sampler:
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.num_speculative_tokens = num_speculative_tokens
         self.use_flashinfer = flashinfer_sampler_supported()
+        self.req_states = req_states
+        self.enforced_token_ids: dict[int, list[int]] = {}
+        self.logprobs_modes: dict[int, str] = {}
 
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
     ) -> None:
+        enforced = getattr(sampling_params, "enforced_token_ids", None)
+        if enforced:
+            self.enforced_token_ids[req_idx] = enforced
+        else:
+            self.enforced_token_ids.pop(req_idx, None)
+        self.logprobs_modes[req_idx] = (
+            sampling_params.logprobs_mode or self.logprobs_mode
+        )
         self.sampling_states.add_request(req_idx, sampling_params)
         self.penalties_state.add_request(req_idx, sampling_params)
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
@@ -101,7 +112,11 @@ class Sampler:
         )
 
         if return_logprobs:
-            if self.logprobs_mode == "processed_logprobs":
+            batch_modes = {
+                self.logprobs_modes.get(int(req_idx), self.logprobs_mode)
+                for req_idx in idx_mapping_np.tolist()
+            }
+            if len(batch_modes) == 1 and next(iter(batch_modes)) == "processed_logprobs":
                 logits = processed_logits
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
             cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
@@ -228,4 +243,12 @@ class Sampler:
                 apply_temperature=False,
                 use_fp64=self.use_fp64_gumbel,
             )
+        if self.enforced_token_ids:
+            total_lens = self.req_states.total_len.gpu[expanded_idx_mapping].tolist()
+            for row, req_idx in enumerate(idx_mapping_np.tolist()):
+                etids = self.enforced_token_ids.get(req_idx)
+                if not etids:
+                    continue
+                output_len = int(total_lens[row]) - int(self.req_states.prompt_len.np[req_idx])
+                sampled[row] = etids[output_len] if output_len < len(etids) else etids[-1]
         return sampled, processed_logits

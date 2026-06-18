@@ -284,7 +284,16 @@ class StructuredOutputManager:
                         apply_bitmask = False
                     if apply_bitmask and not grammar.is_terminated():
                         accepted = grammar.accept_tokens(req_id, [token])
-                        assert accepted, (token, req_id, scheduled_spec_decode_tokens)
+                        if not accepted:
+                            logger.warning(
+                                "Grammar rejected token %d for request %s "
+                                "during speculative decode bitmask fill. "
+                                "Disabling bitmask for this request.",
+                                token,
+                                req_id,
+                            )
+                            apply_bitmask = False
+                            continue
                         state_advancements += 1
                     cumulative_index += 1
                 if state_advancements > 0:

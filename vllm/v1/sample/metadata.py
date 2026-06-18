@@ -48,8 +48,19 @@ class SamplingMetadata:
     # req_index -> list of token IDs to get logprobs for
     logprob_token_ids: dict[int, list[int]] | None = None
 
+    # Per-request logprobs mode: "raw_logprobs", "processed_logprobs",
+    # "mixed", or None when sampled-token logprobs are not requested.
+    batch_logprobs_mode: str | None = None
+
+    # Per-row bool mask used when batch_logprobs_mode == "mixed".
+    # True means processed logprobs, False means raw logprobs.
+    logprobs_is_processed: torch.Tensor | None = None
+
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
+    # Enforced next token IDs for validation replay. Shape [num_reqs], with -1
+    # meaning no enforcement for that row.
+    enforced_next_token_ids: torch.Tensor | None = None
     # When non-None, use ``holder.has_tracked_requests()`` to see if this batch applies
     # thinking-token-budget logits (holder may exist with an empty tracking set).
     thinking_budget_state_holder: ThinkingBudgetStateHolder | None = None
