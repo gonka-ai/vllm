@@ -2,6 +2,7 @@
 import asyncio
 import os
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -16,6 +17,12 @@ POC_GENERATE_CHUNK_TIMEOUT_SEC = float(os.environ.get("POC_GENERATE_CHUNK_TIMEOU
 POC_CHAT_BUSY_BACKOFF_SEC = 0.05
 POC_GENERATE_RESULT_TTL_SEC = float(os.environ.get("POC_GENERATE_RESULT_TTL_SEC", "300"))
 POC_MAX_QUEUED_NONCES = int(os.environ.get("POC_MAX_QUEUED_NONCES", "100000"))
+
+
+@asynccontextmanager
+async def _null_reservation():
+    """Fallback for engines without poc_reservation."""
+    yield None
 
 
 @dataclass
@@ -215,47 +222,53 @@ class GenerateQueue:
         start_time = time.time()
         computed_artifacts = []
         
-        for i in range(0, total_nonces, job.batch_size):
-            chunk = job.nonces[i:i + job.batch_size]
-            chunk_idx = i // job.batch_size
-            chunk_start_time = time.time()
-            
-            while True:
-                if self._stop_event.is_set():
-                    raise RuntimeError("Job cancelled")
-                
-                if self._is_generation_active and self._is_generation_active(job.app_id):
-                    await asyncio.sleep(0.1)
-                    continue
-                
-                try:
-                    result = await asyncio.wait_for(
-                        job.engine_client.poc_request("generate_artifacts", {
-                            "nonces": chunk,
-                            "block_hash": job.block_hash,
-                            "public_key": job.public_key,
-                            "seq_len": job.seq_len,
-                            "k_dim": job.k_dim,
-                            "poc_stronger_rng": job.poc_stronger_rng,
-                        }),
-                        timeout=POC_GENERATE_CHUNK_TIMEOUT_SEC
-                    )
-                except asyncio.CancelledError:
-                    logger.info(f"PoC queue job {job.request_id[:8]}: cancelled during RPC")
-                    raise RuntimeError("Job cancelled")
-                except asyncio.TimeoutError:
-                    raise RuntimeError(f"Timeout waiting for engine RPC: chunk {chunk_idx}")
-                
-                if not result.get("skipped"):
-                    computed_artifacts.extend(result.get("artifacts", []))
-                    logger.debug(f"PoC queue job {job.request_id[:8]}: chunk {chunk_idx+1}/{n_chunks} done ({len(chunk)} nonces)")
-                    break
-                
-                elapsed = time.time() - chunk_start_time
-                if elapsed >= POC_GENERATE_CHUNK_TIMEOUT_SEC:
-                    raise RuntimeError(f"Timeout waiting for engine: chunk {chunk_idx}")
-                
-                await asyncio.sleep(POC_CHAT_BUSY_BACKOFF_SEC)
+        reservation = (
+            job.engine_client.poc_reservation(job.batch_size, job.seq_len)
+            if hasattr(job.engine_client, "poc_reservation")
+            else _null_reservation()
+        )
+        async with reservation as reserved_block_ids:
+            for i in range(0, total_nonces, job.batch_size):
+                chunk = job.nonces[i:i + job.batch_size]
+                chunk_idx = i // job.batch_size
+                chunk_start_time = time.time()
+
+                while True:
+                    if self._stop_event.is_set():
+                        raise RuntimeError("Job cancelled")
+
+                    if self._is_generation_active and self._is_generation_active(job.app_id):
+                        await asyncio.sleep(0.1)
+                        continue
+
+                    try:
+                        result = await asyncio.wait_for(
+                            job.engine_client.poc_request("generate_artifacts", {
+                                "nonces": chunk,
+                                "block_hash": job.block_hash,
+                                "public_key": job.public_key,
+                                "seq_len": job.seq_len,
+                                "k_dim": job.k_dim,
+                                "poc_stronger_rng": job.poc_stronger_rng,
+                            }, borrowed_block_ids=reserved_block_ids),
+                            timeout=POC_GENERATE_CHUNK_TIMEOUT_SEC
+                        )
+                    except asyncio.CancelledError:
+                        logger.info(f"PoC queue job {job.request_id[:8]}: cancelled during RPC")
+                        raise RuntimeError("Job cancelled")
+                    except asyncio.TimeoutError:
+                        raise RuntimeError(f"Timeout waiting for engine RPC: chunk {chunk_idx}")
+
+                    if not result.get("skipped"):
+                        computed_artifacts.extend(result.get("artifacts", []))
+                        logger.debug(f"PoC queue job {job.request_id[:8]}: chunk {chunk_idx+1}/{n_chunks} done ({len(chunk)} nonces)")
+                        break
+
+                    elapsed = time.time() - chunk_start_time
+                    if elapsed >= POC_GENERATE_CHUNK_TIMEOUT_SEC:
+                        raise RuntimeError(f"Timeout waiting for engine: chunk {chunk_idx}")
+
+                    await asyncio.sleep(POC_CHAT_BUSY_BACKOFF_SEC)
         
         elapsed = time.time() - start_time
         rate = total_nonces / elapsed if elapsed > 0 else 0
