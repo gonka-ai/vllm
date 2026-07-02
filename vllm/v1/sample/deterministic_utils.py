@@ -79,6 +79,85 @@ def iter_u64(seed: str, count: int) -> List[int]:
 
 
 # =============================================================================
+# Chain-bound seed derivation
+# =============================================================================
+
+# Versioned domain separator for chain-bound deterministic sampling seeds.
+_SEED_DOMAIN_TAG = "gonka-deterministic-sampling-v1"
+
+
+def derive_chain_bound_seed(
+    user_seed: int,
+    inference_id_from_chain: str,
+) -> str:
+    """Derive a chain-bound deterministic sampling seed.
+
+    Stage-1 replay must be bound to chain provenance; prompt-derived seed
+    material is request-controlled and must not be used for this path.
+
+    Args:
+        user_seed: Integer sampling seed (vLLM's public seed type is
+            ``Optional[int]``; a str would collide with its int form).
+        inference_id_from_chain: Chain-provided inference identifier.
+
+    Returns:
+        Lowercase SHA256 hex digest usable as a Sha256CounterRNG seed.
+
+    Raises:
+        ValueError: If inference_id_from_chain is missing, empty, or
+            whitespace-only.
+        TypeError: If user_seed is not an int (bool excluded), or if
+            inference_id_from_chain is not a str.
+    """
+    # Chain id must be canonical chain-provided text: reject None and any
+    # non-str so arbitrary objects/bytes/ints are never stringified into
+    # provenance material.
+    if inference_id_from_chain is None:
+        raise ValueError(
+            "inference_id_from_chain is required for chain-bound "
+            "deterministic sampling; refusing to fall back to "
+            "request-controlled seed material."
+        )
+    if not isinstance(inference_id_from_chain, str):
+        raise TypeError(
+            "inference_id_from_chain must be a str (chain-provided text), "
+            f"got {type(inference_id_from_chain).__name__}."
+        )
+    if inference_id_from_chain.strip() == "":
+        raise ValueError(
+            "inference_id_from_chain must be non-empty and not "
+            "whitespace-only."
+        )
+
+    # vLLM's seed is int-only (SamplingParams.seed / OpenAI seed are
+    # Optional[int]). Reject bool (a subclass of int) and any non-int so a str
+    # "7" cannot collide with int 7, and no object is stringified into the seed.
+    if isinstance(user_seed, bool) or not isinstance(user_seed, int):
+        raise TypeError(
+            "user_seed must be an int deterministic seed value, "
+            f"got {type(user_seed).__name__}."
+        )
+
+    # Byte-length-prefixed framing over UTF-8 bytes: prefixes count BYTES (not
+    # Python codepoints) so the contract reproduces in Go/Rust/JS. The chain id
+    # is hashed byte-exact (no stripping) to preserve provenance.
+    seed_bytes = bytes(str(user_seed), "utf-8")
+    inference_id_bytes = bytes(inference_id_from_chain, "utf-8")
+    material = b"".join([
+        _SEED_DOMAIN_TAG.encode("ascii"),
+        b"\nuser_seed_len=",
+        str(len(seed_bytes)).encode("ascii"),
+        b"\n",
+        seed_bytes,
+        b"\ninference_id_len=",
+        str(len(inference_id_bytes)).encode("ascii"),
+        b"\n",
+        inference_id_bytes,
+    ])
+    return hashlib.sha256(material).hexdigest()
+
+
+# =============================================================================
 # Integer Sampling Primitives
 # =============================================================================
 

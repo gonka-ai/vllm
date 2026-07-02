@@ -173,7 +173,7 @@ CHECK 2 — Sampling Replay (exact, detects token manipulation):
   │  CPU (SHA256 sampling):     │                                         │
   │  ┌──────────────────────────┼──────────────────────────────────────┐  │
   │  │                          ▼                                      │  │
-  │  │  7. Reconstruct RNG: seed_str = f"{seed}|{prompt_token_ids}"    │  │
+  │  │  7. Reconstruct RNG: seed_str = derive_chain_bound_seed(...)    │  │
   │  │     Create Sha256CounterRNG(seed_str), advance to same position │  │
   │  │                          │                                      │  │
   │  │                          ▼                                      │  │
@@ -495,9 +495,20 @@ This eliminates any ambiguity in accumulation order for softmax sums, cumulative
 for top_p, etc.
 
 ### Seed Derivation (no per-token seed needed)
-The RNG seed is derived from `{user_seed}|{prompt_token_ids}` (see `gpu_model_runner.py`).
+The RNG seed MUST be chain-bound. Always call `derive_chain_bound_seed(user_seed,
+inference_id_from_chain)` in `deterministic_utils.py`; the abstract
+`SHA256(user_seed || inference_id_from_chain)` from the proposal is a versioned,
+domain-separated, **byte-length-prefixed** SHA256 framing over UTF-8-encoded fields —
+**do not use raw string concatenation** (it would diverge across languages and
+break consensus). It fails closed on a missing/empty/non-`str`/whitespace-only
+`inference_id_from_chain` (no fallback to `prompt_token_ids`, which is
+request-controlled and would make Stage-1 replay grindable).
+
 The RNG is counter-based (SHA256), so each token generation advances the counter.
-The validator can reconstruct the seed by tokenizing the prompt.
+
+Wiring note: MLNode must pass the chain inference id into vLLM (e.g. via the
+request) before this path can be enabled end-to-end; until then only the helper +
+its invariant tests land.
 
 ### Integer Weights as Sampling Input
 The executor samples FROM the quantized integer weights, not from float probabilities.
@@ -691,7 +702,7 @@ Files are marked: **[EXISTS]** = already implemented on this branch,
 - **[CREATE]** `vllm/validation_distance.py` -- Check 1: `position_distance()`, `compute_distances()` for logprob distance calculation. Pure Python, no torch dependency.
 
 ### Worker
-- **[MODIFY]** `vllm/v1/worker/gpu_model_runner.py` -- Add seed derivation: `seed_str = f"{seed}|{prompt_token_ids}"`, create `Sha256CounterRNG` and pass in `sampling_metadata`.
+- **[MODIFY]** `vllm/v1/worker/gpu_model_runner.py` -- Add seed derivation: `run_seed = derive_chain_bound_seed(seed, inference_id_from_chain)`, create `Sha256CounterRNG` and pass in `sampling_metadata`.
 - **[MODIFY]** `vllm/v1/sample/metadata.py` -- Add `deterministic_rngs` field to `SamplingMetadata` to carry per-request RNG instances from the worker to the sampler.
 
 ### Environment
@@ -785,8 +796,8 @@ field to `SamplingMetadata`.
 
 ### Step 4: Wire up seed derivation in the worker
 - `vllm/v1/worker/gpu_model_runner.py`: when `VLLM_DETERMINISTIC_SAMPLING=1` and request
-  has a seed, derive `seed_str = f"{seed}|{prompt_token_ids}"`, create `Sha256CounterRNG`,
-  and pass it into `sampling_metadata.deterministic_rngs`.
+  has a seed, derive `run_seed = derive_chain_bound_seed(seed, inference_id_from_chain)`,
+  create `Sha256CounterRNG`, and pass it into `sampling_metadata.deterministic_rngs`.
 
 ### Step 5: Update serving layer
 - `serving_chat.py`: orchestrate validation pipeline — run Check 2 before inference,
