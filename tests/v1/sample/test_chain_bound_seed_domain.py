@@ -80,20 +80,59 @@ def test_non_string_chain_id_rejected():
             derive_chain_bound_seed(7, bad)  # type: ignore[arg-type]
 
 
-def test_whitespace_in_chain_id_not_normalized():
-    # The chain id is hashed byte-exact; surrounding whitespace is significant.
-    assert (
-        derive_chain_bound_seed(7, "chain-abc")
-        != derive_chain_bound_seed(7, " chain-abc ")
-    )
+def test_whitespace_in_chain_id_rejected_language_invariant():
+    # The accept/reject boundary must be identical across Python/Go/Rust/JS.
+    # A "whitespace-only" / strip() predicate rejects a DIFFERENT set of code
+    # points per runtime (U+001C-1F, U+0085, U+00A0, U+2028, ...), which would
+    # split consensus on validity. Printable-ASCII-only rejects them all.
+    for ws in (" ", "\t", "\n", "\x1c", "\x85", "\xa0", " "):
+        with pytest.raises(ValueError):
+            derive_chain_bound_seed(7, "chain" + ws + "abc")
 
 
-def test_unicode_chain_id_byte_framing_stable():
-    # Unicode in the chain id exercises byte-length (not codepoint) framing.
-    seed = derive_chain_bound_seed(7, "chain-β")
-    assert len(seed) == 64
-    assert seed == seed.lower()
-    int(seed, 16)
+def test_control_and_nul_chars_rejected():
+    # NUL / control bytes must never enter the hashed provenance material.
+    for bad in ("chain\x00abc", "chain\x07", "\x1fchain"):
+        with pytest.raises(ValueError):
+            derive_chain_bound_seed(7, bad)
+
+
+def test_non_ascii_chain_id_rejected():
+    # Non-ASCII is byte-fragile across honest re-encoders (JSON/DB NFC); the
+    # canonical id charset is printable ASCII only.
+    for bad in ("chain-β", "chain-é", "chain-\U0001F600"):
+        with pytest.raises(ValueError):
+            derive_chain_bound_seed(7, bad)
+
+
+def test_inference_id_length_bounded():
+    # Unbounded id is a hash-DoS surface; the contract caps it.
+    with pytest.raises(ValueError):
+        derive_chain_bound_seed(7, "a" * 257)
+    # At the bound it is still accepted.
+    assert len(derive_chain_bound_seed(7, "a" * 256)) == 64
+
+
+def test_user_seed_int64_range_enforced():
+    # A Python big int hashes fine but an int64 validator overflows; pin range.
+    for bad in (2**63, -(2**63) - 1, 2**100):
+        with pytest.raises(ValueError):
+            derive_chain_bound_seed(bad, "chain-abc")
+    # int64 extremes accepted.
+    assert len(derive_chain_bound_seed(2**63 - 1, "chain-abc")) == 64
+    assert len(derive_chain_bound_seed(-(2**63), "chain-abc")) == 64
+
+
+def test_int_subclass_seed_rejected():
+    # type(x) is int rejects subclasses whose __str__ is overridden, which
+    # would hash the repr instead of the value while passing an isinstance
+    # check. Exact-int only.
+    class _Sneaky(int):
+        def __str__(self) -> str:  # pragma: no cover - trivial
+            return "999"
+
+    with pytest.raises(TypeError):
+        derive_chain_bound_seed(_Sneaky(7), "chain-abc")
 
 
 def test_user_seed_type_rejected():

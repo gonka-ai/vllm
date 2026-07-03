@@ -85,6 +85,25 @@ def iter_u64(seed: str, count: int) -> List[int]:
 # Versioned domain separator for chain-bound deterministic sampling seeds.
 _SEED_DOMAIN_TAG = "gonka-deterministic-sampling-v1"
 
+# Canonical contract bounds. These make the derivation reproduce identically
+# across languages (Python executor, Go/Rust validator): the accept/reject
+# boundary must not depend on any runtime's Unicode or integer semantics.
+#
+# Chain id: printable ASCII only (0x21..0x7E). This is deliberately stricter
+# than "non-whitespace": a whitespace/`strip()` predicate rejects a different
+# set of code points in Python vs Go vs JS (e.g. U+001C-1F, U+0085, U+00A0),
+# which would split consensus on validity itself. Printable ASCII removes the
+# whole ambiguity class and also rules out NUL/control bytes.
+_ID_MIN_ORD = 0x21
+_ID_MAX_ORD = 0x7E
+_MAX_INFERENCE_ID_LEN = 256
+
+# user_seed: pin to signed 64-bit range. A Python executor hashes an arbitrary
+# big int fine, but a Go/Rust validator on int64 would overflow -> divergent
+# or crashed validation. Pinning the range keeps the contract portable.
+_MIN_USER_SEED = -(2**63)
+_MAX_USER_SEED = 2**63 - 1
+
 
 def derive_chain_bound_seed(
     user_seed: int,
@@ -98,16 +117,21 @@ def derive_chain_bound_seed(
     Args:
         user_seed: Integer sampling seed (vLLM's public seed type is
             ``Optional[int]``; a str would collide with its int form).
+            Must be within the signed 64-bit range for cross-language
+            reproducibility.
         inference_id_from_chain: Chain-provided inference identifier.
+            Must be printable ASCII (``0x21``..``0x7E``), non-empty, and at
+            most ``_MAX_INFERENCE_ID_LEN`` characters.
 
     Returns:
         Lowercase SHA256 hex digest usable as a Sha256CounterRNG seed.
 
     Raises:
-        ValueError: If inference_id_from_chain is missing, empty, or
-            whitespace-only.
-        TypeError: If user_seed is not an int (bool excluded), or if
-            inference_id_from_chain is not a str.
+        ValueError: If inference_id_from_chain is missing, empty, too long,
+            or contains a non-printable-ASCII character; or if user_seed is
+            outside the signed 64-bit range.
+        TypeError: If inference_id_from_chain is not a str, or if user_seed
+            is not an exact int (bool and int subclasses excluded).
     """
     # Chain id must be canonical chain-provided text: reject None and any
     # non-str so arbitrary objects/bytes/ints are never stringified into
@@ -123,19 +147,39 @@ def derive_chain_bound_seed(
             "inference_id_from_chain must be a str (chain-provided text), "
             f"got {type(inference_id_from_chain).__name__}."
         )
-    if inference_id_from_chain.strip() == "":
+    if inference_id_from_chain == "":
+        raise ValueError("inference_id_from_chain must be non-empty.")
+    if len(inference_id_from_chain) > _MAX_INFERENCE_ID_LEN:
         raise ValueError(
-            "inference_id_from_chain must be non-empty and not "
-            "whitespace-only."
+            "inference_id_from_chain too long "
+            f"(>{_MAX_INFERENCE_ID_LEN} characters)."
         )
+    # Language-invariant charset: reject anything outside printable ASCII so
+    # the accept/reject boundary is identical in Python/Go/Rust/JS and no
+    # control/NUL/whitespace/non-ASCII byte enters the hashed material.
+    for ch in inference_id_from_chain:
+        if not (_ID_MIN_ORD <= ord(ch) <= _ID_MAX_ORD):
+            raise ValueError(
+                "inference_id_from_chain must be printable ASCII "
+                "(0x21..0x7E); no whitespace/control/NUL/non-ASCII. "
+                f"Found U+{ord(ch):04X}."
+            )
 
     # vLLM's seed is int-only (SamplingParams.seed / OpenAI seed are
-    # Optional[int]). Reject bool (a subclass of int) and any non-int so a str
-    # "7" cannot collide with int 7, and no object is stringified into the seed.
-    if isinstance(user_seed, bool) or not isinstance(user_seed, int):
+    # Optional[int]). Require an EXACT int: `type(...) is int` rejects bool
+    # (True == 1) and any int subclass whose `__str__` is overridden (which
+    # would hash the repr, not the value). This also stops "7" colliding with
+    # int 7 and any object being stringified into the seed.
+    if type(user_seed) is not int:
         raise TypeError(
-            "user_seed must be an int deterministic seed value, "
+            "user_seed must be an exact int deterministic seed value "
+            "(bool and int subclasses excluded), "
             f"got {type(user_seed).__name__}."
+        )
+    if not (_MIN_USER_SEED <= user_seed <= _MAX_USER_SEED):
+        raise ValueError(
+            "user_seed must be within the signed 64-bit range "
+            "for cross-language reproducibility."
         )
 
     # Byte-length-prefixed framing over UTF-8 bytes: prefixes count BYTES (not

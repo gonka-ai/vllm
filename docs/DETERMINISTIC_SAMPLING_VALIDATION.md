@@ -500,9 +500,21 @@ inference_id_from_chain)` in `deterministic_utils.py`; the abstract
 `SHA256(user_seed || inference_id_from_chain)` from the proposal is a versioned,
 domain-separated, **byte-length-prefixed** SHA256 framing over UTF-8-encoded fields —
 **do not use raw string concatenation** (it would diverge across languages and
-break consensus). It fails closed on a missing/empty/non-`str`/whitespace-only
+break consensus). It fails closed on a missing/empty/non-`str`
 `inference_id_from_chain` (no fallback to `prompt_token_ids`, which is
 request-controlled and would make Stage-1 replay grindable).
+
+To keep the accept/reject boundary **identical across languages** (Python
+executor, Go/Rust validator), the contract is byte-exact and language-invariant:
+`inference_id_from_chain` must be **printable ASCII (`0x21`..`0x7E`)**, non-empty,
+and ≤256 chars — this is deliberately stricter than a `strip()`/"whitespace-only"
+check, whose whitespace set differs per runtime (`U+001C`-`1F`, `U+0085`, `U+00A0`,
+…) and would split consensus on validity itself; it also excludes NUL/control and
+non-ASCII bytes that honest re-encoders (JSON/DB NFC) could mutate. `user_seed`
+must be an **exact `int`** (bool and `int` subclasses excluded, so an overridden
+`__str__` cannot hash the repr instead of the value) within the **signed 64-bit
+range** (a Python big int would hash fine but overflow an int64 validator). The
+pinned golden vector `derive_chain_bound_seed(7, "chain-abc")` is unchanged.
 
 The RNG is counter-based (SHA256), so each token generation advances the counter.
 
