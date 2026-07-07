@@ -7,7 +7,7 @@ OPTIMIZED: Serial Python loops replaced with batched GPU operations.
 """
 import hashlib
 import math
-from typing import List
+from typing import List, Optional
 
 import torch
 
@@ -124,10 +124,16 @@ def generate_inputs(
     seq_len: int,
     device: torch.device,
     dtype: torch.dtype = torch.float16,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Generate deterministic input embeddings for PoC."""
+    """Generate deterministic input embeddings for PoC.
+
+    If ``out`` is provided it must be a pre-allocated tensor of shape
+    ``(len(nonces), seq_len, dim)``; results are written into it in-place
+    to avoid an extra GPU allocation.
+    """
     batch_size = len(nonces)
-    result = torch.empty(batch_size, seq_len, dim, device=device, dtype=dtype)
+    result = out if out is not None else torch.empty(batch_size, seq_len, dim, device=device, dtype=dtype)
     for i, nonce in enumerate(nonces):
         seed_str = f"{block_hash}_{public_key}_nonce{nonce}"
         seed = _seed_from_string(seed_str)
@@ -144,15 +150,19 @@ def generate_inputs_concat_murmur(
     seq_len: int,
     device: torch.device,
     dtype: torch.dtype = torch.float16,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Generate deterministic input embeddings using concat-murmur (stronger RNG).
 
     Uses all 256 bits of SHA256 by splitting into 8 × 32-bit sub-seeds.
     Each sub-seed generates one segment of length ceil(n/8) via the existing
     murmur3 pipeline; segments are concatenated.
+
+    If ``out`` is provided it must be a pre-allocated tensor of shape
+    ``(len(nonces), seq_len, dim)``; results are written into it in-place.
     """
     batch_size = len(nonces)
-    result = torch.empty(batch_size, seq_len, dim, device=device, dtype=dtype)
+    result = out if out is not None else torch.empty(batch_size, seq_len, dim, device=device, dtype=dtype)
     n = seq_len * dim
     seg_len = (n + 7) // 8  # ceil(n/8); last segment may be shorter
 
