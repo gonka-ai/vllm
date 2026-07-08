@@ -499,7 +499,7 @@ class EngineArgs:
     offload_num_in_group: int = PrefetchOffloadConfig.offload_num_in_group
     offload_prefetch_step: int = PrefetchOffloadConfig.offload_prefetch_step
     offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
-    gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
+    gpu_memory_utilization: float | None = None
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
@@ -630,7 +630,7 @@ class EngineArgs:
     )
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str | None = ModelConfig.override_attention_dtype
-    attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
+    attention_backend: AttentionBackendEnum | None = AttentionBackendEnum.FLASHINFER
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     kv_cache_dtype_skip_layers: list[str] = get_field(
@@ -856,7 +856,11 @@ class EngineArgs:
             description=AttentionConfig.__doc__,
         )
         attention_group.add_argument(
-            "--attention-backend", **attention_kwargs["backend"]
+            "--attention-backend",
+            **{
+                **attention_kwargs["backend"],
+                "default": AttentionBackendEnum.FLASHINFER,
+            },
         )
 
         # Mamba arguments
@@ -1060,7 +1064,11 @@ class EngineArgs:
         )
         cache_group.add_argument("--block-size", **cache_kwargs["block_size"])
         cache_group.add_argument(
-            "--gpu-memory-utilization", **cache_kwargs["gpu_memory_utilization"]
+            "--gpu-memory-utilization",
+            **{
+                **cache_kwargs["gpu_memory_utilization"],
+                "default": None,
+            },
         )
         cache_group.add_argument(
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
@@ -1632,6 +1640,12 @@ class EngineArgs:
         self._check_feature_supported()
         self._set_default_chunked_prefill_and_prefix_caching_args(model_config)
         self._set_default_reasoning_config_args()
+        if self.gpu_memory_utilization is None:
+            if getattr(usage_context, "value", usage_context) == "OPENAI_API_SERVER":
+                self.gpu_memory_utilization = 0.925
+            else:
+                self.gpu_memory_utilization = CacheConfig.gpu_memory_utilization
+
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
             # Only set CacheConfig.sliding_window if the model is all sliding
@@ -2209,7 +2223,7 @@ class EngineArgs:
             # For GPUs like H100 and MI300x, use larger default values.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
-                UsageContext.OPENAI_API_SERVER: 8192,
+                UsageContext.OPENAI_API_SERVER: 32768,
             }
             default_max_num_seqs = {
                 UsageContext.LLM_CLASS: 1024,
@@ -2219,7 +2233,7 @@ class EngineArgs:
             # TODO(woosuk): Tune the default values for other hardware.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 8192,
-                UsageContext.OPENAI_API_SERVER: 2048,
+                UsageContext.OPENAI_API_SERVER: 32768,
             }
             default_max_num_seqs = {
                 UsageContext.LLM_CLASS: 256,

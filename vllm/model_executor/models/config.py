@@ -657,6 +657,26 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
         model_config.hf_config.embedding_size = model_config.hf_config.num_labels
 
 
+class Qwen3MoeForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        compilation_config = vllm_config.compilation_config
+        if not compilation_config.custom_ops:
+            compilation_config.custom_ops = [
+                "+quant_fp8",
+                "+rms_norm",
+                "+silu_and_mul",
+                "+fused_moe",
+                "+rotary_embedding",
+                "+apply_rotary_emb",
+                "none",
+            ]
+            logger.info(
+                "Setting default custom_ops for Qwen3 MoE: %s",
+                compilation_config.custom_ops,
+            )
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": Qwen3_5ForConditionalGenerationConfig,
@@ -687,6 +707,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
+    "Qwen3MoeForCausalLM": Qwen3MoeForCausalLMConfig,
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,

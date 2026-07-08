@@ -246,6 +246,10 @@ class SamplingParams(
     When set, logprobs for exactly these token IDs will be returned,
     in addition to the sampled token. This is useful for scoring tasks
     where you want to compare probabilities of specific label tokens."""
+    logprobs_mode: str | None = None
+    """Per-request logprobs mode override for sampled-token logprobs.
+    Accepted values: 'raw_logprobs', 'processed_logprobs', or None
+    (use deployment-level --logprobs-mode default)."""
     flat_logprobs: bool = False
     """Whether to return logprobs in flatten format (i.e. FlatLogprob)
     for better performance.
@@ -298,6 +302,11 @@ class SamplingParams(
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
 
+    enforced_token_ids: list[int] | None = None
+    """Enforced next-token IDs for gonka-style validation replay. When set,
+    the sampler will force the generated token at each step to match this
+    sequence, regardless of the underlying logits."""
+
     skip_reading_prefix_cache: bool | None = None
     thinking_token_budget: int | None = None
     """Maximum number of tokens allowed for thinking operations."""
@@ -324,6 +333,7 @@ class SamplingParams(
         stop: str | list[str] | None = None,
         stop_token_ids: list[int] | None = None,
         bad_words: list[str] | None = None,
+        enforced_token_ids: list[int] | None = None,
         thinking_token_budget: int | None = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
@@ -331,6 +341,7 @@ class SamplingParams(
         min_tokens: int = 0,
         logprobs: int | None = None,
         prompt_logprobs: int | None = None,
+        logprobs_mode: str | None = None,
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
@@ -365,6 +376,7 @@ class SamplingParams(
             stop=stop,
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
+            enforced_token_ids=enforced_token_ids,
             thinking_token_budget=thinking_token_budget,
             include_stop_str_in_output=include_stop_str_in_output,
             ignore_eos=ignore_eos,
@@ -372,6 +384,7 @@ class SamplingParams(
             min_tokens=min_tokens,
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
+            logprobs_mode=logprobs_mode,
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
@@ -517,6 +530,16 @@ class SamplingParams(
                 f"{self.prompt_logprobs}.",
                 parameter="prompt_logprobs",
                 value=self.prompt_logprobs,
+            )
+        if self.logprobs_mode is not None and self.logprobs_mode not in (
+            "raw_logprobs",
+            "processed_logprobs",
+        ):
+            raise VLLMValidationError(
+                "logprobs_mode must be 'raw_logprobs', 'processed_logprobs', "
+                f"or None, got {self.logprobs_mode!r}.",
+                parameter="logprobs_mode",
+                value=self.logprobs_mode,
             )
         assert isinstance(self.stop_token_ids, list)
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
