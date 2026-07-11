@@ -7,18 +7,16 @@
 Proof of Compute proves computational capacity on-chain. Most integration risk is in this step because validators measure artifact distance and allow only a small rate of numerical mismatches.
 
 1. Add PoC modifications to the model forward flow 
-
 2. Experiment: produce artifacts from `(block_hash, public_key, nonces)` and compare them with the [Kimi-K2.6 golden artifacts](https://github.com/gonka-ai/gonka/blob/main/mlnode/packages/benchmarks/scripts/poc_validation/artifacts/moonshotai-kimi-k2.6.json).
 
-This will likely require multiple iterations because the check is sensitive. It would be simplest to start with a small model if a local development flow is available.
+    This will likely require multiple iterations because the check is sensitive. It would be simplest to start with a small model if a local development flow is available.
 
 3. Implement APIs for PoC generation and artifact validation.
-
 4. Test the full flow: 
     - PoC artifacts generated with vLLM on NVIDIA GPUs are validated on custom nodes, and the statistical test passes
     - PoC artifacts generated on custom nodes are validated on NVIDIA GPUs, and the statistical test passes
 
-Hosts can verify PoC validation correctness with the [`mlnode-validate` skill](https://github.com/gonka-ai/gonka/blob/main/skills/mlnode-validate/SKILL.md).
+    Hosts can verify PoC validation correctness with the [`mlnode-validate` skill](https://github.com/gonka-ai/gonka/blob/main/skills/mlnode-validate/SKILL.md).
 
 ### 2. Inference Validation
 
@@ -30,9 +28,9 @@ Gonka inference uses the OpenAI-compatible `/v1/chat/completions` API. Most para
     - inference results and artifacts produced on NVIDIA GPUs are validated by custom nodes
     - inference results and artifacts produced by a modified model on NVIDIA GPUs are rejected by custom nodes
 
-Reference tests: [inference validation scripts](https://github.com/gonka-ai/gonka/tree/mlnode-v3.0.14/mlnode/packages/benchmarks/scripts/inference_validation).
+    Reference tests: [inference validation scripts](https://github.com/gonka-ai/gonka/tree/mlnode-v3.0.14/mlnode/packages/benchmarks/scripts/inference_validation).
 
-This step also carries some risk because frameworks may collect logprobs at different stages of the sampling pipeline. vLLM itself has had such differences.
+    This step also carries some risk because frameworks may collect logprobs at different stages of the sampling pipeline. vLLM itself has had such differences.
 
 3. Check `/v1/chat/completions` parameter compatibility against [`docs/chat-api/README.md`](https://github.com/gonka-ai/gonka/blob/main/docs/chat-api/README.md). Resolve any differences in the proxy.
 
