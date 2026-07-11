@@ -6,13 +6,15 @@
 
 Proof of Compute proves computational capacity on-chain. Most integration risk is in this step because validators measure artifact distance and allow only a small rate of numerical mismatches.
 
-1.1. Add PoC modifications to the model forward flow 
-1.2. Experiment: produce artifacts from `(block_hash, public_key, nonces)` and compare them with the [Kimi-K2.6 golden artifacts](https://github.com/gonka-ai/gonka/blob/main/mlnode/packages/benchmarks/scripts/poc_validation/artifacts/moonshotai-kimi-k2.6.json).
+1. Add PoC modifications to the model forward flow 
+
+2. Experiment: produce artifacts from `(block_hash, public_key, nonces)` and compare them with the [Kimi-K2.6 golden artifacts](https://github.com/gonka-ai/gonka/blob/main/mlnode/packages/benchmarks/scripts/poc_validation/artifacts/moonshotai-kimi-k2.6.json).
 
 This will likely require multiple iterations because the check is sensitive. It would be simplest to start with a small model if a local development flow is available.
 
-1.3. Implement APIs for PoC generation and artifact validation.
-1.4. Test the full flow: 
+3. Implement APIs for PoC generation and artifact validation.
+
+4. Test the full flow: 
     - PoC artifacts generated with vLLM on NVIDIA GPUs are validated on custom nodes, and the statistical test passes
     - PoC artifacts generated on custom nodes are validated on NVIDIA GPUs, and the statistical test passes
 
@@ -22,8 +24,8 @@ Hosts can verify PoC validation correctness with the [`mlnode-validate` skill](h
 
 Gonka inference uses the OpenAI-compatible `/v1/chat/completions` API. Most parameters should work unchanged. Compatibility differences can be handled by the proxy.
 
-2.1. Add `enforced_tokens` replay to the sampling flow.
-2.2. Experiment:
+1. Add `enforced_tokens` replay to the sampling flow.
+2. Experiment:
     - inference results and artifacts produced by custom nodes are validated on NVIDIA GPUs
     - inference results and artifacts produced on NVIDIA GPUs are validated by custom nodes
     - inference results and artifacts produced by a modified model on NVIDIA GPUs are rejected by custom nodes
@@ -32,7 +34,7 @@ Reference tests: [inference validation scripts](https://github.com/gonka-ai/gonk
 
 This step also carries some risk because frameworks may collect logprobs at different stages of the sampling pipeline. vLLM itself has had such differences.
 
-2.3. Check `/v1/chat/completions` parameter compatibility against [`docs/chat-api/README.md`](https://github.com/gonka-ai/gonka/blob/main/docs/chat-api/README.md). Resolve any differences in the proxy.
+3. Check `/v1/chat/completions` parameter compatibility against [`docs/chat-api/README.md`](https://github.com/gonka-ai/gonka/blob/main/docs/chat-api/README.md). Resolve any differences in the proxy.
 
 ---
 
