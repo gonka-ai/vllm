@@ -126,6 +126,7 @@ from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
+from vllm.v1.sample.deterministic_utils import Sha256CounterRNG
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -695,7 +696,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampling_params = new_req_data.sampling_params
             pooling_params = new_req_data.pooling_params
 
-            if (
+            # Create deterministic RNG when VLLM_DETERMINISTIC_SAMPLING=1
+            # This enables cross-platform reproducible sampling for validation
+            deterministic_rng = None
+            if sampling_params and envs.VLLM_DETERMINISTIC_SAMPLING:
+                # Derive seed from user seed (if any) and prompt tokens
+                # Use comma-separated token IDs as prompt representation
+                prompt_repr = ",".join(
+                    str(t) for t in new_req_data.prompt_token_ids)
+                if sampling_params.seed is not None:
+                    seed_str = f"{sampling_params.seed}|{prompt_repr}"
+                else:
+                    seed_str = prompt_repr
+                deterministic_rng = Sha256CounterRNG.from_seed_string(seed_str)
+                # When using deterministic RNG, don't also use torch.Generator
+                generator = None
+            elif (
                 sampling_params
                 and sampling_params.sampling_type == SamplingType.RANDOM_SEED
             ):
@@ -725,6 +741,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                deterministic_rng=deterministic_rng,
             )
             self.requests[req_id] = req_state
 
@@ -3701,6 +3718,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             temperature=dummy_tensors(0.5),
             all_greedy=False,
             all_random=False,
+            all_enforced=False,
             top_p=dummy_tensors(0.9),
             top_k=dummy_tensors(logits.size(1) - 1),
             generators={},
@@ -3715,6 +3733,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
             logitsprocs=LogitsProcessors(),
+            enforced_token_ids=None,
+            enforced_tokens=None,
+            enforced_req_ids=None,
+            mixed_enforced=None
         )
         try:
             sampler_output = self.sampler(

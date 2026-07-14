@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -10,6 +11,10 @@ from vllm import envs
 from vllm.config.model import LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+
+if TYPE_CHECKING:
+    from vllm.v1.sample.deterministic_utils import Sha256CounterRNG
+    from vllm.v1.sample.metadata import SamplingMetadata
 
 logger = init_logger(__name__)
 
@@ -63,15 +68,24 @@ class TopKTopPSampler(nn.Module):
     def forward_native(
         self,
         logits: torch.Tensor,
-        generators: dict[int, torch.Generator],
-        k: torch.Tensor | None,
-        p: torch.Tensor | None,
+        sampling_metadata: "SamplingMetadata",
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         PyTorch-native implementation of top-k and top-p sampling.
 
         The logits tensor may be updated in-place.
+
+        Args:
+            logits: The logits tensor of shape [batch_size, vocab_size]
+            sampling_metadata: Metadata containing sampling parameters including
+                generators, top_k, top_p, and deterministic_rngs
         """
+        # Extract fields from sampling_metadata
+        generators = sampling_metadata.generators
+        k = sampling_metadata.top_k
+        p = sampling_metadata.top_p
+        deterministic_rngs = sampling_metadata.deterministic_rngs
+
         logits = self.apply_top_k_top_p(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
@@ -79,16 +93,36 @@ class TopKTopPSampler(nn.Module):
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
+
+        # Check for deterministic mode (VLLM_DETERMINISTIC_SAMPLING)
+        if deterministic_rngs:
+            return deterministic_sample(probs, deterministic_rngs), logits_to_return
+
         return random_sample(probs, generators), logits_to_return
 
     def forward_cuda(
         self,
         logits: torch.Tensor,
-        generators: dict[int, torch.Generator],
-        k: torch.Tensor | None,
-        p: torch.Tensor | None,
+        sampling_metadata: "SamplingMetadata",
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """More optimized implementation for top-k and top-p sampling."""
+        """More optimized implementation for top-k and top-p sampling.
+
+        Args:
+            logits: The logits tensor of shape [batch_size, vocab_size]
+            sampling_metadata: Metadata containing sampling parameters including
+                generators, top_k, top_p, and deterministic_rngs
+        """
+        # Extract fields from sampling_metadata
+        generators = sampling_metadata.generators
+        k = sampling_metadata.top_k
+        p = sampling_metadata.top_p
+        deterministic_rngs = sampling_metadata.deterministic_rngs
+
+        # Check for deterministic mode first (VLLM_DETERMINISTIC_SAMPLING)
+        # Deterministic mode always uses the native path for reproducibility
+        if deterministic_rngs:
+            return self.forward_native(logits, sampling_metadata)
+
         # We prefer `random_sample` over `flashinfer_sample` when sorting is
         # not needed. This is because `random_sample` does not require
         # CPU-GPU synchronization while `flashinfer_sample` does.
@@ -99,7 +133,7 @@ class TopKTopPSampler(nn.Module):
                     "per-request generators. Falling back to "
                     "PyTorch-native implementation."
                 )
-            return self.forward_native(logits, generators, k, p)
+            return self.forward_native(logits, sampling_metadata)
         assert self.logprobs_mode not in ("processed_logits", "processed_logprobs"), (
             "FlashInfer does not support returning logits/logprobs"
         )
@@ -111,15 +145,28 @@ class TopKTopPSampler(nn.Module):
     def forward_cpu(
         self,
         logits: torch.Tensor,
-        generators: dict[int, torch.Generator],
-        k: torch.Tensor | None,
-        p: torch.Tensor | None,
+        sampling_metadata: "SamplingMetadata",
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         PyTorch-native implementation of top-k and top-p sampling for CPU.
 
         The logits tensor may be updated in-place.
+
+        Args:
+            logits: The logits tensor of shape [batch_size, vocab_size]
+            sampling_metadata: Metadata containing sampling parameters including
+                generators, top_k, top_p, and deterministic_rngs
         """
+        # Extract fields from sampling_metadata
+        generators = sampling_metadata.generators
+        k = sampling_metadata.top_k
+        p = sampling_metadata.top_p
+        deterministic_rngs = sampling_metadata.deterministic_rngs
+
+        # Check for deterministic mode first (VLLM_DETERMINISTIC_SAMPLING)
+        if deterministic_rngs:
+            return self.forward_native(logits, sampling_metadata)
+
         logits = self.apply_top_k_top_p(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
@@ -239,6 +286,51 @@ def random_sample(
         for i, generator in generators.items():
             q[i].exponential_(generator=generator)
     return probs.div_(q).argmax(dim=-1).view(-1)
+
+
+def deterministic_sample(
+    probs: torch.Tensor,
+    deterministic_rngs: dict[int, "Sha256CounterRNG"],
+) -> torch.Tensor:
+    """
+    Sample using SHA256-based deterministic RNG for cross-platform
+    reproducibility.
+
+    This function uses integer weights (quantized from probabilities) to ensure
+    identical sampling results across different platforms and implementations.
+
+    Args:
+        probs: Probability tensor of shape [batch_size, vocab_size]
+        deterministic_rngs: Dict mapping request index to Sha256CounterRNG
+
+    Returns:
+        Sampled token IDs tensor of shape [batch_size]
+    """
+    from vllm.v1.sample.deterministic_utils import sample_categorical_weights
+
+    batch_size = probs.size(0)
+    device = probs.device
+
+    # Quantize probabilities to integer weights (2^16 scale) for reproducibility
+    # Using integer arithmetic ensures identical results across platforms
+    WEIGHT_SCALE = 2**16
+    weights = (probs * WEIGHT_SCALE).round().to(torch.int64)
+    weights_cpu = weights.cpu().numpy()
+
+    sampled_tokens = []
+    for i in range(batch_size):
+        if i in deterministic_rngs:
+            rng = deterministic_rngs[i]
+            # Convert to list and sample using integer weights
+            weight_list = weights_cpu[i].tolist()
+            token_id = sample_categorical_weights(weight_list, rng)
+        else:
+            # Fallback for requests without deterministic RNG (shouldn't happen
+            # when VLLM_DETERMINISTIC_SAMPLING is enabled, but handle gracefully)
+            token_id = probs[i].argmax().item()
+        sampled_tokens.append(token_id)
+
+    return torch.tensor(sampled_tokens, dtype=torch.int64, device=device)
 
 
 def flashinfer_sample(

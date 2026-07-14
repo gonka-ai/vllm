@@ -15,6 +15,7 @@ from pydantic.dataclasses import dataclass
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.validation import EnforcedTokens
 
 logger = init_logger(__name__)
 
@@ -26,7 +27,7 @@ class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2
-
+    ENFORCED = 3
 
 # maybe make msgspec?
 @dataclass
@@ -251,6 +252,8 @@ class SamplingParams(
     last token of a corresponding token sequence is not allowed when the next
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
+    enforced_token_ids: list[int] | None = None
+    enforced_tokens: list[dict[int, list[int]]] | None = None
 
     @staticmethod
     def from_optional(
@@ -283,6 +286,8 @@ class SamplingParams(
         guided_decoding: GuidedDecodingParams | None = None,
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
+        enforced_token_ids: list[int] | None = None,
+        enforced_tokens: list[dict[int, list[int]]] | None = None,
         extra_args: dict[str, Any] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
@@ -302,7 +307,6 @@ class SamplingParams(
             )
             structured_outputs = guided_decoding
             guided_decoding = None
-
         return SamplingParams(
             n=1 if n is None else n,
             best_of=best_of,
@@ -335,6 +339,8 @@ class SamplingParams(
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
+            enforced_token_ids=enforced_token_ids,
+            enforced_tokens=enforced_tokens,
         )
 
     def __post_init__(self) -> None:
@@ -580,6 +586,8 @@ class SamplingParams(
 
     @cached_property
     def sampling_type(self) -> SamplingType:
+        if self.enforced_token_ids or self.enforced_tokens:
+            return SamplingType.ENFORCED
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
         if self.seed is not None:
@@ -639,7 +647,8 @@ class SamplingParams(
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"structured_outputs={self.structured_outputs}, "
-            f"extra_args={self.extra_args})"
+            f"extra_args={self.extra_args}, "
+            f"enforced_token_ids={self.enforced_token_ids})"
         )
 
 

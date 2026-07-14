@@ -107,6 +107,7 @@ from vllm.utils.async_utils import (
 from vllm.utils.collection_utils import is_list_of
 from vllm.v1.engine import EngineCoreRequest
 
+from vllm.validation import EnforcedTokens
 logger = init_logger(__name__)
 
 CompletionLikeRequest: TypeAlias = (
@@ -255,7 +256,7 @@ class OpenAIServing:
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
-        return_tokens_as_token_ids: bool = False,
+        return_tokens_as_token_ids: bool = True,
         log_error_stack: bool = False,
     ):
         super().__init__()
@@ -1389,9 +1390,13 @@ class OpenAIServing:
         token_id: int,
         tokenizer: AnyTokenizer,
         return_as_token_id: bool = False,
+        enforced_tokens: EnforcedTokens = None
     ) -> str:
         if return_as_token_id:
-            return f"token_id:{token_id}"
+            # Return token ids as plain strings for compatibility with older
+            # OpenAI-compatible vLLM variants and enforced-token validation
+            # utilities that expect int(token).
+            return str(token_id)
 
         if logprob.decoded_token is not None:
             return logprob.decoded_token

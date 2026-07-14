@@ -649,7 +649,7 @@ class OpenAIServingCompletion(OpenAIServing):
             if step_top_logprobs is None:
                 token = tokenizer.decode(token_id)
                 if should_return_as_token_id:
-                    token = f"token_id:{token_id}"
+                    token = str(token_id)
 
                 out_tokens.append(token)
                 out_token_logprobs.append(None)

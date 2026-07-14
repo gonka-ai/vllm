@@ -6,8 +6,11 @@
 import json
 import time
 from http import HTTPStatus
-from typing import Annotated, Any, ClassVar, Generic, Literal, TypeAlias, TypeVar
+from typing import (
+    Annotated, Any, ClassVar, Generic, Literal, TypeAlias, TypeVar, Optional
+)
 
+import msgspec
 import regex as re
 import torch
 from fastapi import HTTPException, UploadFile
@@ -56,6 +59,9 @@ from vllm.utils.serial_utils import (
     EncodingFormat,
     Endianness,
 )
+
+from vllm.validation import EnforcedToken, EnforcedTokens
+
 
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
@@ -742,8 +748,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=(
             "If specified with 'logprobs', tokens are represented "
-            " as strings of the form 'token_id:{token_id}' so that tokens "
-            "that are not JSON-encodable can be identified."
+            " as plain token-id strings (e.g. '641') for compatibility with"
+            " enforced-token validation utilities and older vLLM variants."
         ),
     )
     return_token_ids: bool | None = Field(
@@ -780,6 +786,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    enforced_str: Optional[str] = Field(default=None)
+    enforced_tokens: Optional[EnforcedTokens] = Field(default=None)
+
     # --8<-- [end:chat-completion-extra-params]
 
     # Default sampling parameters for chat completion requests
@@ -814,6 +823,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         max_tokens: int,
         logits_processor_pattern: str | None,
         default_sampling_params: dict,
+        tokenizer,
     ) -> SamplingParams:
         # Default parameters
         if (repetition_penalty := self.repetition_penalty) is None:
@@ -887,6 +897,29 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+
+        enforced_token_ids: list[int] | None = None
+        if self.enforced_str:
+            enforced_token_ids = tokenizer.encode(self.enforced_str, add_special_tokens=False)
+            if enforced_token_ids[-1] != tokenizer.eos_token_id:
+                enforced_token_ids.append(tokenizer.eos_token_id)
+        
+        enforced_top_tokens: dict | None = None
+        if self.enforced_tokens:
+            self.enforced_tokens.encode(tokenizer)
+            if self.enforced_tokens.tokens[-1].token_id != tokenizer.eos_token_id:
+                self.enforced_tokens.tokens.append(EnforcedToken(
+                    token=tokenizer.eos_token,
+                    top_tokens=[str(tokenizer.eos_token_id)],
+                    token_id=tokenizer.eos_token_id,
+                    top_token_ids=[tokenizer.eos_token_id]
+                ))
+            enforced_top_tokens = self.enforced_tokens.get_top_tokens()
+            enforced_token_ids = self.enforced_tokens.get_enforced_token_ids()
+
+            
+
+
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -920,6 +953,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             bad_words=self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
+            enforced_token_ids=enforced_token_ids,
+            enforced_tokens=enforced_top_tokens
         )
 
     @model_validator(mode="before")
@@ -1229,8 +1264,8 @@ class CompletionRequest(OpenAIBaseModel):
         default=None,
         description=(
             "If specified with 'logprobs', tokens are represented "
-            " as strings of the form 'token_id:{token_id}' so that tokens "
-            "that are not JSON-encodable can be identified."
+            " as plain token-id strings (e.g. '641') for compatibility with"
+            " enforced-token validation utilities and older vLLM variants."
         ),
     )
     return_token_ids: bool | None = Field(
@@ -2124,10 +2159,35 @@ class ChatCompletionLogProbsContent(ChatCompletionLogProb):
     # shared with the super class.
     field_names: ClassVar[set[str] | None] = None
     top_logprobs: list[ChatCompletionLogProb] = Field(default_factory=list)
+    # Integer weights (2^16 scale) for deterministic sampling verification
+    # Only populated when VLLM_DETERMINISTIC_SAMPLING=1 and logprobs requested
+    # Maps token ID (string) to integer weight
+    sampling_weights: Optional[dict[str, int]] = None
 
 
 class ChatCompletionLogProbs(OpenAIBaseModel):
     content: list[ChatCompletionLogProbsContent] | None = None
+
+
+class ValidationResult(OpenAIBaseModel):
+    """
+    Result of inference validation (for decentralized inference networks).
+
+    This is returned when a validator sends a request with enforced_tokens
+    containing validation data (logprobs and/or sampling_weights).
+
+    Attributes:
+        fraud: True if any validation check failed
+        distance: Normalized distance between executor and validator logprobs
+        correct_raw_logprobs: True if Stage 2 (logprob distribution) passed
+        correct_processed_logprobs: True if Stage 1a (weight consistency) passed
+        correct_sampling: True if Stage 1b (sampling verification) passed
+    """
+    fraud: bool = False
+    distance: float = 0.0
+    correct_raw_logprobs: bool = True
+    correct_processed_logprobs: bool = True
+    correct_sampling: bool = True
 
 
 class ChatCompletionResponseChoice(OpenAIBaseModel):
@@ -2159,6 +2219,9 @@ class ChatCompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    # Validation result for decentralized inference verification
+    # Only populated when enforced_tokens with validation data is provided
+    validation: ValidationResult | None = None
 
 
 class DeltaMessage(OpenAIBaseModel):
@@ -2195,6 +2258,9 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     usage: UsageInfo | None = Field(default=None)
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
+    # Validation result for decentralized inference verification
+    # Only populated in final chunk when enforced_tokens with validation data
+    validation: ValidationResult | None = None
 
 
 class TranscriptionResponseStreamChoice(OpenAIBaseModel):

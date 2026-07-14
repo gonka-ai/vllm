@@ -1,18 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.validation import EnforcedTokens
 
+if TYPE_CHECKING:
+    from vllm.v1.sample.deterministic_utils import Sha256CounterRNG
 
 @dataclass
 class SamplingMetadata:
     temperature: torch.Tensor | None
     all_greedy: bool
     all_random: bool
+    all_enforced: bool
+    mixed_enforced: bool
+
+    enforced_token_ids: dict[list[int]]
+    enforced_tokens: dict[EnforcedTokens]
+    enforced_req_ids: list[int]
 
     top_p: torch.Tensor | None
     top_k: torch.Tensor | None
@@ -42,3 +52,9 @@ class SamplingMetadata:
 
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
+
+    # Deterministic RNGs for cross-platform reproducible sampling (validation)
+    # When VLLM_DETERMINISTIC_SAMPLING=1, this contains Sha256CounterRNG
+    # instances keyed by request index
+    deterministic_rngs: "dict[int, Sha256CounterRNG]" = field(
+        default_factory=dict)
