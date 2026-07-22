@@ -2182,12 +2182,16 @@ class ValidationResult(OpenAIBaseModel):
         correct_raw_logprobs: True if Stage 2 (logprob distribution) passed
         correct_processed_logprobs: True if Stage 1a (weight consistency) passed
         correct_sampling: True if Stage 1b (sampling verification) passed
+        verdict: Three-valued Stage-1 verdict ("honest"/"fraud"/"inconclusive").
+            The boolean ``fraud`` remains for backward compatibility; ``verdict``
+            carries the Inconclusive state that ``fraud`` cannot (#1199).
     """
     fraud: bool = False
     distance: float = 0.0
     correct_raw_logprobs: bool = True
     correct_processed_logprobs: bool = True
     correct_sampling: bool = True
+    verdict: Optional[str] = None
 
 
 class ChatCompletionResponseChoice(OpenAIBaseModel):

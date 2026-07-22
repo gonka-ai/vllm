@@ -1806,18 +1806,28 @@ class OpenAIServingChat(OpenAIServing):
         """
         Perform validation when enforced_tokens contains validation data.
 
-        This implements the two-stage validation protocol:
-        - Stage 1a: Verify sampling_weights are consistent with logprobs
-        - Stage 1b: Verify token was sampled correctly from weights
-        - Stage 2: Compare probability distributions
+        Contract-faithful two-stage path (gonka-ai/gonka#1199 follow-up):
+        - Stage 1: replay the SIGNED logprobs per position via the decimal
+          pipeline (``verify_sequence``); three-valued Honest/Fraud/Inconclusive.
+        - Stage 2: MAE distance over the signed top-K support (``mae_distance``).
+
+        This replaces the legacy ``validation_logic.validate_full`` recompute
+        path (unfiltered float softmax, relative-diff distance, two-valued).
         """
-        from vllm.validation_logic import validate_full
+        from vllm.entrypoints.openai.protocol import ValidationResult
+        from vllm.validation_sampling import (
+            STAGE2_MAE_FRAUD_THRESHOLD,
+            Verdict,
+            mae_distance,
+            result_for_validator_error,
+            verify_sequence,
+        )
 
         enforced_tokens = request.enforced_tokens
         if not enforced_tokens or not enforced_tokens.has_validation_data():
             return None
 
-        # Get validator's logprobs from the model output
+        # Get validator's logprobs from the model output (Stage-2 source).
         validator_logprobs_list = []
         for output in final_res.outputs:
             if output.logprobs:
@@ -1829,31 +1839,60 @@ class OpenAIServingChat(OpenAIServing):
                             for tid, lp in step_logprobs.items()
                         })
 
-        # Derive seed string for sampling verification
-        # Use the same format as gpu_model_runner.py
+        # Base seed (same request-seed+prompt form as gpu_model_runner.py). The
+        # per-position seed is composed inside verify_sequence (Decision B =
+        # per-position). Chain-bound seed (S1) is a separate wiring item.
         prompt_repr = ",".join(
             str(t) for t in (final_res.prompt_token_ids or []))
         if request.seed is not None:
-            seed_str = f"{request.seed}|{prompt_repr}"
+            base_seed = f"{request.seed}|{prompt_repr}"
         else:
-            seed_str = prompt_repr
+            base_seed = prompt_repr
 
-        # `is not None`, not falsy: temperature 0 is greedy (§7), not unspecified.
+        # Resolved sampling params. `is not None`, not falsy: temperature 0 is
+        # greedy (§7), not unspecified. Normalize vLLM's "disabled" sentinels
+        # (top_p>=1, top_k<=0, min_p<=0) to None so the support-boundedness gate
+        # in verify_sequence sees the real filter set.
         temperature = (request.temperature
                        if request.temperature is not None else 1.0)
+        greedy = temperature == 0
+        req_top_p = getattr(request, "top_p", None)
+        top_p = str(req_top_p) if req_top_p is not None and req_top_p < 1.0 else None
+        req_top_k = getattr(request, "top_k", None)
+        top_k = int(req_top_k) if req_top_k is not None and req_top_k > 0 else None
+        req_min_p = getattr(request, "min_p", None)
+        min_p = str(req_min_p) if req_min_p is not None and req_min_p > 0 else None
 
         try:
-            result = validate_full(
-                artifact=enforced_tokens,
-                validator_logprobs=validator_logprobs_list,
-                seed_str=seed_str,
-                temperature=temperature,
+            # Stage 1: contract-faithful replay (three-valued).
+            seq = verify_sequence(
+                enforced_tokens.tokens, base_seed, str(temperature),
+                top_p=top_p, top_k=top_k, min_p=min_p, greedy=greedy,
             )
+            result = ValidationResult(verdict=seq.verdict.value)
+
+            if seq.verdict is Verdict.FRAUD:
+                result.fraud = True
+                result.correct_sampling = False
+                result.distance = 10.0
+                return result
+
+            # Stage 2: MAE distance over the signed support (non-enforcing;
+            # threshold is a Decision-D placeholder). Inconclusive Stage-1
+            # verdicts fall through to here and rely on the distance check.
+            executor_logprobs = [
+                t.logprobs for t in enforced_tokens.tokens
+                if t.logprobs is not None
+            ]
+            result.distance = mae_distance(
+                executor_logprobs, validator_logprobs_list)
+            if result.distance > STAGE2_MAE_FRAUD_THRESHOLD:
+                result.fraud = True
+                result.correct_raw_logprobs = False
             return result
         except Exception as e:
             # A validator-side error yields no verdict, never a silent pass/fail
             # about the executor. See result_for_validator_error (#1199).
-            from vllm.validation_sampling import result_for_validator_error
             logger.warning("Validation produced no verdict: %s", e)
             return result_for_validator_error(e)
 

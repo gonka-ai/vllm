@@ -14,17 +14,17 @@ The validation has two stages:
 2. Post-model validation (Stage 2):
    - Distance calculation: Compare executor vs validator logprob distributions
 
-STATUS: LEGACY / TRANSITIONAL PATH.
-``validate_full`` / ``validate_before_model`` here are the only end-to-end
-entry points today, but this path (a) recomputes weights from logprobs with
-plain float ``math.exp`` (no top_p/top_k/min_p filtering and no exact-2^16
-residual fix), and (b) is TWO-VALUED (boolean fraud), so it cannot emit the
-three-valued Honest/Fraud/Inconclusive verdict. The contract-faithful path is
-``vllm/validation_sampling.py`` (kept-set filtering + decimal pipeline +
-three-valued verdict); it currently has no sequence-level caller. Converging
-the two — retiring this legacy path in favour of validation_sampling — is a
-follow-up in gonka-ai/gonka#1199. Do NOT treat this module as the reference
-validator.
+STATUS: RETIRED FROM THE SERVING PATH (kept only for its unit tests).
+This path (a) recomputes weights from logprobs with plain float ``math.exp``
+(no top_p/top_k/min_p filtering and no exact-2^16 residual fix), and (b) is
+TWO-VALUED (boolean fraud), so it cannot emit the three-valued
+Honest/Fraud/Inconclusive verdict. The serving-layer orchestrator
+(``serving_chat._perform_validation``) now calls the contract-faithful path in
+``vllm/validation_sampling.py`` (``verify_sequence`` + ``mae_distance``:
+kept-set filtering, decimal pipeline, three-valued verdict, per-position seed,
+MAE-over-support distance). Convergence tracked in gonka-ai/gonka#1199. Do NOT
+re-wire this module into serving; it remains only so its existing tests keep
+documenting the old behaviour until they are ported/removed.
 """
 
 from __future__ import annotations

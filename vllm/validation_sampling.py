@@ -19,7 +19,7 @@ Scope:
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from vllm.v1.sample.deterministic_utils import (
     Sha256CounterRNG,
@@ -184,3 +184,161 @@ def result_for_validator_error(error: BaseException) -> None:
     treating a validator-side problem as inconclusive. Always None; `error` is
     for the caller to log."""
     return None
+
+
+# =============================================================================
+# Sequence-level orchestration (Stage-1 replay) + Stage-2 distance
+#
+# Converges the end-to-end validation onto this contract-faithful path, retiring
+# the legacy recompute path in ``validation_logic.py`` (gonka-ai/gonka#1199
+# follow-up items #1/#2/#3):
+#   - Stage-1 replays the SIGNED logprobs per position through the decimal
+#     pipeline (it never recomputes weights with an unfiltered float softmax).
+#   - RNG semantics: one seed per position (Decision B = per-position), so the
+#     variable draw-count of rejection sampling at one position cannot desync the
+#     replay of the rest of the sequence.
+#   - Stage-2 distance is MAE over the signed top-K support (Experiment 4), not
+#     the legacy relative-diff ratio.
+#   - Unbounded-support requests (no top_k and no min_p) carry no cheap Stage-1
+#     signal and are Inconclusive, deferred to Stage-2 (Experiment 2).
+# =============================================================================
+
+# Stage-2 fraud threshold on ``mae_distance``. PLACEHOLDER pending Decision D
+# (#1199): Experiments 4/5 put the honest floor near ~0.01 MAE and a clearly
+# different model near ~0.4-0.8, with int8 quantization a gray zone around
+# ~0.1-0.2. 0.25 accepts int8 as "the model" while still catching int4 and
+# cheaper models. The final value — and whether int8 counts as the model — is a
+# policy decision, NOT a measurement. Do not treat this as final/enforcing.
+STAGE2_MAE_FRAUD_THRESHOLD = 0.25
+
+
+@dataclass
+class SequenceResult:
+    """Aggregate verdict over a whole response."""
+
+    verdict: Verdict
+    fraud_position: int = -1
+    n_honest: int = 0
+    n_inconclusive: int = 0
+    reason: str = ""
+
+
+def _support_is_bounded(top_k: Optional[int], min_p: Optional[str]) -> bool:
+    """A request has bounded support iff ``top_k`` or ``min_p`` is active.
+
+    ``top_p`` alone (especially at high temperature) and pure-temperature
+    sampling have unbounded support — the nucleus can exceed the signed top-K, so
+    the reported set cannot faithfully reproduce the filter (Experiment 2). Such
+    requests get no cheap Stage-1 signal and are deferred to Stage-2.
+    """
+    if top_k is not None and top_k > 0:
+        return True
+    if min_p is not None:
+        try:
+            return float(min_p) > 0.0
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
+def verify_sequence(
+    tokens: List["EnforcedToken"],  # noqa: F821 — avoid importing torch-side model
+    base_seed_str: str,
+    temperature: str,
+    top_p: Optional[str],
+    top_k: Optional[int],
+    min_p: Optional[str],
+    *,
+    contract_version: str = SUPPORTED_CONTRACT_VERSION,
+    greedy: bool = False,
+) -> SequenceResult:
+    """Replay a whole response position-by-position and aggregate the verdict.
+
+    Aggregation (zero tolerance):
+      - any position FRAUD  -> FRAUD (reports the first such position)
+      - else >= 1 HONEST    -> HONEST (Inconclusive positions defer to Stage-2)
+      - else all Inconclusive -> INCONCLUSIVE (Stage-1 carries no signal)
+
+    The per-position seed is ``f"{base_seed_str}|{pos}"`` (Decision B resolved to
+    per-position: independent, O(1) replay, and immune to rejection-sampling
+    draw-count desync across positions). Each ``token`` is an ``EnforcedToken``
+    with ``.logprobs`` (signed) and ``.token`` (reported); ``top_p/top_k/min_p``
+    are the resolved request-level params.
+    """
+    if contract_version != SUPPORTED_CONTRACT_VERSION:
+        return SequenceResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"unsupported contract version {contract_version!r}")
+    if greedy:
+        return SequenceResult(
+            Verdict.INCONCLUSIVE,
+            reason="greedy (temperature 0): sequence check not applicable")
+    if not _support_is_bounded(top_k, min_p):
+        return SequenceResult(
+            Verdict.INCONCLUSIVE,
+            reason="unbounded support (no top_k/min_p): deferred to distance check")
+
+    n_honest = 0
+    n_inconclusive = 0
+    for pos, token in enumerate(tokens):
+        if token.logprobs is None:
+            n_inconclusive += 1
+            continue
+        seed_pos = f"{base_seed_str}|{pos}"
+        pr = verify_position(
+            token.logprobs, seed_pos, temperature,
+            top_p=top_p, top_k=top_k, min_p=min_p,
+            reported_token=token.token,
+            contract_version=contract_version,
+        )
+        if pr.verdict is Verdict.FRAUD:
+            return SequenceResult(
+                Verdict.FRAUD, fraud_position=pos,
+                n_honest=n_honest, n_inconclusive=n_inconclusive,
+                reason=pr.reason)
+        if pr.verdict is Verdict.HONEST:
+            n_honest += 1
+        else:
+            n_inconclusive += 1
+
+    if n_honest > 0:
+        return SequenceResult(
+            Verdict.HONEST, n_honest=n_honest, n_inconclusive=n_inconclusive)
+    return SequenceResult(
+        Verdict.INCONCLUSIVE, n_inconclusive=n_inconclusive,
+        reason="no replayable position (all inconclusive)")
+
+
+def mae_distance(
+    executor_logprobs: List[Dict[str, float]],
+    validator_logprobs: List[Dict[str, float]],
+) -> float:
+    """Stage-2 distance: mean over positions of the mean absolute logprob
+    difference over the executor's reported top-K support.
+
+    Replaces the legacy relative-diff ratio (``validation_logic.compute_distance``).
+    Experiment 4 (#1199 follow-up) showed MAE over the top-K support separates
+    honest from a wrong model by ~40-65x, while the sampled-token delta overlaps
+    and cannot gate. A token missing on the validator side is charged a large
+    penalty so a truncated/mismatched distribution reads as distant.
+    """
+    if not executor_logprobs:
+        return 0.0
+    if len(executor_logprobs) != len(validator_logprobs):
+        return 10.0  # length mismatch -> maximally distant
+
+    penalty = 10.0
+    per_position = []
+    for exec_lp, val_lp in zip(executor_logprobs, validator_logprobs):
+        if not exec_lp:
+            continue
+        diffs = [
+            abs(e - val_lp[tid]) if tid in val_lp else penalty
+            for tid, e in exec_lp.items()
+        ]
+        if diffs:
+            per_position.append(sum(diffs) / len(diffs))
+
+    if not per_position:
+        return 0.0
+    return sum(per_position) / len(per_position)
