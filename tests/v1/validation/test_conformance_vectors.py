@@ -164,7 +164,8 @@ def test_sequence_case_reproduces(case):
     result = vs.verify_sequence(
         toks, case["base_seed"], case["temperature"],
         top_p=case["top_p"], top_k=case["top_k"], min_p=case["min_p"],
-        contract_version=case["contract_version"], greedy=case["greedy"])
+        contract_version=case["contract_version"],
+        seed_domain=case["seed_domain"], greedy=case["greedy"])
 
     exp = case["expected"]
     assert result.verdict.value == exp["verdict"]

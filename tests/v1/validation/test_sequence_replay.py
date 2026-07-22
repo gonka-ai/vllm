@@ -114,6 +114,23 @@ def test_missing_logprobs_position_is_inconclusive_not_fraud():
     assert r.n_honest == len(_POS) - 1
 
 
+def test_unsupported_seed_domain_is_inconclusive():
+    # mirrors the Go validator's seed-domain gate (detsample.VerifyPosition).
+    r = verify_sequence(_honest_artifact(), _BASE_SEED, _TEMP,
+                        top_p=None, top_k=_TOP_K, min_p=None,
+                        seed_domain="some-other-domain")
+    assert r.verdict is Verdict.INCONCLUSIVE
+    assert "seed domain" in r.reason
+
+
+def test_zero_weights_raises_not_silent_fallback():
+    # §6.9: a degenerate all-zero weight vector must raise, not silently return
+    # the last index (matches the Go validator, which errors).
+    import pytest
+    with pytest.raises(ValueError):
+        sample_categorical_weights([0, 0, 0], Sha256CounterRNG.from_seed_string("z"))
+
+
 def test_support_boundedness_rule():
     assert _support_is_bounded(_TOP_K, None) is True
     assert _support_is_bounded(None, "0.02") is True

@@ -222,7 +222,11 @@ def sample_categorical_weights(weights: Sequence[int], rng: Sha256CounterRNG) ->
             last_nonzero = i
         total += w
     if total <= 0:
-        return len(weights) - 1
+        # Degenerate input (all weights zero). Raise rather than silently return
+        # the last index: in zero-tolerance replay a silent fallback would mask an
+        # upstream bug (§6.9). Matches the Go validator, which errors here; a
+        # validator catches it and returns Inconclusive, never Fraud.
+        raise ValueError("weights sum to zero")
 
     r = uint64_below(rng, total)
     cum = 0
@@ -262,7 +266,9 @@ class WeightedPrefixSampler:
 
     def sample(self, rng: Sha256CounterRNG) -> int:
         if self.total <= 0:
-            return len(self.prefix) - 1
+            # See sample_categorical_weights: raise rather than silently fall back
+            # to the last index (§6.9), consistent with the Go validator.
+            raise ValueError("weights sum to zero")
         r = uint64_below(rng, self.total)  # in [0,total)
         # find first i with prefix[i] > r
         i = bisect.bisect_right(self.prefix, r)

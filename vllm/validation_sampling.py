@@ -32,6 +32,12 @@ from vllm.v1.sample.deterministic_utils import (
 # Mirrors detsample.SupportedContractVersion (contract §0).
 SUPPORTED_CONTRACT_VERSION = "1.0.0"
 
+# The seed-derivation domain this validator can replay. An artifact declaring a
+# different domain is Inconclusive (version-unsupported), not Fraud. Must match
+# deterministic_utils._SEED_DOMAIN_TAG and detsample.SupportedSeedDomain (Go);
+# the conformance vectors' seed_derivation.domain_tag pins it, so drift is caught.
+SUPPORTED_SEED_DOMAIN = "gonka-deterministic-sampling-v1"
+
 
 def verify_sampling_from_logprobs(
     logprobs: Dict[str, float],
@@ -125,6 +131,7 @@ def verify_position(
     reported_token: str,
     *,
     contract_version: str = SUPPORTED_CONTRACT_VERSION,
+    seed_domain: str = SUPPORTED_SEED_DOMAIN,
     greedy: bool = False,
 ) -> PositionResult:
     """Replay one artifact position and classify it (Honest/Fraud/Inconclusive).
@@ -133,13 +140,14 @@ def verify_position(
     verdict, clause-for-clause with detsample.VerifyPosition (verify.go):
 
     1. contract-version mismatch -> Inconclusive (version-unsupported, §0)
-    2. greedy (temperature 0)    -> Inconclusive (§7: argmax bypasses the RNG,
+    2. seed-domain mismatch      -> Inconclusive (version-unsupported, §8)
+    3. greedy (temperature 0)    -> Inconclusive (§7: argmax bypasses the RNG,
        so the sequence check carries no signal)
-    3. non-positive/unparseable temperature with greedy unset -> Inconclusive
+    4. non-positive/unparseable temperature with greedy unset -> Inconclusive
        (an inconsistent artifact, not fraud)
-    4. replay error              -> Inconclusive (validator-side inability)
-    5. replay ok, token differs  -> Fraud (zero tolerance)
-    6. token matches             -> Honest
+    5. replay error              -> Inconclusive (validator-side inability)
+    6. replay ok, token differs  -> Fraud (zero tolerance)
+    7. token matches             -> Honest
 
     Scope: single position. Sequence/response-level aggregation is out of scope
     (not defined on the Go side yet).
@@ -148,6 +156,11 @@ def verify_position(
         return _inconclusive(
             f"unsupported contract version {contract_version!r} "
             f"(validator supports {SUPPORTED_CONTRACT_VERSION!r})")
+
+    if seed_domain != SUPPORTED_SEED_DOMAIN:
+        return _inconclusive(
+            f"unsupported seed domain {seed_domain!r} "
+            f"(validator supports {SUPPORTED_SEED_DOMAIN!r})")
 
     if greedy:
         return _inconclusive(
@@ -250,6 +263,7 @@ def verify_sequence(
     min_p: Optional[str],
     *,
     contract_version: str = SUPPORTED_CONTRACT_VERSION,
+    seed_domain: str = SUPPORTED_SEED_DOMAIN,
     greedy: bool = False,
 ) -> SequenceResult:
     """Replay a whole response position-by-position and aggregate the verdict.
@@ -269,6 +283,10 @@ def verify_sequence(
         return SequenceResult(
             Verdict.INCONCLUSIVE,
             reason=f"unsupported contract version {contract_version!r}")
+    if seed_domain != SUPPORTED_SEED_DOMAIN:
+        return SequenceResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"unsupported seed domain {seed_domain!r}")
     if greedy:
         return SequenceResult(
             Verdict.INCONCLUSIVE,
@@ -290,6 +308,7 @@ def verify_sequence(
             top_p=top_p, top_k=top_k, min_p=min_p,
             reported_token=token.token,
             contract_version=contract_version,
+            seed_domain=seed_domain,
         )
         if pr.verdict is Verdict.FRAUD:
             return SequenceResult(
