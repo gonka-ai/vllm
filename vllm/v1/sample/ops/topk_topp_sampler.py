@@ -86,6 +86,14 @@ class TopKTopPSampler(nn.Module):
         p = sampling_metadata.top_p
         deterministic_rngs = sampling_metadata.deterministic_rngs
 
+        # E1 + §6.6 fix: the deterministic path samples via the decimal pipeline
+        # over the RAW (pre-filter, post-temperature) logprobs in string token
+        # order — the identical computation the validator replays. Capture the raw
+        # logprobs before the float top-k/top-p mask is applied to `logits`.
+        pre_filter_logprobs = None
+        if deterministic_rngs:
+            pre_filter_logprobs = logits.log_softmax(dim=-1, dtype=torch.float32)
+
         logits = self.apply_top_k_top_p(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
@@ -96,20 +104,9 @@ class TopKTopPSampler(nn.Module):
 
         # Check for deterministic mode (VLLM_DETERMINISTIC_SAMPLING)
         if deterministic_rngs:
-            # E1 shadow: snapshot the RNGs *before* sampling so we can replay the
-            # decimal validator path from the identical state. Non-driving — the
-            # float path below is still what is returned.
-            snapshots = None
-            if envs.VLLM_DETERMINISTIC_SAMPLING_SHADOW:
-                from vllm.v1.sample.deterministic_utils import Sha256CounterRNG
-                snapshots = {
-                    i: Sha256CounterRNG(r.seed_bytes, r.counter)
-                    for i, r in deterministic_rngs.items()
-                }
-            sampled = deterministic_sample(probs, deterministic_rngs)
-            if snapshots is not None:
-                _log_e1_shadow_divergence(probs, snapshots, sampled)
-            return sampled, logits_to_return
+            return (deterministic_sample(pre_filter_logprobs, deterministic_rngs,
+                                         k, p),
+                    logits_to_return)
 
         return random_sample(probs, generators), logits_to_return
 
@@ -301,87 +298,77 @@ def random_sample(
     return probs.div_(q).argmax(dim=-1).view(-1)
 
 
-def deterministic_sample(
-    probs: torch.Tensor,
-    deterministic_rngs: dict[int, "Sha256CounterRNG"],
-) -> torch.Tensor:
-    """
-    Sample using SHA256-based deterministic RNG for cross-platform
-    reproducibility.
+# Signed support size the executor computes decimal weights over. Provisional —
+# the real value is the signed support-set contract (Decision D2, #1199).
+DETERMINISTIC_SUPPORT_K = 64
 
-    This function uses integer weights (quantized from probabilities) to ensure
-    identical sampling results across different platforms and implementations.
+
+def deterministic_sample(
+    logprobs: torch.Tensor,
+    deterministic_rngs: dict[int, "Sha256CounterRNG"],
+    top_k: torch.Tensor | None,
+    top_p: torch.Tensor | None,
+) -> torch.Tensor:
+    """Contract-faithful deterministic sampling (E1 + §6.6, gonka-ai/gonka#1199).
+
+    Replaces the old float `(probs*2^16).round()` + numeric-order path. Per row,
+    samples via the **decimal** pipeline over the raw (pre-filter, post-temperature)
+    logprobs, in canonical token-ID **string** order, with a **per-position** seed
+    `f"{base}|{pos}"` — the identical computation the chain validator replays, so an
+    honest artifact verifies HONEST (float weights + numeric order + single stream
+    diverged ~50–70%; see the fix decomposition).
+
+    ``logprobs`` is log_softmax BEFORE the top-k/top-p mask; the decimal pipeline
+    re-applies the filters (matching the validator). The per-request RNG's
+    ``counter`` is repurposed as the position index (advanced once per sampled
+    position); the actual draw uses a fresh RNG seeded from base|position.
 
     Args:
-        probs: Probability tensor of shape [batch_size, vocab_size]
-        deterministic_rngs: Dict mapping request index to Sha256CounterRNG
-
-    Returns:
-        Sampled token IDs tensor of shape [batch_size]
+        logprobs: raw logprobs [batch, vocab] (pre-filter, post-temperature)
+        deterministic_rngs: request-row -> Sha256CounterRNG (seed_bytes = base
+            seed; counter = position)
+        top_k, top_p: per-request filter tensors (or None)
     """
-    from vllm.v1.sample.deterministic_utils import sample_categorical_weights
+    from vllm.v1.sample.deterministic_utils import (
+        Sha256CounterRNG,
+        logprobs_to_weights,
+        sample_categorical_weights,
+    )
 
-    batch_size = probs.size(0)
-    device = probs.device
+    batch_size = logprobs.size(0)
+    device = logprobs.device
+    support_k = min(DETERMINISTIC_SUPPORT_K, logprobs.size(-1))
 
-    # Quantize probabilities to integer weights (2^16 scale) for reproducibility
-    # Using integer arithmetic ensures identical results across platforms
-    WEIGHT_SCALE = 2**16
-    weights = (probs * WEIGHT_SCALE).round().to(torch.int64)
-    weights_cpu = weights.cpu().numpy()
-
-    sampled_tokens = []
+    out: list[int] = []
     for i in range(batch_size):
-        if i in deterministic_rngs:
-            rng = deterministic_rngs[i]
-            # Convert to list and sample using integer weights
-            weight_list = weights_cpu[i].tolist()
-            token_id = sample_categorical_weights(weight_list, rng)
-        else:
-            # Fallback for requests without deterministic RNG (shouldn't happen
-            # when VLLM_DETERMINISTIC_SAMPLING is enabled, but handle gracefully)
-            token_id = probs[i].argmax().item()
-        sampled_tokens.append(token_id)
-
-    return torch.tensor(sampled_tokens, dtype=torch.int64, device=device)
-
-
-def _log_e1_shadow_divergence(
-    probs: torch.Tensor,
-    snapshots: dict[int, "Sha256CounterRNG"],
-    float_tokens: torch.Tensor,
-) -> None:
-    """E1 shadow (gonka-ai/gonka#1199): per deterministic row, compare the float
-    executor token with the decimal validator token sampled from the SAME RNG
-    state, and log how often they diverge. Non-driving — ``float_tokens`` is what
-    the caller returns. Cost is O(support) per row; gate with
-    VLLM_DETERMINISTIC_SAMPLING_SHADOW.
-    """
-    from vllm.v1.sample.deterministic_utils import decimal_token_from_probs
-
-    probs_cpu = probs.detach().to("cpu")
-    ft = float_tokens.detach().to("cpu").tolist()
-    diverged = 0
-    checked = 0
-    for i, rng in snapshots.items():
-        row = probs_cpu[i]
-        nz = (row > 0).nonzero(as_tuple=True)[0]
-        if nz.numel() == 0:
+        state = deterministic_rngs.get(i)
+        if state is None:
+            # No deterministic RNG for this row — fall back to argmax.
+            out.append(int(logprobs[i].argmax()))
             continue
-        try:
-            decimal_tok = int(decimal_token_from_probs(
-                nz.tolist(), row[nz].tolist(), rng))
-        except Exception as e:  # noqa: BLE001 — shadow must never break sampling
-            logger.warning("E1 shadow skipped a row: %s", e)
-            continue
-        checked += 1
-        if decimal_tok != int(ft[i]):
-            diverged += 1
-    if checked:
-        logger.info(
-            "E1 shadow: %d/%d deterministic positions diverge "
-            "(float executor vs decimal validator) = %.1f%%",
-            diverged, checked, 100.0 * diverged / checked)
+
+        base_seed = state.seed_bytes.decode("utf-8")
+        position = state.counter
+
+        topv, topi = torch.topk(logprobs[i], support_k)
+        lp = {str(int(t)): repr(float(v))
+              for t, v in zip(topi.tolist(), topv.tolist())}
+
+        tk = int(top_k[i]) if top_k is not None else None
+        if tk is not None and tk <= 0:
+            tk = None
+        tp = float(top_p[i]) if top_p is not None else None
+        tp_str = str(tp) if tp is not None and tp < 1.0 else None
+
+        weights = logprobs_to_weights(lp, "1.0", top_p=tp_str, top_k=tk, min_p=None)
+        tids = sorted(weights.keys())
+        weight_list = [weights[t] for t in tids]
+        rng = Sha256CounterRNG.from_seed_string(f"{base_seed}|{position}")
+        out.append(int(tids[sample_categorical_weights(weight_list, rng)]))
+
+        state.counter += 1  # advance the per-request position
+
+    return torch.tensor(out, dtype=torch.int64, device=device)
 
 
 def flashinfer_sample(
