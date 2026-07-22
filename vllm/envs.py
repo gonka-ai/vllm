@@ -225,6 +225,7 @@ if TYPE_CHECKING:
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_FLAT_LOGPROBS: bool = False
     VLLM_DETERMINISTIC_SAMPLING: bool = False
+    VLLM_DETERMINISTIC_SAMPLING_SHADOW: bool = False
 
 
 def get_default_cache_root():
@@ -1497,6 +1498,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - Same seed + same prompt = same output tokens (reproducible)
     "VLLM_DETERMINISTIC_SAMPLING":
     lambda: bool(int(os.getenv("VLLM_DETERMINISTIC_SAMPLING", "0"))),
+
+    # E1 shadow mode (gonka-ai/gonka#1199). When set alongside
+    # VLLM_DETERMINISTIC_SAMPLING, the executor still samples via the float
+    # weight path (unchanged behaviour), but additionally recomputes the decimal
+    # validator-pipeline token per position from the SAME RNG state and logs how
+    # often the two diverge. Non-driving; for collecting float-vs-decimal
+    # divergence data before the decimal path becomes the artifact source.
+    "VLLM_DETERMINISTIC_SAMPLING_SHADOW":
+    lambda: bool(int(os.getenv("VLLM_DETERMINISTIC_SAMPLING_SHADOW", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import math
 import struct
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
@@ -465,3 +466,31 @@ def decimal_sample_from_logprobs(
 
     idx = sample_categorical_weights(weight_list, rng)
     return sorted_tids[idx]
+
+
+def decimal_token_from_probs(
+    token_ids: Sequence[int],
+    probs: Sequence[float],
+    rng: Sha256CounterRNG,
+) -> str:
+    """E1 shadow: the token the decimal validator pipeline would sample from an
+    already temperature/filter-applied distribution, for comparison against the
+    float executor path (``(probs*2^16).round()``).
+
+    Feed the *nonzero support* of the post-filter distribution as parallel
+    ``token_ids`` and ``probs``. This runs the decimal softmax+quantize with
+    temperature 1 and no further filter (the temperature/filters are already in
+    the probs), and samples in canonical token-ID-string order — exactly what the
+    validator does — so a divergence from the float path is the E1 (float vs
+    decimal, plus token-order) effect. ``rng`` is advanced by one sample; pass a
+    snapshot to avoid disturbing the executor's live RNG.
+    """
+    support = {
+        str(int(t)): repr(math.log(float(p)))
+        for t, p in zip(token_ids, probs)
+        if p > 0.0
+    }
+    weights = logprobs_to_weights(support, "1.0")
+    sorted_tids = sorted(weights.keys())
+    weight_list = [weights[tid] for tid in sorted_tids]
+    return sorted_tids[sample_categorical_weights(weight_list, rng)]

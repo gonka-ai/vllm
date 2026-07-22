@@ -96,7 +96,20 @@ class TopKTopPSampler(nn.Module):
 
         # Check for deterministic mode (VLLM_DETERMINISTIC_SAMPLING)
         if deterministic_rngs:
-            return deterministic_sample(probs, deterministic_rngs), logits_to_return
+            # E1 shadow: snapshot the RNGs *before* sampling so we can replay the
+            # decimal validator path from the identical state. Non-driving — the
+            # float path below is still what is returned.
+            snapshots = None
+            if envs.VLLM_DETERMINISTIC_SAMPLING_SHADOW:
+                from vllm.v1.sample.deterministic_utils import Sha256CounterRNG
+                snapshots = {
+                    i: Sha256CounterRNG(r.seed_bytes, r.counter)
+                    for i, r in deterministic_rngs.items()
+                }
+            sampled = deterministic_sample(probs, deterministic_rngs)
+            if snapshots is not None:
+                _log_e1_shadow_divergence(probs, snapshots, sampled)
+            return sampled, logits_to_return
 
         return random_sample(probs, generators), logits_to_return
 
@@ -331,6 +344,44 @@ def deterministic_sample(
         sampled_tokens.append(token_id)
 
     return torch.tensor(sampled_tokens, dtype=torch.int64, device=device)
+
+
+def _log_e1_shadow_divergence(
+    probs: torch.Tensor,
+    snapshots: dict[int, "Sha256CounterRNG"],
+    float_tokens: torch.Tensor,
+) -> None:
+    """E1 shadow (gonka-ai/gonka#1199): per deterministic row, compare the float
+    executor token with the decimal validator token sampled from the SAME RNG
+    state, and log how often they diverge. Non-driving — ``float_tokens`` is what
+    the caller returns. Cost is O(support) per row; gate with
+    VLLM_DETERMINISTIC_SAMPLING_SHADOW.
+    """
+    from vllm.v1.sample.deterministic_utils import decimal_token_from_probs
+
+    probs_cpu = probs.detach().to("cpu")
+    ft = float_tokens.detach().to("cpu").tolist()
+    diverged = 0
+    checked = 0
+    for i, rng in snapshots.items():
+        row = probs_cpu[i]
+        nz = (row > 0).nonzero(as_tuple=True)[0]
+        if nz.numel() == 0:
+            continue
+        try:
+            decimal_tok = int(decimal_token_from_probs(
+                nz.tolist(), row[nz].tolist(), rng))
+        except Exception as e:  # noqa: BLE001 — shadow must never break sampling
+            logger.warning("E1 shadow skipped a row: %s", e)
+            continue
+        checked += 1
+        if decimal_tok != int(ft[i]):
+            diverged += 1
+    if checked:
+        logger.info(
+            "E1 shadow: %d/%d deterministic positions diverge "
+            "(float executor vs decimal validator) = %.1f%%",
+            diverged, checked, 100.0 * diverged / checked)
 
 
 def flashinfer_sample(
