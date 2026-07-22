@@ -332,9 +332,11 @@ def mae_distance(
     for exec_lp, val_lp in zip(executor_logprobs, validator_logprobs):
         if not exec_lp:
             continue
+        # Sum over sorted token IDs so the float accumulation order is identical
+        # to the Go validator's (byte-exact cross-language distance).
         diffs = [
-            abs(e - val_lp[tid]) if tid in val_lp else penalty
-            for tid, e in exec_lp.items()
+            abs(exec_lp[tid] - val_lp[tid]) if tid in val_lp else penalty
+            for tid in sorted(exec_lp)
         ]
         if diffs:
             per_position.append(sum(diffs) / len(diffs))

@@ -45,6 +45,37 @@ def _load_du():
 du = _load_du()
 
 
+def _load_validation_sampling():
+    """Load validation_sampling by path so the generator can compute the
+    reference *sequence* verdicts and distances (stubs the vllm package tree so
+    its ``from vllm.v1.sample.deterministic_utils import ...`` resolves to du)."""
+    import types
+    for pkg in ("vllm", "vllm.v1", "vllm.v1.sample"):
+        sys.modules.setdefault(pkg, types.ModuleType(pkg))
+    sys.modules["vllm.v1.sample.deterministic_utils"] = du
+    sys.modules["vllm.v1.sample"].deterministic_utils = du
+    path = os.path.join(_REPO_ROOT, "vllm", "validation_sampling.py")
+    spec = importlib.util.spec_from_file_location("validation_sampling", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["validation_sampling"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+vs = _load_validation_sampling()
+SEED_DOMAIN = "gonka-deterministic-sampling-v1"
+
+
+class _Tok:
+    """Duck-typed EnforcedToken stand-in (verify_sequence reads .token/.logprobs)."""
+
+    __slots__ = ("token", "logprobs")
+
+    def __init__(self, token, logprobs):
+        self.token = token
+        self.logprobs = logprobs
+
+
 def _canonical(f: float) -> str:
     """The one float->string conversion (contract §1)."""
     return repr(f)
@@ -159,6 +190,123 @@ def _iter_uint64_below(seed: str, n: int, count: int) -> list:
     return [du.uint64_below(rng, n) for _ in range(count)]
 
 
+# ---------------------------------------------------------------------------- #
+# Sequence-level cases: pin the per-position seed composition (``base|pos``),
+# the three-valued aggregation, and the unbounded/greedy/version gates. The
+# reference (validation_sampling.verify_sequence) computes the expected verdict.
+# ---------------------------------------------------------------------------- #
+
+_SEQ_LOGPROBS = [
+    {"5": "-0.5", "10": "-1.2", "2": "-2.5", "100": "-3.9", "7": "-4.1"},
+    {"3": "-0.3", "42": "-1.1", "9": "-2.2", "11": "-3.0", "1": "-4.5"},
+    {"8": "-0.7", "6": "-1.5", "4": "-2.0", "20": "-2.9", "15": "-3.3"},
+]
+_SEQ_BASE_SEED = "42|[1,2,3]"
+
+_SEQ_CASES = [
+    {"name": "honest_top_k", "top_k": 20},
+    {"name": "honest_min_p", "min_p": "0.02"},
+    {"name": "fraud_at_pos_1", "top_k": 20, "tamper": {"pos": 1, "token": "999999"}},
+    {"name": "honest_with_missing_position", "top_k": 20, "drop": [1]},
+    {"name": "inconclusive_unbounded_top_p", "top_p": "0.9"},  # no top_k/min_p
+    {"name": "inconclusive_greedy", "top_k": 20, "greedy": True, "temperature": "0"},
+    {"name": "inconclusive_bad_version", "top_k": 20, "contract_version": "9.9.9"},
+]
+
+
+def _honest_token(logprobs, pos, temperature, top_p, top_k, min_p):
+    rng = du.Sha256CounterRNG.from_seed_string(f"{_SEQ_BASE_SEED}|{pos}")
+    return du.decimal_sample_from_logprobs(
+        logprobs, rng, temperature, top_p=top_p, top_k=top_k, min_p=min_p)
+
+
+def _run_seq_case(case: Dict) -> Dict:
+    temperature = case.get("temperature", "1.0")
+    top_p = case.get("top_p")
+    top_k = case.get("top_k")
+    min_p = case.get("min_p")
+    greedy = case.get("greedy", False)
+    version = case.get("contract_version", CONTRACT_VERSION)
+    drop = set(case.get("drop", []))
+    tamper = case.get("tamper")
+
+    # Only cases that actually replay (bounded, non-greedy, supported version)
+    # need honest tokens; the gated cases short-circuit before touching them.
+    replays = (not greedy and version == CONTRACT_VERSION
+               and vs._support_is_bounded(top_k, min_p))
+
+    # The vector stores logprobs as canonical strings (contract §1) for the Go
+    # side. verify_sequence takes floats (production EnforcedToken.logprobs) and
+    # re-canonicalizes via repr; since repr(float(canonical)) == canonical, both
+    # sides see the identical strings.
+    positions_out = []
+    toks = []
+    for i, lp_str in enumerate(_SEQ_LOGPROBS):
+        if i in drop:
+            positions_out.append({"logprobs": None, "reported_token": ""})
+            toks.append(_Tok("", None))
+            continue
+        lp_float = {tid: float(s) for tid, s in lp_str.items()}
+        if replays:
+            tok = _honest_token(lp_str, i, temperature, top_p, top_k, min_p)
+        else:
+            tok = next(iter(lp_str))  # placeholder; never replayed
+        if tamper and tamper["pos"] == i:
+            tok = tamper["token"]
+        positions_out.append({"logprobs": lp_str, "reported_token": tok})
+        toks.append(_Tok(tok, lp_float))
+
+    result = vs.verify_sequence(
+        toks, _SEQ_BASE_SEED, temperature,
+        top_p=top_p, top_k=top_k, min_p=min_p,
+        contract_version=version, greedy=greedy)
+
+    return {
+        "name": case["name"],
+        "base_seed": _SEQ_BASE_SEED,
+        "contract_version": version,
+        "seed_domain": SEED_DOMAIN,
+        "temperature": temperature,
+        "top_p": top_p,
+        "top_k": top_k,
+        "min_p": min_p,
+        "greedy": greedy,
+        "positions": positions_out,
+        "expected": {
+            "verdict": result.verdict.value,
+            "fraud_position": result.fraud_position,
+            "n_honest": result.n_honest,
+            "n_inconclusive": result.n_inconclusive,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------- #
+# Distance cases: pin the Stage-2 MAE-over-support metric.
+# ---------------------------------------------------------------------------- #
+
+_DIST_P0 = {"5": -0.5, "10": -1.2, "2": -2.5, "100": -3.9, "7": -4.1}
+_DIST_P1 = {"3": -0.3, "42": -1.1, "9": -2.2, "11": -3.0, "1": -4.5}
+_DIST_P0_SHIFTED = {t: v - 0.5 for t, v in _DIST_P0.items()}
+_DIST_P0_PARTIAL = {t: v for t, v in list(_DIST_P0.items())[:-1]}  # drop one token
+
+_DIST_CASES = [
+    {"name": "identical", "executor": [_DIST_P0], "validator": [_DIST_P0]},
+    {"name": "uniform_shift", "executor": [_DIST_P0], "validator": [_DIST_P0_SHIFTED]},
+    {"name": "length_mismatch", "executor": [_DIST_P0, _DIST_P1], "validator": [_DIST_P0]},
+    {"name": "missing_token", "executor": [_DIST_P0], "validator": [_DIST_P0_PARTIAL]},
+]
+
+
+def _run_dist_case(case: Dict) -> Dict:
+    return {
+        "name": case["name"],
+        "executor": case["executor"],
+        "validator": case["validator"],
+        "expected_mae": vs.mae_distance(case["executor"], case["validator"]),
+    }
+
+
 def build() -> Dict:
     rng_ref_seed = "reference_seed_v1"
     doc = {
@@ -224,6 +372,13 @@ def build() -> Dict:
                 {"inference_id": "x" * 257, "reason": "too long (>256)"},
             ],
         },
+        # Sequence-level replay: per-position seed composition + three-valued
+        # aggregation + unbounded/greedy/version gates (validation_sampling.
+        # verify_sequence / detsample.VerifySequence).
+        "sequence_cases": [_run_seq_case(c) for c in _SEQ_CASES],
+        # Stage-2 MAE-over-support distance (validation_sampling.mae_distance /
+        # detsample.MAEDistance).
+        "distance_cases": [_run_dist_case(c) for c in _DIST_CASES],
     }
     return doc
 
@@ -235,10 +390,18 @@ def main() -> None:
         json.dump(doc, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
     print(f"wrote {_OUT_PATH}")
-    print(f"  contract_version={doc['contract_version']} cases={len(doc['cases'])}")
+    print(f"  contract_version={doc['contract_version']} cases={len(doc['cases'])} "
+          f"sequence_cases={len(doc['sequence_cases'])} "
+          f"distance_cases={len(doc['distance_cases'])}")
     for c in doc["cases"]:
         assert c["expected_weight_sum"] == du.WEIGHT_SCALE, c["name"]
         print(f"  {c['name']:24} -> token={c['expected_token']}")
+    for c in doc["sequence_cases"]:
+        e = c["expected"]
+        print(f"  seq {c['name']:32} -> {e['verdict']} "
+              f"(fraud_pos={e['fraud_position']}, honest={e['n_honest']})")
+    for c in doc["distance_cases"]:
+        print(f"  dist {c['name']:24} -> mae={c['expected_mae']}")
 
 
 if __name__ == "__main__":

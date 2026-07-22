@@ -38,10 +38,40 @@ def _load_du():
 
 du = _load_du()
 
+
+def _load_vs(du_mod):
+    """Load validation_sampling by path (torch-free), stubbing the vllm package
+    tree so its ``from vllm.v1.sample.deterministic_utils import ...`` resolves."""
+    import types
+    for pkg in ("vllm", "vllm.v1", "vllm.v1.sample"):
+        sys.modules.setdefault(pkg, types.ModuleType(pkg))
+    sys.modules["vllm.v1.sample.deterministic_utils"] = du_mod
+    sys.modules["vllm.v1.sample"].deterministic_utils = du_mod
+    path = os.path.join(_REPO_ROOT, "vllm", "validation_sampling.py")
+    spec = importlib.util.spec_from_file_location("validation_sampling", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["validation_sampling"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+vs = _load_vs(du)
+
+
+class _Tok:
+    """Duck-typed EnforcedToken stand-in (verify_sequence reads .token/.logprobs)."""
+
+    def __init__(self, token, logprobs):
+        self.token = token
+        self.logprobs = logprobs
+
+
 with open(_VECTORS) as fh:
     VECTORS = json.load(fh)
 
 CASES = VECTORS["cases"]
+SEQUENCE_CASES = VECTORS["sequence_cases"]
+DISTANCE_CASES = VECTORS["distance_cases"]
 
 
 def test_weight_scale_matches_contract():
@@ -116,3 +146,35 @@ def test_reproducible_across_runs():
         c["logprobs"], du.Sha256CounterRNG.from_seed_string(c["seed_str"]),
         c["temperature"], **kw)
     assert a == b
+
+
+@pytest.mark.parametrize("case", SEQUENCE_CASES, ids=lambda c: c["name"])
+def test_sequence_case_reproduces(case):
+    """verify_sequence reproduces the committed per-position-seed aggregation.
+    Logprobs are stored as canonical strings; parsed to float here because
+    repr(float(canonical)) == canonical, so the pipeline sees the same strings
+    the Go validator does."""
+    toks = []
+    for pos in case["positions"]:
+        lp = pos["logprobs"]
+        lp_float = ({tid: float(s) for tid, s in lp.items()}
+                    if lp is not None else None)
+        toks.append(_Tok(pos["reported_token"], lp_float))
+
+    result = vs.verify_sequence(
+        toks, case["base_seed"], case["temperature"],
+        top_p=case["top_p"], top_k=case["top_k"], min_p=case["min_p"],
+        contract_version=case["contract_version"], greedy=case["greedy"])
+
+    exp = case["expected"]
+    assert result.verdict.value == exp["verdict"]
+    assert result.fraud_position == exp["fraud_position"]
+    assert result.n_honest == exp["n_honest"]
+    assert result.n_inconclusive == exp["n_inconclusive"]
+
+
+@pytest.mark.parametrize("case", DISTANCE_CASES, ids=lambda c: c["name"])
+def test_distance_case_reproduces(case):
+    """mae_distance reproduces the committed Stage-2 distance bit-for-bit."""
+    got = vs.mae_distance(case["executor"], case["validator"])
+    assert got == case["expected_mae"]
