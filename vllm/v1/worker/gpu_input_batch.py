@@ -574,7 +574,6 @@ class InputBatch:
         self.num_logprobs.pop(req_id, None)
         self.logprob_token_ids.pop(req_id, None)
         self.logprobs_modes.pop(req_id, None)
-        self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
         if self.prev_req_id_to_index is not None:
             self.prev_req_id_to_index.pop(req_id, None)
 
