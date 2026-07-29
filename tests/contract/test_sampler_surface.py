@@ -27,6 +27,14 @@ import inspect
 import pytest
 
 
+def test_completion_request_forwards_logprobs_mode() -> None:
+    mod = importlib.import_module("vllm.entrypoints.openai.completion.protocol")
+    request = mod.CompletionRequest(
+        model="test", prompt="test", logprobs_mode="processed_logprobs"
+    )
+    assert request.to_sampling_params(1).logprobs_mode == "processed_logprobs"
+
+
 def test_sampling_params_has_poc_fields() -> None:
     """Pin the per-request SamplingParams fields the plugin sets."""
     pytest.importorskip("vllm")
