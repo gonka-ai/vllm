@@ -107,6 +107,7 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
     bad_words: list[str] = Field(default_factory=list)
+    logprobs_mode: Literal["raw_logprobs", "processed_logprobs"] | None = None
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
@@ -374,6 +375,7 @@ class CompletionRequest(OpenAIBaseModel):
             stop=self.stop,
             stop_token_ids=stop_token_ids,
             logprobs=None if self.logprob_token_ids else self.logprobs,
+            logprobs_mode=self.logprobs_mode,
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,

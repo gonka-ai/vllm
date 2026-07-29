@@ -161,6 +161,10 @@ class MultiprocExecutor(Executor):
                 self.world_size,
                 self.local_world_size,
                 max_chunk_bytes=max_chunk_bytes,
+                # 64 (default 10): a briefly-slow TP reader starves the writer
+                # (EngineCore) under burst load -> "No available shared memory
+                # broadcast block" engine stalls. Costs 64 x 16 MiB /dev/shm.
+                max_chunks=64,
                 connect_ip=mq_connect_ip,
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()

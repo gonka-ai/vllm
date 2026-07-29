@@ -517,7 +517,7 @@ class GroupCoordinator:
         self.mq_broadcaster: MessageQueue | None = None
         if use_message_queue_broadcaster and self.world_size > 1:
             self.mq_broadcaster = MessageQueue.create_from_process_group(
-                self.cpu_group, 1 << 22, 6
+                self.cpu_group, 1 << 22, 64
             )
 
         # TODO(#35915): Remove is_tpu() check once tpu_inference
@@ -562,7 +562,7 @@ class GroupCoordinator:
         return MessageQueue.create_from_process_group(
             self.cpu_group,
             1 << 22,
-            6,
+            64,
             writer_rank=writer_rank,
             external_writer_handle=external_writer_handle,
             blocking=blocking,
@@ -576,7 +576,7 @@ class GroupCoordinator:
         return MessageQueue.create_from_process_group_single_reader(
             self.cpu_group,
             1 << 22,
-            6,
+            64,
             reader_rank=self.ranks[reader_rank_in_group],
             blocking=blocking,
         )

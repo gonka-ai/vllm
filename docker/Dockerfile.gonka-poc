@@ -1,0 +1,52 @@
+# Composes the image the Gonka network runs: stock vLLM + the in-tree sampler
+# residual from this repository + the out-of-tree gonka-poc plugin.
+#
+#   docker build -f docker/Dockerfile.gonka-poc -t vllm-poc:0.25.1 .
+#
+# PoC compute logic (nonce partitioning, seeded RNG, Householder scoring, L2 and
+# binomial validation, DeepSeek-V4 support) lives in the plugin. Only the sampler
+# surfaces that have no public extension point live in this repository.
+
+ARG BASE_IMAGE=vllm/vllm-openai:v0.25.1
+FROM ${BASE_IMAGE}
+
+# The plugin reaches workers over collective_rpc with payloads that are not
+# msgpack-encodable, so the engine's message bus has to allow pickle. Set here
+# because the image is built for that workload; a general-purpose deployment
+# should not carry it. Unsetting it disables the PoC path rather than degrading
+# it silently.
+ENV VLLM_ALLOW_INSECURE_SERIALIZATION=1
+# NVFP4 / FP8 fast paths on Blackwell (B200/B300/RTX PRO 6000); harmless elsewhere.
+ENV VLLM_USE_FLASHINFER_MOE_FP4=1
+ENV VLLM_USE_FLASHINFER_MOE_FP8=1
+
+# Overlay the residual .py files onto the pre-built package, keeping compiled
+# .so. The version guard matters: .py from one minor over .so from another
+# either fails at import or, worse, half-works.
+ARG EXPECTED_VLLM_VERSION=0.25.1
+COPY ./vllm /tmp/vllm-src
+RUN INSTALLED=$(python3 -c "import vllm; print(vllm.__version__)") \
+    && case "$INSTALLED" in "${EXPECTED_VLLM_VERSION}"*) ;; \
+         *) echo "ERROR: base image ships vllm $INSTALLED, residual targets ${EXPECTED_VLLM_VERSION}"; exit 1 ;; \
+       esac \
+    && VLLM_DIR=$(python3 -c "import vllm, os; print(os.path.dirname(vllm.__file__))") \
+    && [ -d "$VLLM_DIR" ] || (echo "ERROR: vllm not importable"; exit 1) \
+    && cd /tmp/vllm-src \
+    && find . -name "*.py" | tar -cf - -T - | tar -xf - -C "$VLLM_DIR/" \
+    && rm -rf /tmp/vllm-src
+
+# Select the V1 model runner. vLLM 0.25 ships a parallel V2 runner with its own
+# sampler, which does not implement enforced tokens or per-request logprobs
+# mode, so a replay request served by it would return a plausible completion
+# that enforced nothing.
+ENV VLLM_USE_V2_MODEL_RUNNER=0
+
+# The out-of-tree plugin, pinned to a tag rather than a branch, which would
+# resolve to whatever HEAD it has at build time. Lives in the gonka-ai
+# organisation as of 2026-07-28; the distribution is still named gonka-poc,
+# so only the source URL moved.
+ARG GONKA_POC_REPO=gonka-ai/gonka-vllm-plugins
+ARG GONKA_POC_REF=v0.1.1
+RUN pip install --no-cache-dir --no-deps \
+      "gonka-poc @ https://github.com/${GONKA_POC_REPO}/archive/refs/tags/${GONKA_POC_REF}.tar.gz" \
+    && pip install --no-cache-dir "aiohttp>=3.9" "scipy>=1.10"
