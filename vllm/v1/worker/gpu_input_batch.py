@@ -1006,10 +1006,10 @@ class InputBatch:
                 num_reqs, dtype=torch.bool, device=self.device
             )
             for i in range(num_reqs):
-                req_id = self._req_ids[i]
-                if req_id is not None:
+                batch_req_id = self._req_ids[i]
+                if batch_req_id is not None:
                     logprobs_is_processed[i] = (
-                        self.logprobs_modes.get(req_id) == "processed_logprobs"
+                        self.logprobs_modes.get(batch_req_id) == "processed_logprobs"
                     )
 
         return SamplingMetadata(

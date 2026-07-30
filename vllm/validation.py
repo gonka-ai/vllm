@@ -1,13 +1,21 @@
-"""EnforcedToken support for gonka-style inference validation."""
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Enforced-token support for Gonka inference validation."""
 
 from typing import Any
 
 from pydantic import BaseModel, Field
 
+# Bound replay work; request-body limits belong to the proxy.
+MAX_ENFORCED_TOKENS = 32768
+MAX_TOP_TOKENS_PER_POSITION = 64
+
 
 class EnforcedToken(BaseModel):
     token: str
-    top_tokens: list[str] = Field(default_factory=list)
+    top_tokens: list[str] = Field(
+        default_factory=list, max_length=MAX_TOP_TOKENS_PER_POSITION
+    )
     token_id: int | None = Field(default=None, exclude=True)
     top_token_ids: list[int] = Field(default_factory=list, exclude=True)
 
@@ -20,7 +28,7 @@ class EnforcedToken(BaseModel):
         except ValueError:
             # Fallback: tokenize the string
             ids = tokenizer.encode(self.token, add_special_tokens=False)
-            self.token_id = ids[0] if ids else 0
+            self.token_id = ids[0] if ids else None
             self.top_token_ids = []
             for t in self.top_tokens:
                 t_ids = tokenizer.encode(t, add_special_tokens=False)
@@ -29,7 +37,7 @@ class EnforcedToken(BaseModel):
 
 
 class EnforcedTokens(BaseModel):
-    tokens: list[EnforcedToken]
+    tokens: list[EnforcedToken] = Field(max_length=MAX_ENFORCED_TOKENS)
 
     def encode(self, tokenizer) -> None:
         for token in self.tokens:
@@ -45,9 +53,10 @@ class EnforcedTokens(BaseModel):
         return cls(tokens=tokens)
 
     def get_enforced_token_ids(self) -> list[int]:
-        if not self.tokens or self.tokens[0].token_id is None:
+        token_ids = [token.token_id for token in self.tokens]
+        if not token_ids or any(token_id is None for token_id in token_ids):
             raise ValueError("Enforced tokens are not encoded")
-        return [token.token_id for token in self.tokens]
+        return [token_id for token_id in token_ids if token_id is not None]
 
     def detect_logprobs_mode(self, threshold: float = 0.10) -> str | None:
         """Classify original inference logprobs mode from top_token_ids.
@@ -73,3 +82,17 @@ class EnforcedTokens(BaseModel):
             return None
         ratio = low_id_count / total
         return "processed_logprobs" if ratio > threshold else "raw_logprobs"
+
+
+def validate_enforced_token_ids(token_ids: list[int], vocab_size: int) -> None:
+    """Reject replay ids that cannot be embedded."""
+    for position, token_id in enumerate(token_ids):
+        if (
+            isinstance(token_id, bool)
+            or not isinstance(token_id, int)
+            or not 0 <= token_id < vocab_size
+        ):
+            raise ValueError(
+                f"invalid enforced token at position {position}: "
+                f"{token_id!r} not in [0, {vocab_size})"
+            )

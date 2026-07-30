@@ -81,6 +81,7 @@ class Sampler(nn.Module):
         # Determine effective logprobs mode.
         # Priority: logprobs_mode_override (RejectionSampler) >
         #           batch_logprobs_mode (per-request) > deployment default.
+        effective_mode: str
         if logprobs_mode_override is not None:
             effective_mode = logprobs_mode_override
             is_mixed = False
@@ -178,6 +179,7 @@ class Sampler(nn.Module):
         else:
             # Mixed mode: gather from both raw and processed, merge per row.
             lp_mask = sampling_metadata.logprobs_is_processed
+            assert lp_mask is not None
             if num_logprobs == -1:
                 lp = torch.where(
                     lp_mask.unsqueeze(-1),
