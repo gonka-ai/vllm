@@ -190,6 +190,9 @@ class XgrammarGrammar(StructuredOutputGrammar):
 
         Returns the prefix list of tokens that are accepted by the FSM.
         """
+        if self._grammar_failed:
+            # A failed matcher must not reject speculative tokens.
+            return list(tokens)
         accepted_tokens = []
         for token in tokens:
             if self.matcher.accept_token(token):
@@ -210,6 +213,8 @@ class XgrammarGrammar(StructuredOutputGrammar):
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         if self._grammar_failed:
+            # Clear the reused row; -1 allows every token.
+            bitmask[idx].fill_(-1)
             return
         self.matcher.fill_next_token_bitmask(bitmask, idx)
 
