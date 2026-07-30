@@ -232,6 +232,7 @@ if TYPE_CHECKING:
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_MQ_MAX_CHUNKS: int | None = None
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
@@ -1739,6 +1740,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # processes via zmq.
     "VLLM_MQ_MAX_CHUNK_BYTES_MB": lambda: int(
         os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")
+    ),
+    # Number of chunks in a shared-memory message-queue ring. None keeps each
+    # call site's own default. Raise it when a transiently slow reader starves
+    # the writer under burst load ("No available shared memory broadcast
+    # block"); the cost is linear in /dev/shm, per ring, per engine.
+    "VLLM_MQ_MAX_CHUNKS": lambda: (
+        int(os.environ["VLLM_MQ_MAX_CHUNKS"])
+        if "VLLM_MQ_MAX_CHUNKS" in os.environ
+        else None
     ),
     # Timeout in seconds for execute_model RPC calls in multiprocessing
     # executor (only applies when TP > 1).

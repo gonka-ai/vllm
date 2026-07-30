@@ -161,10 +161,20 @@ class MultiprocExecutor(Executor):
                 self.world_size,
                 self.local_world_size,
                 max_chunk_bytes=max_chunk_bytes,
-                # 64 (default 10): a briefly-slow TP reader starves the writer
-                # (EngineCore) under burst load -> "No available shared memory
-                # broadcast block" engine stalls. Costs 64 x 16 MiB /dev/shm.
-                max_chunks=64,
+                # Sized by VLLM_MQ_MAX_CHUNKS. Raising it is what stopped a
+                # large MoE model (Kimi-K2.6, TP=4) from dying under sustained
+                # production load: the writer here is EngineCore, and when a
+                # reader is briefly slow to drain, the writer blocks
+                # ("No available shared memory broadcast block"), the step
+                # stalls, and the engine is eventually declared dead. Deeper
+                # rings absorb the stall. Treat it as a mitigation rather than
+                # a cure -- stalls were still seen near idle afterwards.
+                #
+                # Off by default because each ring costs
+                # max_chunks x (max_chunk_bytes + metadata) of /dev/shm: at the
+                # 16 MiB default a ring of 64 is ~1 GiB, and an engine has
+                # several, so this cannot be imposed on every deployment.
+                max_chunks=envs.VLLM_MQ_MAX_CHUNKS or 10,
                 connect_ip=mq_connect_ip,
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
