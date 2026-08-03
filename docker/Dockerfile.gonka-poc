@@ -46,12 +46,6 @@ RUN INSTALLED=$(python3 -c "import vllm; print(vllm.__version__)") \
     && find . -name "*.py" | tar -cf - -T - | tar -xf - -C "$VLLM_DIR/" \
     && rm -rf /tmp/vllm-src
 
-# Select the V1 model runner. vLLM 0.25 ships a parallel V2 runner with its own
-# sampler, which does not implement enforced tokens or per-request logprobs
-# mode, so a replay request served by it would return a plausible completion
-# that enforced nothing.
-ENV VLLM_USE_V2_MODEL_RUNNER=0
-
 # The out-of-tree plugin, pinned to a tag rather than a branch, which would
 # resolve to whatever HEAD it has at build time. Lives in the gonka-ai
 # organisation as of 2026-07-28; the distribution is still named gonka-poc,
