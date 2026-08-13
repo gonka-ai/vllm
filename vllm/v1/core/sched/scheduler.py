@@ -1575,7 +1575,13 @@ class Scheduler(SchedulerInterface):
                 # In this case, we use is_finished() to check.
                 continue
 
-            req_index = model_runner_output.req_id_to_index[req_id]
+            req_index = model_runner_output.req_id_to_index.get(req_id)
+            if req_index is None:
+                # Async-scheduling race: the request is in num_scheduled_tokens
+                # but the model runner produced no output for it this step
+                # (aborted or preempted between schedule and execution). Skip
+                # it instead of crashing EngineCore with a KeyError.
+                continue
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
