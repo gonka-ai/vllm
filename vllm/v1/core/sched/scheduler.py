@@ -66,6 +66,12 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
+def _replays_enforced_tokens(request) -> bool:
+    """True when the request replays a pinned token sequence (PoC validation)."""
+    params = getattr(request, "sampling_params", None)
+    return bool(getattr(params, "enforced_token_ids", None))
+
+
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -657,6 +663,12 @@ class Scheduler(SchedulerInterface):
             req_index += 1
 
             # Speculative decode related.
+            # A replay must not speculate: RejectionSampler has no
+            # enforced-token hook, and an accepted draft books two emitted
+            # tokens while the reply carries one, so the replay index runs
+            # ahead of the output.
+            if request.spec_token_ids and _replays_enforced_tokens(request):
+                request.spec_token_ids = []
             if request.spec_token_ids:
                 num_scheduled_spec_tokens = (
                     num_new_tokens
@@ -1082,7 +1094,7 @@ class Scheduler(SchedulerInterface):
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if pad_spec_decode:
+                if pad_spec_decode and not _replays_enforced_tokens(request):
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
                     ] * self.num_spec_tokens
