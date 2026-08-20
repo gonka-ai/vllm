@@ -906,6 +906,7 @@ class Scheduler(SchedulerInterface):
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and (scheduled_running_reqs and not prefill_scheduled)
+                        and not _replays_enforced_tokens(request)
                     ):
                         num_new_tokens = 1 + self.num_spec_tokens
                         if (
@@ -1094,7 +1095,7 @@ class Scheduler(SchedulerInterface):
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if pad_spec_decode and not _replays_enforced_tokens(request):
+                if pad_spec_decode:
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
                     ] * self.num_spec_tokens
