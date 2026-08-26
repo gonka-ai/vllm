@@ -19,6 +19,30 @@ Eight commits, cherry-picked in this order from `gonka-ai/vllm@release/v0.25.1`:
 | 7 | fix(poc): restore 32768-token API batch default |
 | 8 | chore(poc): update plugin to v0.1.3 |
 
+On top of those, two fixes that the release line currently carries as Stage-4
+layers in `mlnode-foundry` only because the published images stopped building
+from a residual tree. This branch IS that tree, so they belong here and the
+corresponding S4 layers are unnecessary for anything built on it:
+
+| # | Subject | S4 equivalent |
+|---|---------|---------------|
+| 9 | fix(sched): skip requests absent from req_id_to_index | `sched-req-index-guard` (kaitakuai/vllm#19) |
+| 10-12 | keep replaying requests out of speculative decoding, guard the padding at its source, pin a replay's max_tokens | kaitakuai/vllm#21, not yet an S4 layer |
+
+Rows 10-12 are not optional for this model: GLM-5.3-Flash config declares
+`num_nextn_predict_layers: 1`, so it speculates, and an unpatched replay
+diverges from the executor exactly as measured on Hy3 (82 of 100 length
+mismatches). The `max_tokens` pin matters whenever a validator runs a larger
+limit than the executor did.
+
+The remaining Stage-4 layers stay where they are: `triton-ptxas-from-system-cuda`,
+`flashinfer-jit-uninstall`, `libcuda-compat-580-driver`, `nvidia-headers-symlinks`
+and `cold-start-tolerance` are hardware and timeout tuning, not in-tree fixes.
+`content-type-injector` is the S4 form of `patches/0001`, which our own Stage 3
+already applies. `libnvrtc-symlink` merged upstream as gonka#1560.
+`dsv4-nvfp4-draft-moe` is DeepSeek-NVFP4-only. `poc-householder-compile` targets
+the old in-tree `vllm/poc/`, which the plugin line does not have.
+
 Take them from `release/v0.25.1`, not from `poc-sampler-residual-v0.25`: that
 branch predates #92 and still pins the V1 runner, which the canonical stack
 stopped doing once the V2 replay hooks landed.
