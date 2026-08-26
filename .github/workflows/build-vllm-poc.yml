@@ -42,6 +42,13 @@ on:
       gonka_poc_repo:
         description: 'gonka-poc source repo. Default: kaitakuai/gonka-vllm-plugins.'
         required: false
+      smoke_image:
+        description: 'Skip the build and only run the CPU checks against this image.'
+        required: false
+      smoke_stage3:
+        description: 'Add the mlnode-layer checks (set when smoke_image is a Stage 3 image).'
+        type: boolean
+        default: false
 
 permissions:
   packages: write       # GHCR push
@@ -53,8 +60,11 @@ concurrency:
 
 jobs:
   build:
+    if: inputs.smoke_image == ''
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      immutable_tag: ${{ steps.tag.outputs.immutable_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -142,4 +152,69 @@ jobs:
             echo "- **Mutable tag**: \`${{ steps.tag.outputs.mutable_tag }}\`"
             echo "- **Immutable tag**: \`${{ steps.tag.outputs.immutable_tag }}\`"
             echo "- **Digest**: \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  smoke:
+    # CPU-only acceptance: does the image contain what we think it contains.
+    # Covers the residual surfaces, the plugin's version dispatch, the entry
+    # points the runner launches through, and whether the base can name the
+    # model. Proves nothing about numerical output -- that needs a card.
+    needs: build
+    if: always() && (inputs.smoke_image != '' || needs.build.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve target image
+        id: target
+        env:
+          SMOKE_IMAGE: ${{ inputs.smoke_image }}
+          BUILT_IMAGE: ${{ needs.build.outputs.immutable_tag }}
+        run: |
+          set -euo pipefail
+          IMAGE="${SMOKE_IMAGE:-$BUILT_IMAGE}"
+          [ -n "$IMAGE" ] || { echo "::error::no image to check"; exit 1; }
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Checking $IMAGE"
+
+      - name: Pull image
+        run: docker pull "${{ steps.target.outputs.image }}"
+
+      - name: Run checks
+        run: |
+          set -o pipefail
+          FLAGS=""
+          if [ "${{ inputs.smoke_stage3 }}" = "true" ]; then FLAGS="--stage3"; fi
+          docker run --rm --entrypoint python3 \
+            -v "$PWD/tools/smoke_cpu.py:/tmp/smoke_cpu.py:ro" \
+            "${{ steps.target.outputs.image }}" /tmp/smoke_cpu.py $FLAGS \
+            | tee /tmp/smoke.log
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### smoke-cpu: \`${{ steps.target.outputs.image }}\`"
+            echo ""
+            echo '```'
+            cat /tmp/smoke.log 2>/dev/null || echo "(no output -- the run failed before the checks)"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
