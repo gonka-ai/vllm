@@ -19,6 +19,10 @@ Eight commits, cherry-picked in this order from `gonka-ai/vllm@release/v0.25.1`:
 | 7 | fix(poc): restore 32768-token API batch default |
 | 8 | chore(poc): update plugin to v0.1.3 |
 
+Take them from `release/v0.25.1`, not from `poc-sampler-residual-v0.25`: that
+branch predates #92 and still pins the V1 runner, which the canonical stack
+stopped doing once the V2 replay hooks landed.
+
 On top of those, two fixes that the release line currently carries as Stage-4
 layers in `mlnode-foundry` only because the published images stopped building
 from a residual tree. This branch IS that tree, so they belong here and the
@@ -42,10 +46,6 @@ and `cold-start-tolerance` are hardware and timeout tuning, not in-tree fixes.
 already applies. `libnvrtc-symlink` merged upstream as gonka#1560.
 `dsv4-nvfp4-draft-moe` is DeepSeek-NVFP4-only. `poc-householder-compile` targets
 the old in-tree `vllm/poc/`, which the plugin line does not have.
-
-Take them from `release/v0.25.1`, not from `poc-sampler-residual-v0.25`: that
-branch predates #92 and still pins the V1 runner, which the canonical stack
-stopped doing once the V2 replay hooks landed.
 
 ## Base
 
