@@ -7,7 +7,11 @@
 # binomial validation, DeepSeek-V4 support) lives in the plugin. Only the sampler
 # surfaces that have no public extension point live in this repository.
 
-ARG BASE_IMAGE=vllm/vllm-openai:v0.25.1
+# GLM-5.3-Flash support is not in any upstream release: it lives in the open PR
+# vllm-project/vllm#53906, which also touches .cu and cmake, so the kernels have
+# to come pre-built. Ride the image published from that work; switch back to a
+# release tag once the PR lands.
+ARG BASE_IMAGE=vllm/vllm-openai:glm53-flash
 FROM ${BASE_IMAGE}
 
 # The plugin reaches workers over collective_rpc with payloads that are not
@@ -34,7 +38,7 @@ ENV VLLM_MQ_MAX_CHUNKS=64
 # Overlay the residual .py files onto the pre-built package, keeping compiled
 # .so. The version guard matters: .py from one minor over .so from another
 # either fails at import or, worse, half-works.
-ARG EXPECTED_VLLM_VERSION=0.25.1
+ARG EXPECTED_VLLM_VERSION=0.28
 COPY ./vllm /tmp/vllm-src
 RUN INSTALLED=$(python3 -c "import vllm; print(vllm.__version__)") \
     && case "$INSTALLED" in "${EXPECTED_VLLM_VERSION}"*) ;; \
