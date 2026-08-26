@@ -34,10 +34,13 @@ on:
         description: 'Mutable image tag. Default: glm53-poc-v4.'
         required: false
       expected_vllm_version:
-        description: 'Version prefix the base image must ship. Default: 0.28.'
+        description: 'Version the base image must report. Default: the pinned GLM-5.3-Flash build.'
         required: false
       gonka_poc_ref:
-        description: 'gonka-poc plugin tag. Default: v0.1.3.'
+        description: 'gonka-poc plugin tag. Default: v0.1.4.'
+        required: false
+      gonka_poc_repo:
+        description: 'gonka-poc source repo. Default: kaitakuai/gonka-vllm-plugins.'
         required: false
 
 permissions:
@@ -72,18 +75,21 @@ jobs:
           INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
           INPUT_EXPECTED_VLLM_VERSION: ${{ inputs.expected_vllm_version }}
           INPUT_GONKA_POC_REF: ${{ inputs.gonka_poc_ref }}
+          INPUT_GONKA_POC_REPO: ${{ inputs.gonka_poc_repo }}
         run: |
           set -euo pipefail
           BASE_IMAGE="${INPUT_BASE_IMAGE:-vllm/vllm-openai:glm53-flash}"
           IMAGE_TAG="${INPUT_IMAGE_TAG:-glm53-poc-v4}"
-          EXPECTED_VLLM_VERSION="${INPUT_EXPECTED_VLLM_VERSION:-0.28}"
-          GONKA_POC_REF="${INPUT_GONKA_POC_REF:-v0.1.3}"
+          EXPECTED_VLLM_VERSION="${INPUT_EXPECTED_VLLM_VERSION:-0.1.dev20051+g487ecf187}"
+          GONKA_POC_REF="${INPUT_GONKA_POC_REF:-v0.1.4}"
+          GONKA_POC_REPO="${INPUT_GONKA_POC_REPO:-kaitakuai/gonka-vllm-plugins}"
           SHA9="${GITHUB_SHA:0:9}"
           IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/vllm-poc"
           {
             echo "base_image=$BASE_IMAGE"
             echo "expected_vllm_version=$EXPECTED_VLLM_VERSION"
             echo "gonka_poc_ref=$GONKA_POC_REF"
+            echo "gonka_poc_repo=$GONKA_POC_REPO"
             echo "mutable_tag=${IMAGE_REPO}:${IMAGE_TAG}"
             echo "immutable_tag=${IMAGE_REPO}:${IMAGE_TAG}-${SHA9}"
           } >> "$GITHUB_OUTPUT"
@@ -118,6 +124,7 @@ jobs:
             BASE_IMAGE=${{ steps.tag.outputs.base_image }}
             EXPECTED_VLLM_VERSION=${{ steps.tag.outputs.expected_vllm_version }}
             GONKA_POC_REF=${{ steps.tag.outputs.gonka_poc_ref }}
+            GONKA_POC_REPO=${{ steps.tag.outputs.gonka_poc_repo }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -131,7 +138,7 @@ jobs:
             echo ""
             echo "- **BASE_IMAGE**: \`${{ steps.tag.outputs.base_image }}\`"
             echo "- **Expected vLLM**: \`${{ steps.tag.outputs.expected_vllm_version }}\`"
-            echo "- **Plugin**: \`${{ steps.tag.outputs.gonka_poc_ref }}\`"
+            echo "- **Plugin**: \`${{ steps.tag.outputs.gonka_poc_repo }}@${{ steps.tag.outputs.gonka_poc_ref }}\`"
             echo "- **Mutable tag**: \`${{ steps.tag.outputs.mutable_tag }}\`"
             echo "- **Immutable tag**: \`${{ steps.tag.outputs.immutable_tag }}\`"
             echo "- **Digest**: \`${{ steps.build.outputs.digest }}\`"
