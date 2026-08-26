@@ -59,6 +59,21 @@ def _version():
     return vllm.__version__
 
 
+@check("compiled extensions survived the .py overlay")
+def _extensions_present():
+    import vllm
+
+    pkg = os.path.dirname(vllm.__file__)
+    sos = sorted(f for f in os.listdir(pkg) if f.endswith(".so"))
+    # vllm._C is legacy and ROCm-only on this generation — CUDA ops moved to
+    # _C_stable_libtorch, so the platform's import_kernels() warning about
+    # _C is expected here and is not a sign of a broken image.
+    required = {"_C_stable_libtorch.abi3.so", "_moe_C_stable_libtorch.abi3.so"}
+    missing = required - set(sos)
+    assert not missing, f"missing {sorted(missing)} (have {sos})"
+    return f"{len(sos)} extensions, incl. {', '.join(sorted(required))}"
+
+
 @check(f"base registers {MODEL_ARCH}")
 def _model_registered():
     from vllm.model_executor.models.registry import ModelRegistry
