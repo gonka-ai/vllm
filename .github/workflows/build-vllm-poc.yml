@@ -1,4 +1,4 @@
-name: build-gonka-poc
+name: build-vllm-poc
 
 # Builds and publishes the image the Gonka network runs: the base vLLM image,
 # this repository's in-tree residual overlaid on top, and the out-of-tree
@@ -24,7 +24,7 @@ on:
     paths:
       - 'vllm/**'
       - 'docker/Dockerfile.gonka-poc'
-      - '.github/workflows/build-gonka-poc.yml'
+      - '.github/workflows/build-vllm-poc.yml'
   workflow_dispatch:
     inputs:
       base_image:
@@ -45,7 +45,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: build-gonka-poc-${{ github.ref }}
+  group: build-vllm-poc-${{ github.ref }}
   cancel-in-progress: false   # don't interrupt mid-publish
 
 jobs:
@@ -127,7 +127,7 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "### gonka-poc build summary"
+            echo "### vllm-poc build summary"
             echo ""
             echo "- **BASE_IMAGE**: \`${{ steps.tag.outputs.base_image }}\`"
             echo "- **Expected vLLM**: \`${{ steps.tag.outputs.expected_vllm_version }}\`"
