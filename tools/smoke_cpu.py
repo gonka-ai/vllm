@@ -229,10 +229,16 @@ def _entry_points():
 @check("PoC routes are declared")
 def _routes():
     mod = importlib.import_module("gonka_poc.poc.routes")
-    src = inspect.getsource(mod)
-    for path in ("/pow/init", "/pow/stop"):
-        assert path in src, path
-    return "pow/init, pow/stop"
+    paths = {route.path for route in mod.router.routes}
+    required = {
+        "/api/v1/pow/init/generate",
+        "/api/v1/pow/generate",
+        "/api/v1/pow/stop",
+        "/api/v1/pow/status",
+    }
+    missing = required - paths
+    assert not missing, f"missing {sorted(missing)} (have {sorted(paths)})"
+    return f"{len(paths)} routes, prefix {mod.router.prefix}"
 
 
 # --------------------------------------------------------------------------- #
