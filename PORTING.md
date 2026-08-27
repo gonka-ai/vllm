@@ -33,11 +33,18 @@ corresponding S4 layers are unnecessary for anything built on it:
 | 9 | fix(sched): skip requests absent from req_id_to_index | `sched-req-index-guard` (kaitakuai/vllm#19) |
 | 10-12 | keep replaying requests out of speculative decoding, guard the padding at its source, pin a replay's max_tokens | kaitakuai/vllm#21, not yet an S4 layer |
 
-Rows 10-12 are not optional for this model: GLM-5.3-Flash config declares
-`num_nextn_predict_layers: 1`, so it speculates, and an unpatched replay
-diverges from the executor exactly as measured on Hy3 (82 of 100 length
-mismatches). The `max_tokens` pin matters whenever a validator runs a larger
-limit than the executor did.
+Rows 10-12 guard the V1 sampling path. Correction to an earlier version of this
+file, which claimed they were unavoidable for GLM-5.3-Flash: they are not.
+`Glm5NextForConditionalGeneration` is in `DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES`
+and `mtp` is a V2-supported speculative method, so this checkpoint runs on the
+V2 runner, where row 5 (#92) already pins replay tokens and refuses drafts.
+
+They still belong here. V1 remains the default for any MoE architecture outside
+that list, and an unpatched V1 replay diverges from the executor exactly as
+measured on Hy3 — 82 of 100 length mismatches. That is the configuration the
+fix was written against, and any future MoE model with MTP lands in it. The
+`max_tokens` pin is orthogonal to the runner: it matters whenever a validator
+runs a larger limit than the executor did.
 
 The remaining Stage-4 layers stay where they are: `triton-ptxas-from-system-cuda`,
 `flashinfer-jit-uninstall`, `libcuda-compat-580-driver`, `nvidia-headers-symlinks`
