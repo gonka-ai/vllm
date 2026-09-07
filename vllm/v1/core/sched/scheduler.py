@@ -1619,9 +1619,17 @@ class Scheduler(SchedulerInterface):
                     "sph_indices_steps": getattr(poc_obj, "sph_indices_steps", []),
                     "sph_values_steps": getattr(poc_obj, "sph_values_steps", []),
                 }
+                # Under async scheduling the artifact can land after the row
+                # was preempted: it then sits in the waiting queue and must be
+                # removed from there, or the next schedule() trips on a
+                # finished request.
+                status_before_stop = request.status
                 request.status = RequestStatus.FINISHED_STOPPED
                 self._free_request(request)
-                stopped_running_reqs.add(request)
+                if status_before_stop == RequestStatus.RUNNING:
+                    stopped_running_reqs.add(request)
+                else:
+                    stopped_preempted_reqs.add(request)
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
