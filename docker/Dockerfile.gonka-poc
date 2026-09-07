@@ -77,6 +77,21 @@ RUN VLLM_DIR=$(python3 -c "import vllm, os; print(os.path.dirname(vllm.__file__)
         > "$VLLM_DIR/_version.py" \
     && python3 -c "import vllm; assert vllm.__version__ == '${RESIDUAL_VLLM_VERSION}', vllm.__version__"
 
+# FlashInfer 0.6.18: the base ships 0.6.17, whose SM90 sparse-MLA path has no
+# fp8 KV cache (the has_flashinfer_sm90_nope_mla gate needs ckv_scale_arr,
+# added in 0.6.18). The stable release of 2026-08-29 carries all three
+# distributions as GitHub release assets, including flashinfer-cubin, which
+# PyPI lacks; jit-cache is built per CUDA minor, the base is CUDA 13.0.1.
+# Temporary: drop once the base image itself ships 0.6.18 (vLLM main pins it).
+ARG FLASHINFER_VER=0.6.18
+ARG FLASHINFER_RELEASE=v0.6.18
+ARG FLASHINFER_BASE_URL=https://github.com/flashinfer-ai/flashinfer/releases/download
+RUN pip install --no-cache-dir --force-reinstall --no-deps \
+      "${FLASHINFER_BASE_URL}/${FLASHINFER_RELEASE}/flashinfer_python-${FLASHINFER_VER}-py3-none-any.whl" \
+      "${FLASHINFER_BASE_URL}/${FLASHINFER_RELEASE}/flashinfer_cubin-${FLASHINFER_VER}-py3-none-any.whl" \
+      "${FLASHINFER_BASE_URL}/${FLASHINFER_RELEASE}/flashinfer_jit_cache-${FLASHINFER_VER}+cu130-cp39-abi3-manylinux_2_28_x86_64.whl" \
+    && python3 -c "import flashinfer, sys; v = flashinfer.__version__; sys.exit(0 if v.startswith('${FLASHINFER_VER}') else f'expected ${FLASHINFER_VER}*, got {v}')"
+
 # The out-of-tree plugin, pinned to a tag rather than a branch, which would
 # resolve to whatever HEAD it has at build time. Lives in the gonka-ai
 # organisation as of 2026-07-28; the distribution is still named gonka-poc,
