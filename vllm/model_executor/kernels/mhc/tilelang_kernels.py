@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import math
 from functools import cache
 from typing import TYPE_CHECKING, Any
@@ -18,6 +19,13 @@ if TYPE_CHECKING or current_platform.is_cuda_alike():
             "tilelang is required for mhc but is not installed. Install it with "
             "`pip install tilelang`."
         )
+    # Preload flashinfer.comm so its CudaRTLibrary binds the real libcudart
+    # (via find_loaded_library) before tilelang imports libcudart_stub.so,
+    # which otherwise maps at a lower address and shadows the real libcudart,
+    # breaking flashinfer all-reduce on sm100. Import order is load-bearing;
+    # this must run before `import tilelang`.
+    with contextlib.suppress(Exception):
+        import flashinfer.comm  # noqa: F401
     import tilelang
     import tilelang.language as T
 else:
@@ -186,9 +194,6 @@ def mhc_pre_big_fuse_tilelang(
 
         if ENABLE_PDL:
             T.pdl_trigger()
-
-
-# Copied from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/mhc.py#L478
 
 
 @tilelang.jit(
@@ -856,21 +861,23 @@ def hc_prenorm_gemm_block_m_tilelang(
         T.sync_threads()
 
         if warp_id == 0:
+            reduced_acc = T.alloc_local((block_m,), T.float32)
+            reduced_sqr = T.alloc_local((block_m,), T.float32)
+            T.clear(reduced_acc)
+            T.clear(reduced_sqr)
             for i_m in T.unroll(block_m):
                 token_idx = i_mt * block_m + i_m
                 if token_idx < num_tokens:
                     if lane < tile_n:
-                        reduced_acc = T.alloc_var(T.float32, init=0.0)
                         for i_w in T.unroll(num_warps):
-                            reduced_acc += warp_acc[i_w, i_m, lane]
+                            reduced_acc[i_m] += warp_acc[i_w, i_m, lane]
                         out_idx = i_t * tile_n + lane
                         if out_idx < n_out:
-                            out[0, token_idx, out_idx] = reduced_acc
+                            out[0, token_idx, out_idx] = reduced_acc[i_m]
                     if lane == 0 and i_t == 0:
-                        reduced_sqr = T.alloc_var(T.float32, init=0.0)
                         for i_w in T.unroll(num_warps):
-                            reduced_sqr += warp_sqr[i_w, i_m]
-                        sqrsum[0, token_idx] = reduced_sqr
+                            reduced_sqr[i_m] += warp_sqr[i_w, i_m]
+                        sqrsum[0, token_idx] = reduced_sqr[i_m]
 
         if ENABLE_PDL:
             T.pdl_trigger()

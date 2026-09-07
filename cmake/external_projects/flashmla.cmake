@@ -18,8 +18,12 @@ if(FLASH_MLA_SRC_DIR)
 else()
   FetchContent_Declare(
         flashmla
-        GIT_REPOSITORY https://github.com/vllm-project/FlashMLA
-        GIT_TAG a8f794d1251cbfd88a5011445dd5582289c727e4
+        # PR #17 (rope dim / qk_rope=0) head lives on the JaredforReal fork's
+        # rope_dim branch; it's unreachable from a plain clone of
+        # vllm-project/FlashMLA (only via refs/pull/*), so point at the fork.
+        # https://github.com/vllm-project/FlashMLA/pull/17
+        GIT_REPOSITORY https://github.com/JaredforReal/FlashMLA.git
+        GIT_TAG 8447acbcb558db892bf7c1197d225be1c95b168c
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
@@ -60,6 +64,9 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
     # CUDA 12.9 has introduced "Family-Specific Architecture Features"
     # this supports all compute_10x family
     list(APPEND SUPPORT_ARCHS "10.0f")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.4)
+        list(APPEND SUPPORT_ARCHS "10.7f")
+    endif()
 elseif(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
     list(APPEND SUPPORT_ARCHS "10.0a")
 endif()
@@ -188,4 +195,3 @@ else()
     add_custom_target(_flashmla_C)
     add_custom_target(_flashmla_extension_C)
 endif()
-

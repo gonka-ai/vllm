@@ -7,6 +7,7 @@ Contains helpers related to importing modules.
 This is similar in concept to the `importlib` module.
 """
 
+import contextlib
 import importlib.metadata
 import importlib.util
 import os
@@ -505,6 +506,14 @@ def has_triton_kernels() -> bool:
 @cache
 def has_tilelang() -> bool:
     """Whether the optional `tilelang` package is available."""
+    # tilelang's libtilelang.so pulls in a libcudart_stub.so that, once loaded,
+    # maps at a lower address than the real libcudart and shadows it in
+    # flashinfer's find_loaded_library() scan -- breaking flashinfer allreduce
+    # (undefined symbol: cudaDeviceReset). Importing flashinfer.comm first caches
+    # the real cudart at its module load, so the later tilelang import can't
+    # poison it. Guarded: flashinfer may be absent in non-CUDA environments.
+    with contextlib.suppress(Exception):
+        import flashinfer.comm  # noqa: F401
     return _has_module("tilelang")
 
 
@@ -552,6 +561,11 @@ def has_cutedsl() -> bool:
 def has_humming() -> bool:
     """Whether the optional `humming` package is available."""
     return _has_module("humming")
+
+
+def has_quark():
+    """Whether the optional `quark` package is available."""
+    return _has_module("quark")
 
 
 def check_torchcodec_available():

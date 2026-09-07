@@ -8,7 +8,7 @@ from collections import Counter
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from math import prod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import torch
 from typing_extensions import Self
@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+_SpecT = TypeVar("_SpecT", bound="KVCacheSpec")
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +45,7 @@ class KVQuantMode(IntEnum):
     FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
     INT4_PER_TOKEN_HEAD = 4  # packed 2×int4/byte, RHT + asymmetric zp
     NVFP4 = 5  # packed fp4 data + fp8 block scales
+    TURBOQUANT = 6  # Hadamard-rotated Lloyd-Max quant, packed K+V per slot
 
     @property
     def is_per_token_head(self) -> bool:
@@ -58,6 +61,11 @@ class KVQuantMode(IntEnum):
         """True for NVFP4 packed quantization mode."""
         return self == KVQuantMode.NVFP4
 
+    @property
+    def is_turboquant(self) -> bool:
+        """True for turboquant quantization mode."""
+        return self == KVQuantMode.TURBOQUANT
+
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
@@ -67,8 +75,10 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode.INT8_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":
         return KVQuantMode.FP8_PER_TOKEN_HEAD
-    if kv_cache_dtype == "nvfp4":
+    if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
+    if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
+        return KVQuantMode.TURBOQUANT
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR
     return KVQuantMode.NONE
@@ -76,6 +86,18 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return get_kv_quant_mode(kv_cache_dtype) != KVQuantMode.NONE
+
+
+def replace_as(spec: KVCacheSpec, target_cls: type[_SpecT], **changes) -> _SpecT:
+    """``dataclasses.replace``, but rebuilding *spec* as *target_cls*
+      e.g. ``SlidingWindowSpec`` -> ``FullAttentionSpec``
+
+    Every field of *spec* must exist on *target_cls*; fields only *target_cls* has keep
+    their default values.
+    """
+    kwargs = {f.name: getattr(spec, f.name) for f in fields(spec) if f.init}
+    kwargs.update(changes)
+    return target_cls(**kwargs)
 
 
 def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
@@ -104,6 +126,21 @@ class KVCacheSpec:
 
     # number of tokens in a block
     block_size: int
+
+    @property
+    def participates_in_prefix_caching(self) -> bool:
+        """Whether this spec's group participates in prefix caching.
+
+        Co-owned / transient groups that are not real block allocators (e.g.
+        GLM-5.3-Flash kpool tail, a 1-block/req circular scratch buffer whose
+        content is per-request and overwritten in place) opt out by returning
+        ``False``. The structural prefix-caching machinery (the global
+        ``cache_config.block_size`` min, the hybrid divisibility assert, and the
+        ``attention_groups`` hit-lookup) then ignores them, so a non-shareable
+        group can neither drag the block size down nor cap the hybrid hit at 0.
+        Their manager still allocates/frees blocks normally.
+        """
+        return True
 
     @property
     def page_size_bytes(self) -> int:
@@ -385,6 +422,8 @@ class MLAAttentionSpec(FullAttentionSpec):
     alignment: int | None = None  # Default to None for no padding.
     compress_ratio: int = 1  # Default to 1 for no compression.
     model_version: str | None = None
+    # Marks draft groups that flatten a non-causal query block into decode rows.
+    non_causal_multi_token_decode: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -434,7 +473,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             "quantization method, compress ratio, model version, and KV block "
             "stride indexing."
         )
-        return cls(
+        merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
@@ -445,7 +484,17 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            non_causal_multi_token_decode=any(
+                spec.non_causal_multi_token_decode for spec in specs
+            ),
         )
+        for spec in specs:
+            for f in fields(AttentionSpec):
+                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
+                    "All attention layers in the same KV cache group must have "
+                    "the same attention spec."
+                )
+        return merged_spec
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -686,6 +735,57 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class KpoolTailSpec(SlidingWindowSpec):
+    """GLM-5.3-Flash kpool indexer tail cache: a paged circular buffer holding the
+    in-progress (incomplete) kpool's raw K + gate score.
+
+    One block of ``block_size`` (== ``index_kpool``) slots per request,
+    overwritten circularly by ``pos % kpool`` as decode/spec-decode advances.
+    Prefill writes the trailing incomplete pool's raw K+gate here (instead of
+    discarding it) so the boundary pool can be compressed correctly on the
+    decode side, including across PD disaggregation. Raw K is packed as the "K"
+    half of each block and the gate score as the "V" half
+    (``head_size_v == head_size``).
+
+    The SW base is reused only for its ``real_page_size_bytes`` formula and the
+    admission-cap wiring; the manager is swapped to ``KpoolTailManager`` via the
+    registry, because ``SlidingWindowManager``'s mid-pool eviction would destroy
+    the in-progress pool. Admission is fixed at 1 block/req regardless of
+    ``sliding_window``/``max_in_flight_tokens``: the in-progress pool is always
+    <= kpool tokens (completed pools are flushed), so MTP > kpool still fits in
+    one circularly-reused block.
+    """
+
+    def max_admission_blocks_per_request(
+        self, max_in_flight_tokens: int, max_model_len: int
+    ) -> int:
+        # The in-progress pool is <= kpool tokens == 1 block, circularly reused.
+        # No growth, no window sliding -> exactly one block per request, even
+        # under spec-decode (MTP > kpool): completed pools flush mid-step.
+        return 1
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        # One block per request for the request's whole lifetime; caps the
+        # per-request block_table buffer the runner sizes via this method.
+        return 1
+
+    def is_uniform_with_collection(
+        self, kv_cache_specs: dict[str, KVCacheSpec]
+    ) -> bool:
+        return all(isinstance(spec, KpoolTailSpec) for spec in kv_cache_specs.values())
+
+    @property
+    def participates_in_prefix_caching(self) -> bool:
+        # The tail is a per-request circular scratch buffer (1 block/req,
+        # overwritten by ``pos % kpool``), not a real block allocator: its
+        # contents are transient and never shareable across requests. Exclude
+        # it from the structural prefix-caching machinery so it neither drags
+        # the global block size down to ``kpool`` nor caps the hybrid hit at 0.
+        # ``KpoolTailManager`` already no-ops the manager-level cache hooks.
+        return False
+
+
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
@@ -696,15 +796,18 @@ class MambaSpec(KVCacheSpec):
     num_speculative_blocks: int = 0
 
     @property
-    def page_size_bytes(self) -> int:
-        page_size = sum(
+    def real_page_size_bytes(self) -> int:
+        return sum(
             prod(shape) * get_dtype_size(dtype)
             for (shape, dtype) in zip(self.shapes, self.dtypes)
         )
+
+    @property
+    def page_size_bytes(self) -> int:
         if self.page_size_padded is not None:
-            assert self.page_size_padded >= page_size
+            assert self.page_size_padded >= self.real_page_size_bytes
             return self.page_size_padded
-        return page_size
+        return self.real_page_size_bytes
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "all":
@@ -825,6 +928,15 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     kv_cache_specs: dict[str, KVCacheSpec]
 
     @property
+    def participates_in_prefix_caching(self) -> bool:
+        # A uniform group shares one block allocator; if any member is a
+        # non-shareable scratch spec (e.g. KpoolTailSpec), the group's blocks
+        # can't be reused across requests, so the whole group opts out.
+        return all(
+            s.participates_in_prefix_caching for s in self.kv_cache_specs.values()
+        )
+
+    @property
     def page_size_bytes(self) -> int:
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
 
@@ -834,6 +946,20 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             for spec in self.kv_cache_specs.values()
         )
         return max_num_pages * self.page_size_bytes
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        # Metadata builders are constructed from the per-layer spec, so the base
+        # cdiv(max_len, block_size) would drop its DCP sharding and size the
+        # block table wider than those builders expect.
+        widths = {
+            spec.max_num_blocks_per_req(vllm_config, max_len)
+            for spec in self.kv_cache_specs.values()
+        }
+        assert len(widths) == 1, (
+            "All layers in the same KV cache group must need the same number "
+            f"of block table entries, got {sorted(widths)}."
+        )
+        return next(iter(widths))
 
     @classmethod
     def is_uniform_type(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
@@ -886,6 +1012,15 @@ def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
         }
         if len(inner_kinds) == 1:
             return next(iter(inner_kinds))
+        # A group is only formed when all members share one registered
+        # uniform_type_base_spec, so UNKNOWN would discard what the merge
+        # already established.
+        base_specs = {
+            KVCacheSpecRegistry.get_uniform_type_base_spec(spec)
+            for spec in kv_cache_spec.kv_cache_specs.values()
+        }
+        if len(base_specs) == 1 and next(iter(base_specs)) is FullAttentionSpec:
+            return KVCacheSpecKind.FULL_ATTENTION
         return KVCacheSpecKind.UNKNOWN
     # Keep subclass checks before base classes so specialized specs keep their
     # more precise kind.
@@ -975,11 +1110,19 @@ class KVCacheConfig:
     @property
     def has_mixed_precision_kv_cache(self) -> bool:
         """Whether attention groups store their KV cache at more than one precision."""
-        kv_cache_precisions = {
-            (group.kv_cache_spec.dtype, group.kv_cache_spec.kv_quant_mode)
-            for group in self.kv_cache_groups
-            if isinstance(group.kv_cache_spec, AttentionSpec)
-        }
+        kv_cache_precisions: set[tuple[torch.dtype, KVQuantMode]] = set()
+        for group in self.kv_cache_groups:
+            group_spec = group.kv_cache_spec
+            group_specs = (
+                list(group_spec.kv_cache_specs.values())
+                if isinstance(group_spec, UniformTypeKVCacheSpecs)
+                else [group_spec]
+            )
+            kv_cache_precisions.update(
+                (spec.dtype, spec.kv_quant_mode)
+                for spec in group_specs
+                if isinstance(spec, AttentionSpec)
+            )
         return len(kv_cache_precisions) > 1
 
     @property
