@@ -95,8 +95,9 @@ RUN pip install --no-cache-dir --force-reinstall --no-deps \
 # The out-of-tree plugin, pinned to a tag rather than a branch, which would
 # resolve to whatever HEAD it has at build time. Lives in the gonka-ai
 # organisation as of 2026-07-28; the distribution is still named gonka-poc,
-# so only the source URL moved.
-ARG GONKA_POC_REPO=kaitakuai/gonka-vllm-plugins
+# so only the source URL moved. v0.1.4 (vLLM 0.28 compat) is
+# gonka-ai/gonka-vllm-plugins#9; the tag exists there once that merges.
+ARG GONKA_POC_REPO=gonka-ai/gonka-vllm-plugins
 ARG GONKA_POC_REF=v0.1.4
 RUN pip install --no-cache-dir --no-deps \
       "gonka-poc @ https://github.com/${GONKA_POC_REPO}/archive/refs/tags/${GONKA_POC_REF}.tar.gz" \
