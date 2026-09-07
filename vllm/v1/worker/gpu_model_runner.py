@@ -774,6 +774,7 @@ class GPUModelRunner(
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             reasoning_config=self.vllm_config.reasoning_config,
             use_replayssm=self.cache_config.use_replayssm,
+            logprobs_mode_default=self.model_config.logprobs_mode,
         )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
@@ -7451,6 +7452,7 @@ class GPUModelRunner(
                 reasoning_config=self.vllm_config.reasoning_config,
                 use_replayssm=self.cache_config.use_replayssm,
                 slot_mapping_modes=slot_mapping_modes,
+                logprobs_mode_default=self.model_config.logprobs_mode,
             )
 
         assert self._init_block_sizes == block_sizes, (

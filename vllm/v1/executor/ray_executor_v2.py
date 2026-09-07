@@ -343,6 +343,10 @@ class RayExecutorV2(MultiprocExecutor):
             self.world_size,
             n_local,
             max_chunk_bytes=max_chunk_bytes,
+            # Same knob as the multiproc executor: this ring has the same
+            # writer-starvation failure mode, so it must honour the same
+            # override rather than silently keeping the smaller default.
+            max_chunks=envs.VLLM_MQ_MAX_CHUNKS or 10,
             connect_ip=ray.util.get_node_ip_address(),
         )
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()

@@ -272,6 +272,28 @@ class RejectionSampler:
             chunk_logit_limit,
             max_num_logprobs,
         )
+        replay_state = getattr(self.sampler, "replay_state", None)
+        if replay_state is not None and replay_state.batch_has_replay(
+            input_batch.idx_mapping_np
+        ):
+            # A replaying request must emit exactly the pinned token for its
+            # current output position and accept no drafts. ReplayState pins
+            # every row of a request to the same position, so the request's
+            # first logit row carries the token to emit.
+            enforced_rows = replay_state.enforced_for_batch(
+                input_batch.expanded_idx_mapping
+            )
+            first_row = input_batch.cu_num_logits[:-1].long()
+            enforced_first = enforced_rows[first_row]
+            is_replay = enforced_first >= 0
+            if bool(is_replay.any()):
+                sampled = sampled.clone()
+                sampled[:, 0] = torch.where(
+                    is_replay, enforced_first.to(sampled.dtype), sampled[:, 0]
+                )
+                num_sampled = torch.where(
+                    is_replay, torch.ones_like(num_sampled), num_sampled
+                )
 
         num_sampled, num_rejected = get_num_sampled_and_rejected(
             num_sampled,

@@ -300,6 +300,7 @@ class StructuredOutputManager:
 
                 state_advancements = 0
                 post_reasoning_end_in_window = False
+                grammar_rejected = False
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
                 for i, token in enumerate(req_tokens):
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
@@ -333,9 +334,15 @@ class StructuredOutputManager:
                         if accepted:
                             state_advancements += 1
                         elif not post_reasoning_end_in_window:
-                            raise AssertionError(
-                                (token, req_id, scheduled_spec_decode_tokens)
+                            logger.warning(
+                                "Grammar rejected token %d for request %s "
+                                "during speculative decode bitmask fill. "
+                                "Disabling bitmask for this request.",
+                                token,
+                                req_id,
                             )
+                            apply_bitmask = False
+                            grammar_rejected = True
                     cumulative_index += 1
                 # Diffusion LLMs don't sample a bonus token after the
                 # scheduled positions, so skip its bitmask in that case.
@@ -350,7 +357,12 @@ class StructuredOutputManager:
                     #   should_fill_bitmask still returns False here because
                     #   reasoning_ended is only persisted later by
                     #   should_advance.
-                    bonus_apply = self.should_fill_bitmask(request) or apply_bitmask
+                    # A grammar rejection above disables the bonus row too:
+                    # the FSM is out of sync, so constraining with it would
+                    # corrupt output.
+                    bonus_apply = not grammar_rejected and (
+                        self.should_fill_bitmask(request) or apply_bitmask
+                    )
                     self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
                     cumulative_index += 1
                 if state_advancements > 0:
