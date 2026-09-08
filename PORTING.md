@@ -23,6 +23,46 @@ Take them from `release/v0.25.1`, not from `poc-sampler-residual-v0.25`: that
 branch predates #92 and still pins the V1 runner, which the canonical stack
 stopped doing once the V2 replay hooks landed.
 
+On top of those, four fixes that the release line currently carries as Stage-4
+layers in `mlnode-foundry` only because the published images stopped building
+from a residual tree. This branch IS that tree, so they belong here and the
+corresponding S4 layers are unnecessary for anything built on it:
+
+| # | Subject | S4 equivalent |
+|---|---------|---------------|
+| 9 | fix(sched): skip requests absent from req_id_to_index | `sched-req-index-guard` (kaitakuai/vllm#19) |
+| 10-12 | keep replaying requests out of speculative decoding, guard the padding at its source, pin a replay's max_tokens | kaitakuai/vllm#21, not yet an S4 layer |
+| 13 | fix(glm5next): initialize the kpool top-k receiver and bound pool expand | `glm53-indexer-init` |
+| 14 | build(glm53): pin FlashInfer 0.6.18 in the residual image (`docker/Dockerfile.gonka-poc`, not a source change) | `flashinfer-0-6-18-stable` |
+
+Rows 10-12 guard the V1 sampling path. Correction to an earlier version of this
+file, which claimed they were unavoidable for GLM-5.3-Flash: they are not.
+`Glm5NextForConditionalGeneration` is in `DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES`
+and `mtp` is a V2-supported speculative method, so this checkpoint runs on the
+V2 runner, where row 5 (#92) already pins replay tokens and refuses drafts.
+
+They still belong here. V1 remains the default for any MoE architecture outside
+that list, and an unpatched V1 replay diverges from the executor exactly as
+measured on Hy3 — 82 of 100 length mismatches. That is the configuration the
+fix was written against, and any future MoE model with MTP lands in it. The
+`max_tokens` pin is orthogonal to the runner: it matters whenever a validator
+runs a larger limit than the executor did.
+
+Row 13 is GLM-specific and not fixed on upstream `main` as of `98ed0856`: the
+top-k kernels fill only `min(k, valid)` entries, so a `torch.empty` receiver
+leaves stale block ids in rows with fewer valid pools and attention gathers from
+uninitialized memory. Row 14 is temporary: the base ships FlashInfer 0.6.17,
+whose SM90 sparse-MLA path has no fp8 KV cache; drop it once the base image
+itself ships 0.6.18, which vLLM `main` already pins.
+
+The remaining Stage-4 layers stay where they are: `triton-ptxas-from-system-cuda`,
+`flashinfer-jit-uninstall`, `libcuda-compat-580-driver`, `nvidia-headers-symlinks`
+and `cold-start-tolerance` are hardware and timeout tuning, not in-tree fixes.
+`content-type-injector` is the S4 form of `patches/0001`, which our own Stage 3
+already applies. `libnvrtc-symlink` merged upstream as gonka#1560.
+`dsv4-nvfp4-draft-moe` is DeepSeek-NVFP4-only. `poc-householder-compile` targets
+the old in-tree `vllm/poc/`, which the plugin line does not have.
+
 ## Base
 
 `vllm/vllm-openai:glm53-flash`. GLM-5.3-Flash support is not in any upstream
