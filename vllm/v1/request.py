@@ -272,6 +272,12 @@ class Request:
         return self.num_encoder_inputs > 0
 
     def get_skip_reading_prefix_cache(self) -> bool:
+        if self.poc_params is not None:
+            # A PoC prompt is generated in-model in one atomic prefill and its
+            # decode chain starts from that prefill's snap. A prefix hit (its
+            # own blocks after a preemption) would skip the prefill and shift
+            # the step arithmetic, so PoC rows never read the prefix cache.
+            return True
         if (
             self.sampling_params is not None
             and self.sampling_params.skip_reading_prefix_cache is not None
