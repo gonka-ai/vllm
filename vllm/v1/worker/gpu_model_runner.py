@@ -1260,6 +1260,7 @@ class GPUModelRunner(
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                poc_params=new_req_data.poc_params,
             )
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
@@ -3605,6 +3606,9 @@ class GPUModelRunner(
         # if async scheduling and required by current sampling params.
         self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
+            bridge = getattr(self, "_poc_bridge", None)
+            if bridge is not None and bridge.mixed_active():
+                return bridge.sample_chat_rows(logits, sampling_metadata)
             return self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
@@ -4082,6 +4086,12 @@ class GPUModelRunner(
         if self.routed_experts_initialized:
             self.routed_experts_capturer.clear_buffer()
 
+        # PoC mixed-batch bridge (no-op when the step holds no PoC rows).
+        if getattr(self, "_poc_bridge", None) is None:
+            from gonka_poc.mixed.bridge import PoCRunnerBridge
+
+            self._poc_bridge = PoCRunnerBridge(self)
+
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
@@ -4306,6 +4316,15 @@ class GPUModelRunner(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
 
+        if getattr(self, "_poc_bridge", None) is not None:
+            # After _update_states: requests are registered.
+            self._poc_bridge.pre_step(scheduler_output)
+            self._poc_bridge.pre_forward(
+                scheduler_output,
+                positions,
+                scheduler_output.total_num_scheduled_tokens,
+            )
+
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
@@ -4386,7 +4405,12 @@ class GPUModelRunner(
                     )
 
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states)
+                logits = (
+                    self._poc_bridge.compute_logits(sample_hidden_states)
+                    if getattr(self, "_poc_bridge", None) is not None
+                    and self._poc_bridge.mixed_active()
+                    else self.model.compute_logits(sample_hidden_states)
+                )
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -4405,7 +4429,12 @@ class GPUModelRunner(
                     )
                     logits = None
                 else:
-                    logits = self.model.compute_logits(sample_hidden_states)
+                    logits = (
+                        self._poc_bridge.compute_logits(sample_hidden_states)
+                        if getattr(self, "_poc_bridge", None) is not None
+                        and self._poc_bridge.mixed_active()
+                        else self.model.compute_logits(sample_hidden_states)
+                    )
 
                 model_output_broadcast_data: dict[str, Any] = {}
                 if logits is not None:
@@ -4679,6 +4708,9 @@ class GPUModelRunner(
                 if self.supports_mm_inputs
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
+                poc_outputs=self._poc_bridge.extract(hidden_states)
+                if getattr(self, "_poc_bridge", None) is not None
+                else None,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
             )
@@ -5230,6 +5262,12 @@ class GPUModelRunner(
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
+                # PoC transforms attach BEFORE compilation/capture (0.20 parity).
+                if getattr(self, "_poc_bridge", None) is None:
+                    from gonka_poc.mixed.bridge import PoCRunnerBridge
+
+                    self._poc_bridge = PoCRunnerBridge(self)
+                self._poc_bridge.load(self.model)
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
                     if hasattr(self.drafter, "load_model"):

@@ -228,6 +228,46 @@ class ECConnectorOutput:
     finished_recving: set[str] | None = None
 
 
+@dataclass
+class PoCOutput:
+    nonce: int
+    vector_b64: str
+    # Optional – populated only when the runner is asked to expose internals
+    hidden_state_b64: str | None = None  # full normalised last-token hidden state
+    reduced_hidden_state_b64: str | None = (
+        None  # SPHERE_DIM-D slice on unit sphere (prefill)
+    )
+    reduced_hidden_state_decode_b64: list[str] = field(
+        default_factory=list
+    )  # per decode step
+    # Decode-mode statistics: sphere_k chosen at each step (the codebook index on
+    # the sphere). Index 0 = prefill, indices 1..N = decode steps. The prefill k is
+    # k_points_steps[0] (the dropped scalar sphere_k field was just this).
+    # Empty when poc_decode is disabled.
+    k_points_steps: list[int] = field(default_factory=list)
+    # Validation mode only: number of steps where the locally computed k-id
+    # differed from the reference inference k-id.  -1 for inference requests.
+    n_sphere_mismatches: int = -1
+    # Number of decode steps whose hidden was non-finite (NaN/Inf) — a COMPUTE
+    # FAULT (GPU contention / kernel fault), NOT fraud. Excluded from
+    # n_sphere_mismatches; >0 means the trajectory is suspect and should be re-run.
+    n_nan_steps: int = 0
+    # Validation mode only: the largest snap margin (top1-top2 cosine gap of the
+    # validator's own query) among the steps that disagreed with the reference;
+    # 0.0 when every step agreed or nothing was compared. The per-nonce distance
+    # the validator tests against dist_threshold, like the prefill L2.
+    mismatch_margin_max: float = 0.0
+    # Per-step sphere slices, index 0 = prefill, 1..N = decode steps. Emitted
+    # under debug (full trajectory, full SPHERE_DIM) or poc_vector_artifacts
+    # (every step, a seeded k_dim-coord pick of the SPHERE_DIM vector).
+    # sph_indices_steps[step] : list of SPHERE_DIM int indices (debug only)
+    # sph_values_steps[step]  : base64 fp16-LE pre-snap slice — a raw slice of
+    #                           a unit vector, NOT unit itself; renormalize
+    #                           before any cosine.
+    sph_indices_steps: list[list[int]] = field(default_factory=list)
+    sph_values_steps: list[str] = field(default_factory=list)
+
+
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
@@ -265,6 +305,9 @@ class ModelRunnerOutput:
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
+
+    # PoC artifacts per request id (None when PoC is idle).
+    poc_outputs: dict[str, PoCOutput] | None = None
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None

@@ -291,6 +291,23 @@ def build_app(
             )
 
     app = sagemaker_standards_bootstrap(app)
+
+    # PoC routes: registered directly, not via include_router — FastAPI's
+    # _IncludedRouter crashes prometheus route-name lookup (0.20 fix kept).
+    # The gonka_poc plugin is required — there is no in-tree implementation.
+    from gonka_poc.poc.routes import router as poc_router
+
+    for _poc_route in poc_router.routes:
+        app.add_api_route(
+            _poc_route.path,
+            _poc_route.endpoint,
+            methods=list(_poc_route.methods),
+            name=_poc_route.name,
+        )
+    app.state.poc_enabled = True
+    # Decode-PoC is the canonical scheme; per-request max_tokens still
+    # selects prefill-only (max_tokens == 0).
+    app.state.poc_decode = True
     return app
 
 

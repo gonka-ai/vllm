@@ -235,6 +235,17 @@ class RequestState:
             top_p = sampling_params.top_p
             n = sampling_params.n
             temperature = sampling_params.temperature
+        elif getattr(request, "poc_params", None) is not None:
+            # PoC: no sampling/pooling; emits a single final RequestOutput.
+            from vllm.sampling_params import RequestOutputKind
+
+            logprobs_processor = None
+            detokenizer = None
+            max_tokens_param = None
+            top_p = None
+            n = None
+            temperature = None
+            output_kind = RequestOutputKind.FINAL_ONLY
         else:
             logprobs_processor = None
             detokenizer = None
@@ -617,6 +628,25 @@ class OutputProcessor:
 
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
+            poc_output = getattr(engine_core_output, "poc_output", None)
+            if poc_output is not None:
+                # Annotated so the walrus below, which also admits
+                # PoolingRequestOutput and None, does not narrow to this branch.
+                poc_request_output = RequestOutput(
+                    request_id=req_id,
+                    prompt=None,
+                    prompt_token_ids=[],
+                    prompt_logprobs=None,
+                    outputs=[],
+                    finished=True,
+                    poc_output=poc_output,
+                )
+                if req_state.queue is not None:
+                    req_state.queue.put(poc_request_output)
+                else:
+                    request_outputs.append(poc_request_output)
+                self._finish_request(req_state)
+                continue
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params

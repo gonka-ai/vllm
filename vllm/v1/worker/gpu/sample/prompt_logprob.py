@@ -28,6 +28,13 @@ class PromptLogprobsWorker:
         if uses_prompt_logprobs:
             self.in_progress_prompt_logprobs[req_id] = []
 
+    def clear_slot(self, req_idx: int) -> None:
+        """Reset a reused slot for a request without sampling params (PoC):
+        stale flags from the previous occupant otherwise mark the row as
+        wanting prompt logprobs and the per-id lookup raises KeyError."""
+        self.uses_prompt_logprobs[req_idx] = False
+        self.num_prompt_logprobs[req_idx] = 0
+
     def remove_request(self, req_id: str) -> None:
         self.in_progress_prompt_logprobs.pop(req_id, None)
 

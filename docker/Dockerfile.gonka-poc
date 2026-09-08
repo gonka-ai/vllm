@@ -50,8 +50,20 @@ RUN INSTALLED=$(python3 -c "import vllm; print(vllm.__version__)") \
 # resolve to whatever HEAD it has at build time. Lives in the gonka-ai
 # organisation as of 2026-07-28; the distribution is still named gonka-poc,
 # so only the source URL moved.
+#
+# v0.2.0 carries both proofs and the node picks per request via
+# ``params.scheme``. Omitting the field selects "prefill", which derives
+# exactly as v0.1.3 does -- verified artifact-for-artifact against the 3.0.16
+# image -- so a chain that knows nothing about decode is unaffected by this
+# bump. "decode" runs the chained sphere_k trajectory and mixes with live
+# inference instead of pausing it.
+#
+# Requires the engine seams that this branch adds: the .py overlay above picks
+# them up automatically, because they are ordinary source files. Building
+# v0.2.0 over a tree without them fails at import, deliberately -- a silently
+# PoC-less node is worse.
 ARG GONKA_POC_REPO=gonka-ai/gonka-vllm-plugins
-ARG GONKA_POC_REF=v0.1.3
+ARG GONKA_POC_REF=v0.2.0
 RUN pip install --no-cache-dir --no-deps \
       "gonka-poc @ https://github.com/${GONKA_POC_REPO}/archive/refs/tags/${GONKA_POC_REF}.tar.gz" \
     && pip install --no-cache-dir "aiohttp>=3.9" "scipy>=1.10"

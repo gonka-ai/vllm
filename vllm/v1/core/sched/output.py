@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.poc.poc_params import PoCParams
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
@@ -39,6 +40,7 @@ class NewRequestData:
     lora_request: LoRARequest | None
     prompt_embeds: "torch.Tensor | None" = None
     prompt_is_token_ids: list[bool] | None = None
+    poc_params: "PoCParams | None" = None
 
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
@@ -61,6 +63,7 @@ class NewRequestData:
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
             prompt_is_token_ids=request.prompt_is_token_ids,
+            poc_params=request.poc_params,
             prefill_token_ids=prefill_token_ids,
         )
 
@@ -217,6 +220,7 @@ class SchedulerOutput:
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
+
 
     # Whether any of the scheduled requests use structured output.
     # Set only in async scheduling case.

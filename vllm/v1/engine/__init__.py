@@ -13,6 +13,7 @@ import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.poc.poc_params import PoCParams
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
@@ -120,6 +121,8 @@ class EngineCoreRequest(
 
     trace_headers: Mapping[str, str] | None = None
     resumable: bool = False
+    # PoC: consensus parameters; None for normal requests.
+    poc_params: PoCParams | None = None
 
     # The user-provided request ID. This field is set internally,
     # copied from the provided request_id that's originally assigned
@@ -198,6 +201,8 @@ class EngineCoreOutput(
     routed_experts: np.ndarray | None = None
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
+    # PoC: artifact payload for PoC requests.
+    poc_output: dict[str, Any] | None = None
     num_nans_in_logits: int = 0
 
     @property

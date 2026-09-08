@@ -50,6 +50,7 @@ class CachedRequestState:
 
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
+    poc_params: "object | None" = None
     # To accumulate prompt logprobs tensor chunks across prefill steps.
     in_progress_prompt_logprobs_cpu: LogprobsTensors | None = None
 
@@ -479,6 +480,8 @@ class InputBatch:
             self.logits_processing_needs_token_ids[req_index] = (
                 pooling_params.requires_token_ids
             )
+        elif request.poc_params is not None:
+            pass
         else:
             raise NotImplementedError("Unrecognized request type")
 
