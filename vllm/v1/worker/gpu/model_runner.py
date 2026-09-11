@@ -60,6 +60,7 @@ from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
     get_dummy_encoder_profile_inputs,
 )
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
@@ -411,11 +412,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     assert self.pp_handler is not None
                     self.pp_handler.configure_aux_hidden_state_relay(self.model)
             if isinstance(self.speculator, DraftModelSpeculator):
-                with use_workspace_lane(self._draft_workspace_lane):
-                    self.speculator.load_model(self.model)
-                    eplb_models_added = self.eplb.maybe_register_speculator(
-                        self.speculator, self.speculative_config, load_dummy_weights
-                    )
+                self.speculator.load_model(self.model)
+                eplb_models_added = self.eplb.maybe_register_speculator(
+                    self.speculator, self.speculative_config, load_dummy_weights
+                )
+        if getattr(self, "_poc_bridge", None) is None:
+            from gonka_poc.mixed.bridge import PoCRunnerBridge
+
+            self._poc_bridge = PoCRunnerBridge(self)
+        self._poc_bridge.load(self.model)
+
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory
@@ -1103,6 +1109,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.prompt_logprobs_worker.add_request(
                     req_id, req_index, new_req_data.sampling_params
                 )
+            elif self.is_last_pp_rank:
+                # PoC request (no sampling params): neutralize reused slot
+                # state; its sampled token is never read (finish is driven by
+                # artifact presence).
+                if self.prompt_logprobs_worker is not None:
+                    self.prompt_logprobs_worker.clear_slot(req_index)
+                if self.sampler is not None:
+                    self.sampler.add_request(
+                        req_index,
+                        prompt_len,
+                        SamplingParams(temperature=0.0, max_tokens=1),
+                    )
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
@@ -1801,6 +1819,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.step_timing.forward_start()
 
         # Run model.
+        # PoC hooks: buffer-writes only, BEFORE the replay/compile branch so
+        # they run on every step (FULL replay bypasses the else-branch body).
+        if getattr(self, "_poc_bridge", None) is not None:
+            self._poc_bridge.pre_step(scheduler_output)
+            self._poc_bridge.pre_forward(
+                scheduler_output,
+                input_batch.positions,
+                scheduler_output.total_num_scheduled_tokens,
+                batch_view=(input_batch.num_reqs, input_batch.req_ids),
+            )
+
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
@@ -1968,7 +1997,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
-            cudagraph_stats=cudagraph_stats,
+            poc_outputs=self._poc_bridge.extract(hidden_states)
+            if getattr(self, "_poc_bridge", None) is not None
+            else None,
         )
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
