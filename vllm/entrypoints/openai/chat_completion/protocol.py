@@ -42,6 +42,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.validation import EnforcedTokens
 from vllm.sampling_params import (
     BeamSearchParams,
     RepetitionDetectionParams,
@@ -386,6 +387,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."
         ),
+    )
+    enforced_tokens: EnforcedTokens | None = Field(
+        default=None,
+        description="Enforced token sequence for Gonka validation replay.",
+    )
+    enforced_str: str | None = Field(
+        default=None,
+        description="Enforced output string for Gonka validation replay.",
     )
     request_id: str = Field(
         default_factory=random_uuid,

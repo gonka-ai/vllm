@@ -64,6 +64,7 @@ from vllm.parser.abstract_parser import Parser
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
+from vllm.validation import validate_enforced_token_ids
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
@@ -328,6 +329,49 @@ class OpenAIServingChat(GenerateBaseServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+
+                # Inference validation (gonka replay). The recorded sequence is
+                # pinned through vLLM's own trace-replay path
+                # (SamplingParams.trace_decode_token_ids, enabled by
+                # --enable-trace-replay), not through a parallel mechanism:
+                # sampling and logprobs stay exactly an ordinary generation's.
+                enforced_ids: list[int] | None = None
+                try:
+                    if request.enforced_str:
+                        enforced_ids = tokenizer.encode(
+                            request.enforced_str, add_special_tokens=False
+                        )
+                    elif request.enforced_tokens:
+                        request.enforced_tokens.encode(tokenizer)
+                        enforced_ids = request.enforced_tokens.get_enforced_token_ids()
+
+                    if enforced_ids:
+                        validate_enforced_token_ids(
+                            enforced_ids, self.model_config.get_vocab_size()
+                        )
+                except ValueError as e:
+                    param = (
+                        "enforced_str" if request.enforced_str else "enforced_tokens"
+                    )
+                    return self.create_error_response(str(e), param=param)
+
+                if enforced_ids:
+                    # A replay must emit the recorded sequence and nothing past
+                    # it. The appended EOS below guarantees termination, but
+                    # only after one extra token when the recording was itself
+                    # cut short by max_tokens -- so pin the limit to the
+                    # recorded length and stop depending on the validator's
+                    # max_tokens happening to match the executor's.
+                    replay_len = len(enforced_ids)
+                    if (
+                        sampling_params.max_tokens is None
+                        or sampling_params.max_tokens > replay_len
+                    ):
+                        sampling_params.max_tokens = replay_len
+                    eos_token_id = tokenizer.eos_token_id
+                    if eos_token_id is not None and enforced_ids[-1] != eos_token_id:
+                        enforced_ids.append(eos_token_id)
+                    sampling_params.trace_decode_token_ids = enforced_ids
 
             self._log_inputs(
                 sub_request_id,
