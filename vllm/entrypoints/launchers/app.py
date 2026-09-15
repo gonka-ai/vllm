@@ -75,4 +75,12 @@ def build_app(
     # Decode-PoC is the canonical scheme; per-request max_tokens still
     # selects prefill-only (max_tokens == 0).
     app.state.poc_decode = True
+    # Mining rounds (init/generate) need the PoC gate that the plugin's own
+    # entrypoint used to install; on this base the app is built here.
+    from gonka_poc.entrypoint.gating import (
+        DEFAULT_BLOCKED_PREFIXES, PoCGate, install_gating_middleware)
+    _gate = PoCGate()
+    app.state.gonka_gate = _gate
+    install_gating_middleware(
+        app, gate=_gate, blocked_prefixes=DEFAULT_BLOCKED_PREFIXES)
     return app
