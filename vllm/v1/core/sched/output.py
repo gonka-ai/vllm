@@ -269,7 +269,6 @@ class SchedulerOutput:
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
 
-
     # Whether any of the scheduled requests use structured output.
     # Set only in async scheduling case.
     has_structured_output_requests: bool = False

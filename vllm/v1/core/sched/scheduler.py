@@ -2001,9 +2001,7 @@ class Scheduler(SchedulerInterface):
                     "sph_indices_steps": getattr(poc_obj, "sph_indices_steps", []),
                     "sph_values_steps": getattr(poc_obj, "sph_values_steps", []),
                     "n_nan_steps": getattr(poc_obj, "n_nan_steps", 0),
-                    "mismatch_margin_max": getattr(
-                        poc_obj, "mismatch_margin_max", 0.0
-                    ),
+                    "mismatch_margin_max": getattr(poc_obj, "mismatch_margin_max", 0.0),
                 }
                 request.status = RequestStatus.FINISHED_STOPPED
                 self._free_request(request)

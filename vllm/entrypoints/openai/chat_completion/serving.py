@@ -64,9 +64,9 @@ from vllm.parser.abstract_parser import Parser
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.validation import validate_enforced_token_ids
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
+from vllm.validation import validate_enforced_token_ids
 
 logger = init_logger(__name__)
 

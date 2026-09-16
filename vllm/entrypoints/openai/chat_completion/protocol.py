@@ -42,7 +42,6 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
-from vllm.validation import EnforcedTokens
 from vllm.sampling_params import (
     BeamSearchParams,
     RepetitionDetectionParams,
@@ -52,6 +51,7 @@ from vllm.sampling_params import (
     ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
+from vllm.validation import EnforcedTokens
 
 logger = init_logger(__name__)
 
