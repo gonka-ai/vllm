@@ -339,6 +339,15 @@ class OpenAIServingChat(GenerateBaseServing):
                         or sampling_params.max_tokens > replay_len
                     ):
                         sampling_params.max_tokens = replay_len
+                    # The params were validated before the pin; a min_tokens
+                    # above the recorded length would now fail
+                    # SamplingParams.__post_init__ when the engine core
+                    # deserializes the request -- and that raises inside
+                    # process_input_sockets, killing the input thread and
+                    # every request after it. The enforced tokens decide the
+                    # length anyway, so keep min_tokens within the pin.
+                    if sampling_params.min_tokens > replay_len:
+                        sampling_params.min_tokens = replay_len
                     eos_token_id = tokenizer.eos_token_id
                     if eos_token_id is not None and enforced_ids[-1] != eos_token_id:
                         enforced_ids.append(eos_token_id)
