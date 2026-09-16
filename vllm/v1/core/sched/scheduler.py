@@ -707,7 +707,14 @@ class Scheduler(SchedulerInterface):
                     shift_computed_tokens=self.num_prefill_lookahead,
                 )
 
-            # PoC row: atomic prefill (all of seq_len or wait), one token per decode step.
+            # Multi-module MTP: avoid ending a prefill chunk within
+            # num_prefill_lookahead of the prefill end.
+            num_new_tokens = self._reserve_prefill_lookahead(
+                request, request.num_computed_tokens, num_new_tokens
+            )
+
+            # PoC row: atomic prefill (all of seq_len or wait), one token per
+            # decode step.
             num_new_tokens = poc_step_tokens(request, num_new_tokens, token_budget)
             if num_new_tokens == 0 and request.poc_params is not None:
                 req_index += 1
@@ -1435,6 +1442,7 @@ class Scheduler(SchedulerInterface):
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

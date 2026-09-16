@@ -477,9 +477,7 @@ class InputBatch:
 
             self.pooling_params[req_id] = pooling_params
             self.pooling_states[req_id] = pooling_states
-            self.logits_processing_needs_token_ids[req_index] = (
-                pooling_params.requires_token_ids
-            )
+            self.logits_processing_needs_token_ids[req_index] = False
         elif request.poc_params is not None:
             pass
         else:

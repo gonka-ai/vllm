@@ -412,10 +412,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     assert self.pp_handler is not None
                     self.pp_handler.configure_aux_hidden_state_relay(self.model)
             if isinstance(self.speculator, DraftModelSpeculator):
-                self.speculator.load_model(self.model)
-                eplb_models_added = self.eplb.maybe_register_speculator(
-                    self.speculator, self.speculative_config, load_dummy_weights
-                )
+                with use_workspace_lane(self._draft_workspace_lane):
+                    self.speculator.load_model(self.model)
+                    eplb_models_added = self.eplb.maybe_register_speculator(
+                        self.speculator, self.speculative_config, load_dummy_weights
+                    )
         if getattr(self, "_poc_bridge", None) is None:
             from gonka_poc.mixed.bridge import PoCRunnerBridge
 
@@ -1997,6 +1998,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+            cudagraph_stats=cudagraph_stats,
             poc_outputs=self._poc_bridge.extract(hidden_states)
             if getattr(self, "_poc_bridge", None) is not None
             else None,
