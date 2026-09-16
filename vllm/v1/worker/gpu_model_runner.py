@@ -4286,9 +4286,6 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
-        if self.routed_experts_initialized:
-            self.routed_experts_capturer.clear_buffer()
-
         # PoC mixed-batch bridge (no-op when the step holds no PoC rows).
         if getattr(self, "_poc_bridge", None) is None:
             from gonka_poc.mixed.bridge import PoCRunnerBridge
@@ -4531,14 +4528,6 @@ class GPUModelRunner(
                 positions,
                 scheduler_output.total_num_scheduled_tokens,
             )
-
-        # Set cudagraph mode to none if calc_kv_scales is true.
-        # KV scales calculation involves dynamic operations that are incompatible
-        # with CUDA graph capture.
-        if self.calculate_kv_scales:
-            cudagraph_mode = CUDAGraphMode.NONE
-            # Mark KV scales as calculated after the first forward pass
-            self.calculate_kv_scales = False
 
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
