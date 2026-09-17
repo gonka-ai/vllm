@@ -358,6 +358,13 @@ class OpenAIServingChat(GenerateBaseServing):
                     if eos_token_id is not None and enforced_ids[-1] != eos_token_id:
                         enforced_ids.append(eos_token_id)
                     sampling_params.enforced_token_ids = enforced_ids
+                    if (
+                        sampling_params.logprobs_mode is None
+                        and request.enforced_tokens is not None
+                    ):
+                        detected = request.enforced_tokens.detect_logprobs_mode()
+                        if detected:
+                            sampling_params.logprobs_mode = detected
 
             self._log_inputs(
                 sub_request_id,
