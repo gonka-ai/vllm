@@ -355,6 +355,13 @@ class OpenAIServingChat(GenerateBaseServing):
                     )
                     return self.create_error_response(str(e), param=param)
 
+                if enforced_ids and (request.n or 1) > 1:
+                    # The upstream trace-replay path pins one sequence per request;
+                    # refuse here with a 400 instead of failing inside the engine.
+                    return self.create_error_response(
+                        "enforced_tokens requires n=1", param="n"
+                    )
+
                 if enforced_ids:
                     eos_token_id = tokenizer.eos_token_id
                     if eos_token_id is not None and enforced_ids[-1] != eos_token_id:
