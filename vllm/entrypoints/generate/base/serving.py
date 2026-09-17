@@ -327,18 +327,12 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         tokenizer: TokenizerLike | None,
         return_as_token_id: bool = False,
     ) -> str:
-        if return_as_token_id:
-            return format_token_id_placeholder(token_id)
-
-        if logprob.decoded_token is not None:
-            return logprob.decoded_token
-
-        if tokenizer is None:
-            raise ValueError(
-                "Unable to get tokenizer because `skip_tokenizer_init=True`"
-            )
-
-        return tokenizer.decode([token_id])
+        # Gonka inference validation: logprob tokens are the token id as a plain
+        # string, unconditionally. The validator re-sends them as enforced
+        # tokens and rejects decoded text ("Logprobs contain decoded text
+        # instead of numeric token IDs"); the shipped 0.25.1 and 0.28.0-glm53
+        # lines render them the same way.
+        return str(token_id)
 
 
 def format_token_id_placeholder(token_id: int) -> str:
