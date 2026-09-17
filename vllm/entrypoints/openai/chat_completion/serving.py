@@ -330,11 +330,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     self.default_sampling_params,
                 )
 
-                # Inference validation (gonka replay). The recorded sequence is
-                # pinned through vLLM's own trace-replay path
-                # (SamplingParams.trace_decode_token_ids, enabled by
-                # --enable-trace-replay), not through a parallel mechanism:
-                # sampling and logprobs stay exactly an ordinary generation's.
+                # Inference validation (Gonka replay): the recorded sequence is
+                # pinned through SamplingParams.enforced_token_ids, the same
+                # mechanism as release/v0.25.1 and release/v0.28.0-glm53.
                 enforced_ids: list[int] | None = None
                 try:
                     if request.enforced_str:
@@ -355,18 +353,11 @@ class OpenAIServingChat(GenerateBaseServing):
                     )
                     return self.create_error_response(str(e), param=param)
 
-                if enforced_ids and (request.n or 1) > 1:
-                    # The upstream trace-replay path pins one sequence per request;
-                    # refuse here with a 400 instead of failing inside the engine.
-                    return self.create_error_response(
-                        "enforced_tokens requires n=1", param="n"
-                    )
-
                 if enforced_ids:
                     eos_token_id = tokenizer.eos_token_id
                     if eos_token_id is not None and enforced_ids[-1] != eos_token_id:
                         enforced_ids.append(eos_token_id)
-                    sampling_params.trace_decode_token_ids = enforced_ids
+                    sampling_params.enforced_token_ids = enforced_ids
 
             self._log_inputs(
                 sub_request_id,

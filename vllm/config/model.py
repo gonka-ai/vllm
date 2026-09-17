@@ -255,12 +255,7 @@ class ModelConfig:
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
     vocab_size) logprobs are allowed to be returned and it may cause OOM."""
-    # Gonka: the network node selects the mode per request (chain parameter
-    # validation_params.logprobs_mode, "processed_logprobs" today) through a
-    # request field this base does not carry, and no launch profile passes
-    # --logprobs-mode. Default to the chain's value so an unflagged launch
-    # returns what the validators compare against.
-    logprobs_mode: LogprobsMode = "processed_logprobs"
+    logprobs_mode: LogprobsMode = "raw_logprobs"
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
     1) raw_logprobs, 2) processed_logprobs, 3) raw_logits, 4) processed_logits.
