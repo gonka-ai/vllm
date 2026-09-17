@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from gonka_poc.mixed.admission import poc_step_tokens
+
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -53,7 +55,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -74,6 +81,12 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+
+def _replays_enforced_tokens(request) -> bool:
+    """True when the request replays a pinned token sequence (PoC validation)."""
+    params = getattr(request, "sampling_params", None)
+    return bool(getattr(params, "enforced_token_ids", None))
 
 
 class Scheduler(SchedulerInterface):
@@ -617,7 +630,8 @@ class Scheduler(SchedulerInterface):
                 break
 
             if (
-                request.num_output_placeholders > 0
+                request.poc_params is None
+                and request.num_output_placeholders > 0
                 # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
                 # Since output placeholders are also included in the computed tokens
                 # count, we subtract (num_output_placeholders - 1) to remove any draft
@@ -704,6 +718,13 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = self._reserve_prefill_lookahead(
                 request, request.num_computed_tokens, num_new_tokens
             )
+
+            # PoC row: atomic prefill (all of seq_len or wait), one token per
+            # decode step.
+            num_new_tokens = poc_step_tokens(request, num_new_tokens, token_budget)
+            if num_new_tokens == 0 and request.poc_params is not None:
+                req_index += 1
+                continue
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -802,6 +823,12 @@ class Scheduler(SchedulerInterface):
             req_index += 1
 
             # Speculative decode related.
+            # A replay must not speculate: RejectionSampler has no
+            # enforced-token hook, and an accepted draft books two emitted
+            # tokens while the reply carries one, so the replay index runs
+            # ahead of the output.
+            if request.spec_token_ids and _replays_enforced_tokens(request):
+                request.spec_token_ids = []
             if request.spec_token_ids:
                 num_scheduled_spec_tokens = (
                     num_new_tokens
@@ -1041,6 +1068,7 @@ class Scheduler(SchedulerInterface):
                         and num_new_tokens == 1
                         and not prefill_scheduled
                         and (scheduled_running_reqs or num_computed_tokens > 0)
+                        and not _replays_enforced_tokens(request)
                     ):
                         padded_num_tokens = 1 + self.num_spec_tokens
                         # Pad only when there is room for the sampled token(s).
@@ -1120,6 +1148,13 @@ class Scheduler(SchedulerInterface):
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
                         break
+
+                # PoC row: atomic prefill (all of seq_len or wait for a later step).
+                num_new_tokens = poc_step_tokens(request, num_new_tokens, token_budget)
+                if num_new_tokens == 0 and request.poc_params is not None:
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
@@ -1958,7 +1993,51 @@ class Scheduler(SchedulerInterface):
             if output_is_stale and request.drop_stale_output:
                 continue
 
-            req_index = model_runner_output.req_id_to_index[req_id]
+            if request.poc_params is not None:
+                # PoC finish = artifact presence (emit-once).
+                if request.num_output_placeholders > 0:
+                    request.num_output_placeholders -= 1
+                poc_outputs = getattr(model_runner_output, "poc_outputs", None)
+                poc_obj = poc_outputs.get(req_id) if poc_outputs else None
+                if poc_obj is None:
+                    continue
+                poc_payload = {
+                    "nonce": poc_obj.nonce,
+                    "vector_b64": poc_obj.vector_b64,
+                    "hidden_state_b64": poc_obj.hidden_state_b64,
+                    "reduced_hidden_state_b64": poc_obj.reduced_hidden_state_b64,
+                    "reduced_hidden_state_decode_b64": getattr(
+                        poc_obj, "reduced_hidden_state_decode_b64", []
+                    ),
+                    "k_points_steps": getattr(poc_obj, "k_points_steps", []),
+                    "n_sphere_mismatches": getattr(poc_obj, "n_sphere_mismatches", -1),
+                    "sph_indices_steps": getattr(poc_obj, "sph_indices_steps", []),
+                    "sph_values_steps": getattr(poc_obj, "sph_values_steps", []),
+                    "n_nan_steps": getattr(poc_obj, "n_nan_steps", 0),
+                    "mismatch_margin_max": getattr(poc_obj, "mismatch_margin_max", 0.0),
+                }
+                request.status = RequestStatus.FINISHED_STOPPED
+                self._free_request(request)
+                stopped_running_reqs.add(request)
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=FinishReason.STOP,
+                        poc_output=poc_payload,
+                        events=request.take_events(),
+                        trace_headers=request.trace_headers,
+                    )
+                )
+                continue
+
+            req_index = model_runner_output.req_id_to_index.get(req_id)
+            if req_index is None:
+                # Async-scheduling race: the request is in num_scheduled_tokens
+                # but the model runner produced no output for it this step
+                # (aborted or preempted between schedule and execution). Skip
+                # it instead of crashing EngineCore with a KeyError.
+                continue
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )

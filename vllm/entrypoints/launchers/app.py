@@ -53,4 +53,26 @@ def build_app(
     init_exception_handler(app)
     init_entrypoints_middleware(args, app, supported_tasks)
     app = sagemaker_standards_bootstrap(app)
+
+    # PoC routes: registered directly, not via include_router — FastAPI's
+    # _IncludedRouter crashes prometheus route-name lookup (0.20 fix kept).
+    # The gonka_poc plugin is required — there is no in-tree implementation.
+    # On this base the app is built here, not in the deprecated
+    # entrypoints/openai/api_server.py, so the registration moved with it.
+    # A cleaner home is upstream's endpoint-plugin interface
+    # (attach_endpoint_plugins above); doing that needs changes in the plugin
+    # and is the right shape if this line ever becomes a release line.
+    from gonka_poc.poc.routes import router as poc_router
+
+    for _poc_route in poc_router.routes:
+        app.add_api_route(
+            _poc_route.path,
+            _poc_route.endpoint,
+            methods=list(_poc_route.methods),
+            name=_poc_route.name,
+        )
+    app.state.poc_enabled = True
+    # Decode-PoC is the canonical scheme; per-request max_tokens still
+    # selects prefill-only (max_tokens == 0).
+    app.state.poc_decode = True
     return app
