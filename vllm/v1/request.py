@@ -26,6 +26,7 @@ from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
+    from vllm.poc.poc_params import PoCParams
     from vllm.v1.core.kv_cache_utils import BlockHash
 
 
@@ -63,6 +64,7 @@ class Request:
         prompt_token_ids: list[int] | None,
         sampling_params: SamplingParams | None,
         pooling_params: PoolingParams | None,
+        poc_params: "PoCParams | None" = None,
         client_index: int = 0,
         arrival_time: float | None = None,
         prompt_embeds: torch.Tensor | None = None,
@@ -84,6 +86,7 @@ class Request:
         self.priority = priority
         self.sampling_params = sampling_params
         self.pooling_params = pooling_params
+        self.poc_params = poc_params
         self.lora_request = lora_request
         self.structured_output_request = StructuredOutputRequest.from_sampling_params(
             sampling_params
@@ -104,7 +107,11 @@ class Request:
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
 
-        if pooling_params is not None:
+        if poc_params is not None:
+            assert sampling_params is None and pooling_params is None
+            # PoC stepping/finish driven by the scheduler PoC branch.
+            self.max_tokens = 1
+        elif pooling_params is not None:
             # Pooling models.
             self.max_tokens = 1
         elif sampling_params is not None:
@@ -249,6 +256,7 @@ class Request:
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
+            poc_params=getattr(request, "poc_params", None),
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
             cache_salt=request.cache_salt,

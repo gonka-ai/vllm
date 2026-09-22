@@ -362,11 +362,37 @@ class AsyncLLM(EngineClient):
         prompt_text: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        poc_params=None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
         if self.errored:
             raise EngineDeadError()
+
+        if poc_params is not None:
+            # PoC emits its artifact ONCE: a single finished output (0.20 path).
+            queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request_id)
+            request = EngineCoreRequest(
+                request_id=request_id,
+                # Dummy tokens (seq_len): PoC rides the graphed input_ids path;
+                # seeded embeds are injected in-model (native.py).
+                prompt_token_ids=[0] * poc_params.seq_len,
+                mm_features=None,
+                sampling_params=None,
+                pooling_params=None,
+                arrival_time=arrival_time if arrival_time is not None else time.time(),
+                lora_request=lora_request,
+                # Unique salt: dummy prompts are identical across nonces;
+                # prefix-cache hits would share KV between nonces.
+                cache_salt=request_id,
+                data_parallel_rank=data_parallel_rank,
+                priority=priority,
+                poc_params=poc_params,
+            )
+            self.input_processor.assign_request_id(request)
+            self._run_output_handler()
+            await self._add_request(request, None, None, 0, queue)
+            return queue
 
         is_pooling = isinstance(params, PoolingParams)
 
@@ -639,6 +665,7 @@ class AsyncLLM(EngineClient):
         session_id: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        poc_params=None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -667,6 +694,14 @@ class AsyncLLM(EngineClient):
         """
 
         q: RequestOutputCollector | None = None
+        if poc_params is not None:
+            if prompt is not None:
+                raise ValueError("poc_params cannot be used with a prompt")
+            if request_id is None:
+                import uuid
+
+                request_id = f"poc-{uuid.uuid4()}"
+
         try:
             q = await self.add_request(
                 request_id,
@@ -678,6 +713,7 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
                 session_id=session_id,
+                poc_params=poc_params,
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
