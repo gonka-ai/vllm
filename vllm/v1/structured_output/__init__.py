@@ -410,6 +410,8 @@ class StructuredOutputManager:
                                 token,
                                 req_id,
                             )
+                            apply_bitmask = False
+                            grammar_rejected = True
                     cumulative_index += 1
 
                 # Diffusion LLMs don't sample a bonus token after the
