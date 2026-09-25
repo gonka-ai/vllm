@@ -66,6 +66,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
+from vllm.validation import validate_enforced_token_ids
 
 logger = init_logger(__name__)
 
@@ -328,6 +329,42 @@ class OpenAIServingChat(GenerateBaseServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+
+                # Inference validation (Gonka replay): the recorded sequence is
+                # pinned through SamplingParams.enforced_token_ids, the same
+                # mechanism as release/v0.25.1 and release/v0.28.0-glm53.
+                enforced_ids: list[int] | None = None
+                try:
+                    if request.enforced_str:
+                        enforced_ids = tokenizer.encode(
+                            request.enforced_str, add_special_tokens=False
+                        )
+                    elif request.enforced_tokens:
+                        request.enforced_tokens.encode(tokenizer)
+                        enforced_ids = request.enforced_tokens.get_enforced_token_ids()
+
+                    if enforced_ids:
+                        validate_enforced_token_ids(
+                            enforced_ids, self.model_config.get_vocab_size()
+                        )
+                except ValueError as e:
+                    param = (
+                        "enforced_str" if request.enforced_str else "enforced_tokens"
+                    )
+                    return self.create_error_response(str(e), param=param)
+
+                if enforced_ids:
+                    eos_token_id = tokenizer.eos_token_id
+                    if eos_token_id is not None and enforced_ids[-1] != eos_token_id:
+                        enforced_ids.append(eos_token_id)
+                    sampling_params.enforced_token_ids = enforced_ids
+                    if (
+                        sampling_params.logprobs_mode is None
+                        and request.enforced_tokens is not None
+                    ):
+                        detected = request.enforced_tokens.detect_logprobs_mode()
+                        if detected:
+                            sampling_params.logprobs_mode = detected
 
             self._log_inputs(
                 sub_request_id,
