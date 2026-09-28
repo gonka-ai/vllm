@@ -165,6 +165,9 @@ class MultiprocExecutor(Executor):
                 self.world_size,
                 self.local_world_size,
                 max_chunk_bytes=max_chunk_bytes,
+                # Deeper rings keep a slow reader from stalling the writer
+                # until the engine is declared dead (Kimi-K2.6, TP=4).
+                max_chunks=envs.VLLM_MQ_MAX_CHUNKS or 10,
                 connect_ip=mq_connect_ip,
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
@@ -425,6 +428,9 @@ class MultiprocExecutor(Executor):
 
         def get_response():
             responses = []
+            # Drain every rank before raising: a queued failure would answer
+            # the next call.
+            failure = None
             for mq in response_mqs:
                 dequeue_timeout = (
                     None if deadline is None else max(0.0, deadline - time.monotonic())
@@ -434,11 +440,15 @@ class MultiprocExecutor(Executor):
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
-                    raise RuntimeError(
-                        f"Worker failed with error '{result}', please check the"
-                        " stack trace above for the root cause"
-                    )
+                    if failure is None:
+                        failure = result
+                    continue
                 responses.append(result)
+            if failure is not None:
+                raise RuntimeError(
+                    f"Worker failed with error '{failure}', please check the"
+                    " stack trace above for the root cause"
+                )
             return responses[0] if output_rank is not None else responses
 
         future = FutureWrapper(

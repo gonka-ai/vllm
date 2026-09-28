@@ -178,6 +178,9 @@ class _SM90State:
         self.workspace = torch.empty(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
         self.device = device
         self.num_heads = num_heads
+        # The fp8 KV cache lives in a uint8 buffer; plan with its e4m3 dtype.
+        if kv_dtype == torch.uint8:
+            kv_dtype = torch.float8_e4m3fn
         self.kv_dtype = kv_dtype
         self.max_tokens = max_tokens
         self.topk_width = topk_width

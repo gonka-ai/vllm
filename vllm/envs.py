@@ -239,6 +239,7 @@ if TYPE_CHECKING:
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_MQ_MAX_CHUNKS: int | None = None
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
     VLLM_KV_CACHE_LAYOUT: (
@@ -1757,6 +1758,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MQ_MAX_CHUNK_BYTES_MB": lambda: int(
         os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")
     ),
+    # Chunks per shared-memory message-queue ring; None keeps each default.
+    "VLLM_MQ_MAX_CHUNKS": lambda: (
+        int(os.environ["VLLM_MQ_MAX_CHUNKS"])
+        if "VLLM_MQ_MAX_CHUNKS" in os.environ
+        else None
+    ),
     # Timeout in seconds for execute_model RPC calls in multiprocessing
     # executor (only applies when TP > 1).
     "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": lambda: int(
@@ -2033,9 +2040,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
-    # Flag to control the v2 model runner. If unset, use config defaults.
+    # Flag to control the v2 model runner. Off by default here: the PoC seams
+    # live in the v1 runner.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: maybe_convert_bool(
-        os.getenv("VLLM_USE_V2_MODEL_RUNNER", None)
+        os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
