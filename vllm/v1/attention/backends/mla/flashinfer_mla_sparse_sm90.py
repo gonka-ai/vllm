@@ -178,6 +178,15 @@ class _SM90State:
         self.workspace = torch.empty(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
         self.device = device
         self.num_heads = num_heads
+        # vLLM keeps an fp8 KV cache in a torch.uint8 buffer, and the run-time
+        # path below hands the kernel a float8_e4m3fn view of it. The planner
+        # therefore has to be told the real element type: with uint8 FlashInfer
+        # refuses outright ("MLA kv_data_type torch.uint8 is not supported"),
+        # and without its allowlist the kernel would JIT over a non-FP8 element
+        # type and read e4m3 bytes as unsigned integers. The gonka fork resolves
+        # the same dtype explicitly; this is the one-line equivalent.
+        if kv_dtype == torch.uint8:
+            kv_dtype = torch.float8_e4m3fn
         self.kv_dtype = kv_dtype
         self.max_tokens = max_tokens
         self.topk_width = topk_width
