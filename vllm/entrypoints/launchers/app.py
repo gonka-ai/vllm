@@ -54,33 +54,20 @@ def build_app(
     init_entrypoints_middleware(args, app, supported_tasks)
     app = sagemaker_standards_bootstrap(app)
 
-    # PoC routes: registered directly, not via include_router — FastAPI's
-    # _IncludedRouter crashes prometheus route-name lookup (0.20 fix kept).
-    # The gonka_poc plugin is required — there is no in-tree implementation.
-    # On this base the app is built here, not in the deprecated
-    # entrypoints/openai/api_server.py, so the registration moved with it.
-    # A cleaner home is upstream's endpoint-plugin interface
-    # (attach_endpoint_plugins above); doing that needs changes in the plugin
-    # and is the right shape if this line ever becomes a release line.
+    # PoC routes are added one by one: include_router breaks the prometheus
+    # route-name lookup. The gate answers 503 on chat during a mining round.
+    from gonka_poc.entrypoint.gating import (
+        DEFAULT_BLOCKED_PREFIXES,
+        PoCGate,
+        install_gating_middleware,
+    )
     from gonka_poc.poc.routes import router as poc_router
 
-    for _poc_route in poc_router.routes:
+    for route in poc_router.routes:
         app.add_api_route(
-            _poc_route.path,
-            _poc_route.endpoint,
-            methods=list(_poc_route.methods),
-            name=_poc_route.name,
+            route.path, route.endpoint, methods=list(route.methods), name=route.name
         )
-    app.state.poc_enabled = True
-    # Decode-PoC is the canonical scheme; per-request max_tokens still
-    # selects prefill-only (max_tokens == 0).
-    app.state.poc_decode = True
-    # Mining rounds (init/generate) need the PoC gate that the plugin's own
-    # entrypoint used to install; on this base the app is built here.
-    from gonka_poc.entrypoint.gating import (
-        DEFAULT_BLOCKED_PREFIXES, PoCGate, install_gating_middleware)
-    _gate = PoCGate()
-    app.state.gonka_gate = _gate
-    install_gating_middleware(
-        app, gate=_gate, blocked_prefixes=DEFAULT_BLOCKED_PREFIXES)
+    gate = PoCGate()
+    app.state.gonka_gate = gate
+    install_gating_middleware(app, gate=gate, blocked_prefixes=DEFAULT_BLOCKED_PREFIXES)
     return app
