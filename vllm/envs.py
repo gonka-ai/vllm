@@ -2043,9 +2043,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
-    # Flag to control the v2 model runner. If unset, use config defaults.
+    # Flag to control the v2 model runner. Off by default here: the PoC seams
+    # live in the v1 runner.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: maybe_convert_bool(
-        os.getenv("VLLM_USE_V2_MODEL_RUNNER", None)
+        os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
