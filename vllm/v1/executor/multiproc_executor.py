@@ -165,6 +165,20 @@ class MultiprocExecutor(Executor):
                 self.world_size,
                 self.local_world_size,
                 max_chunk_bytes=max_chunk_bytes,
+                # Sized by VLLM_MQ_MAX_CHUNKS. Raising it is what stopped a
+                # large MoE model (Kimi-K2.6, TP=4) from dying under sustained
+                # production load: the writer here is EngineCore, and when a
+                # reader is briefly slow to drain, the writer blocks
+                # ("No available shared memory broadcast block"), the step
+                # stalls, and the engine is eventually declared dead. Deeper
+                # rings absorb the stall. Treat it as a mitigation rather than
+                # a cure -- stalls were still seen near idle afterwards.
+                #
+                # Off by default because each ring costs
+                # max_chunks x (max_chunk_bytes + metadata) of /dev/shm: at the
+                # 16 MiB default a ring of 64 is ~1 GiB, and an engine has
+                # several, so this cannot be imposed on every deployment.
+                max_chunks=envs.VLLM_MQ_MAX_CHUNKS or 10,
                 connect_ip=mq_connect_ip,
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
@@ -425,6 +439,10 @@ class MultiprocExecutor(Executor):
 
         def get_response():
             responses = []
+            # Dequeue every rank before raising: a FAILURE left in another
+            # rank's queue would be read as that rank's reply to the NEXT
+            # call, and every call after that would see a stale response.
+            failure = None
             for mq in response_mqs:
                 dequeue_timeout = (
                     None if deadline is None else max(0.0, deadline - time.monotonic())
@@ -434,11 +452,15 @@ class MultiprocExecutor(Executor):
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
-                    raise RuntimeError(
-                        f"Worker failed with error '{result}', please check the"
-                        " stack trace above for the root cause"
-                    )
+                    if failure is None:
+                        failure = result
+                    continue
                 responses.append(result)
+            if failure is not None:
+                raise RuntimeError(
+                    f"Worker failed with error '{failure}', please check the"
+                    " stack trace above for the root cause"
+                )
             return responses[0] if output_rank is not None else responses
 
         future = FutureWrapper(
