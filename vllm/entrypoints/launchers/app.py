@@ -53,4 +53,21 @@ def build_app(
     init_exception_handler(app)
     init_entrypoints_middleware(args, app, supported_tasks)
     app = sagemaker_standards_bootstrap(app)
+
+    # PoC routes are added one by one: include_router breaks the prometheus
+    # route-name lookup. The gate answers 503 on chat during a mining round.
+    from gonka_poc.entrypoint.gating import (
+        DEFAULT_BLOCKED_PREFIXES,
+        PoCGate,
+        install_gating_middleware,
+    )
+    from gonka_poc.poc.routes import router as poc_router
+
+    for route in poc_router.routes:
+        app.add_api_route(
+            route.path, route.endpoint, methods=list(route.methods), name=route.name
+        )
+    gate = PoCGate()
+    app.state.gonka_gate = gate
+    install_gating_middleware(app, gate=gate, blocked_prefixes=DEFAULT_BLOCKED_PREFIXES)
     return app

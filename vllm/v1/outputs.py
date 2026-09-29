@@ -318,6 +318,23 @@ class ECConnectorOutput:
         )
 
 
+@dataclass
+class PoCOutput:
+    nonce: int
+    vector_b64: str  # prefill-scheme artifact
+    # Decode chain: codebook index per step, 0 = prefill, 1..N = decode steps.
+    k_points_steps: list[int] = field(default_factory=list)
+    # Validation only: steps that disagreed with the reference (-1 otherwise).
+    n_sphere_mismatches: int = -1
+    # Non-finite decode steps: a compute fault, excluded from mismatches.
+    n_nan_steps: int = 0
+    # Validation only: the largest claimed-cell margin among disagreeing steps.
+    mismatch_margin_max: float = 0.0
+    # Per-step sphere slices (debug and vector artifacts).
+    sph_indices_steps: list[list[int]] = field(default_factory=list)
+    sph_values_steps: list[str] = field(default_factory=list)
+
+
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
@@ -355,6 +372,9 @@ class ModelRunnerOutput:
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
+
+    # PoC artifacts per request id (None when PoC is idle).
+    poc_outputs: dict[str, PoCOutput] | None = None
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None

@@ -56,6 +56,11 @@ class BatchDescriptor:
     (like fused_moe_lora) whose grid size depends on num_active_loras
     to be properly captured.
     """
+    poc: bool = False
+    """
+    Whether this batch carries gonka decode-PoC rows. The PoC transforms are
+    captured into their own cudagraphs; other batches run the bare model.
+    """
 
 
 def _compute_sp_num_tokens(

@@ -778,6 +778,7 @@ class GPUModelRunner(
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             reasoning_config=self.vllm_config.reasoning_config,
             use_replayssm=self.cache_config.use_replayssm,
+            logprobs_mode_default=self.model_config.logprobs_mode,
         )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
@@ -904,7 +905,13 @@ class GPUModelRunner(
         self.uniform_decode_query_len = 1 + self.num_spec_tokens
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
-        self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
+        # gonka PoC graphs: only an uncompiled forward (breakable cudagraphs)
+        # can differ with and without the PoC transforms; a compiled graph
+        # always carries them.
+        self.cudagraph_dispatcher = CudagraphDispatcher(
+            self.vllm_config,
+            poc_graphs=self.compilation_config.mode == CompilationMode.NONE,
+        )
 
         self.mm_budget = (
             MultiModalBudget(self.vllm_config, self.mm_registry)
@@ -1328,6 +1335,7 @@ class GPUModelRunner(
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                poc_params=new_req_data.poc_params,
             )
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
@@ -3666,6 +3674,9 @@ class GPUModelRunner(
         # if async scheduling and required by current sampling params.
         self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
+            bridge = getattr(self, "_poc_bridge", None)
+            if bridge is not None and bridge.mixed_active():
+                return bridge.sample_chat_rows(logits, sampling_metadata)
             return self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
@@ -3965,6 +3976,7 @@ class GPUModelRunner(
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
+        poc: bool = False,
     ) -> tuple[
         CUDAGraphMode,
         BatchDescriptor,
@@ -4001,6 +4013,7 @@ class GPUModelRunner(
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
                 num_active_loras=num_active_loras,
+                poc=poc,
                 valid_modes={CUDAGraphMode.NONE} if force_eager else valid_modes,
                 invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
             )
@@ -4195,6 +4208,12 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
+        # PoC mixed-batch bridge (no-op when the step holds no PoC rows).
+        if getattr(self, "_poc_bridge", None) is None:
+            from gonka_poc.mixed.bridge import PoCRunnerBridge
+
+            self._poc_bridge = PoCRunnerBridge(self)
+
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
@@ -4279,6 +4298,9 @@ class GPUModelRunner(
                     scheduler_output.num_common_prefix_blocks,
                 )
 
+            # After _update_states: requests are registered. The step's PoC
+            # rows pick the cudagraphs that carry the PoC transforms.
+            poc_step = self._poc_bridge.pre_step(scheduler_output)
             (
                 cudagraph_mode,
                 batch_desc,
@@ -4295,6 +4317,7 @@ class GPUModelRunner(
                 allow_microbatching=self._allow_microbatching(
                     num_reqs, num_scheduled_tokens_np
                 ),
+                poc=poc_step,
             )
 
             logger.debug(
@@ -4423,6 +4446,13 @@ class GPUModelRunner(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
 
+        if getattr(self, "_poc_bridge", None) is not None:
+            self._poc_bridge.pre_forward(
+                scheduler_output,
+                positions,
+                scheduler_output.total_num_scheduled_tokens,
+            )
+
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
@@ -4495,7 +4525,12 @@ class GPUModelRunner(
                     )
 
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states)
+                logits = (
+                    self._poc_bridge.compute_logits(sample_hidden_states)
+                    if getattr(self, "_poc_bridge", None) is not None
+                    and self._poc_bridge.mixed_active()
+                    else self.model.compute_logits(sample_hidden_states)
+                )
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -4514,7 +4549,12 @@ class GPUModelRunner(
                     )
                     logits = None
                 else:
-                    logits = self.model.compute_logits(sample_hidden_states)
+                    logits = (
+                        self._poc_bridge.compute_logits(sample_hidden_states)
+                        if getattr(self, "_poc_bridge", None) is not None
+                        and self._poc_bridge.mixed_active()
+                        else self.model.compute_logits(sample_hidden_states)
+                    )
 
                 model_output_broadcast_data: dict[str, Any] = {}
                 if logits is not None:
@@ -4789,6 +4829,9 @@ class GPUModelRunner(
                 if self.supports_mm_inputs
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
+                poc_outputs=self._poc_bridge.extract(hidden_states)
+                if getattr(self, "_poc_bridge", None) is not None
+                else None,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
             )
@@ -5344,6 +5387,12 @@ class GPUModelRunner(
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
+                # PoC transforms attach BEFORE compilation/capture (0.20 parity).
+                if getattr(self, "_poc_bridge", None) is None:
+                    from gonka_poc.mixed.bridge import PoCRunnerBridge
+
+                    self._poc_bridge = PoCRunnerBridge(self)
+                self._poc_bridge.load(self.model)
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
                     if hasattr(self.drafter, "load_model"):
@@ -5862,6 +5911,7 @@ class GPUModelRunner(
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         randomize_inputs: bool = False,
+        poc: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -5974,6 +6024,7 @@ class GPUModelRunner(
                 # `force_num_active_loras` is used for cudagraph capture; because we
                 # need to capture graphs for specific num_active_loras counts
                 force_num_active_loras=num_active_loras,
+                poc=poc,
             )
         )
 
@@ -6947,6 +6998,9 @@ class GPUModelRunner(
         if num_warmups is None:
             num_warmups = self.compilation_config.cudagraph_num_of_warmups
         force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
+        # gonka PoC: the graph carries the PoC transforms iff its key says so.
+        if getattr(self, "_poc_bridge", None) is not None:
+            self._poc_bridge.set_active(desc.poc)
         for _ in range(num_warmups):
             self._dummy_run(
                 desc.num_tokens,
@@ -6979,6 +7033,7 @@ class GPUModelRunner(
                 num_active_loras=desc.num_active_loras,
                 is_graph_capturing=True,
                 profile_seq_lens=profile_seq_lens,
+                poc=desc.poc,
             )
 
     def _capture_cudagraphs(
@@ -7321,6 +7376,7 @@ class GPUModelRunner(
                     reasoning_config=self.vllm_config.reasoning_config,
                     use_replayssm=self.cache_config.use_replayssm,
                     slot_mapping_modes=slot_mapping_modes,
+                    logprobs_mode_default=self.model_config.logprobs_mode,
                 )
 
         assert self._init_block_sizes == block_sizes, (
