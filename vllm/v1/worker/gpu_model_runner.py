@@ -905,7 +905,13 @@ class GPUModelRunner(
         self.uniform_decode_query_len = 1 + self.num_spec_tokens
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
-        self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
+        # gonka PoC graphs: only an uncompiled forward (breakable cudagraphs)
+        # can differ with and without the PoC transforms; a compiled graph
+        # always carries them.
+        self.cudagraph_dispatcher = CudagraphDispatcher(
+            self.vllm_config,
+            poc_graphs=self.compilation_config.mode == CompilationMode.NONE,
+        )
 
         self.mm_budget = (
             MultiModalBudget(self.vllm_config, self.mm_registry)
@@ -3970,6 +3976,7 @@ class GPUModelRunner(
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
+        poc: bool = False,
     ) -> tuple[
         CUDAGraphMode,
         BatchDescriptor,
@@ -4006,6 +4013,7 @@ class GPUModelRunner(
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
                 num_active_loras=num_active_loras,
+                poc=poc,
                 valid_modes={CUDAGraphMode.NONE} if force_eager else valid_modes,
                 invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
             )
@@ -4290,6 +4298,9 @@ class GPUModelRunner(
                     scheduler_output.num_common_prefix_blocks,
                 )
 
+            # After _update_states: requests are registered. The step's PoC
+            # rows pick the cudagraphs that carry the PoC transforms.
+            poc_step = self._poc_bridge.pre_step(scheduler_output)
             (
                 cudagraph_mode,
                 batch_desc,
@@ -4306,6 +4317,7 @@ class GPUModelRunner(
                 allow_microbatching=self._allow_microbatching(
                     num_reqs, num_scheduled_tokens_np
                 ),
+                poc=poc_step,
             )
 
             logger.debug(
@@ -4435,8 +4447,6 @@ class GPUModelRunner(
             )
 
         if getattr(self, "_poc_bridge", None) is not None:
-            # After _update_states: requests are registered.
-            self._poc_bridge.pre_step(scheduler_output)
             self._poc_bridge.pre_forward(
                 scheduler_output,
                 positions,
@@ -5901,6 +5911,7 @@ class GPUModelRunner(
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         randomize_inputs: bool = False,
+        poc: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -6013,6 +6024,7 @@ class GPUModelRunner(
                 # `force_num_active_loras` is used for cudagraph capture; because we
                 # need to capture graphs for specific num_active_loras counts
                 force_num_active_loras=num_active_loras,
+                poc=poc,
             )
         )
 
@@ -6986,6 +6998,9 @@ class GPUModelRunner(
         if num_warmups is None:
             num_warmups = self.compilation_config.cudagraph_num_of_warmups
         force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
+        # gonka PoC: the graph carries the PoC transforms iff its key says so.
+        if getattr(self, "_poc_bridge", None) is not None:
+            self._poc_bridge.set_active(desc.poc)
         for _ in range(num_warmups):
             self._dummy_run(
                 desc.num_tokens,
@@ -7018,6 +7033,7 @@ class GPUModelRunner(
                 num_active_loras=desc.num_active_loras,
                 is_graph_capturing=True,
                 profile_seq_lens=profile_seq_lens,
+                poc=desc.poc,
             )
 
     def _capture_cudagraphs(

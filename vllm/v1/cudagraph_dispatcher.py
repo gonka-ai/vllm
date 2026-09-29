@@ -31,7 +31,7 @@ class CudagraphDispatcher:
     runnable without cudagraph (if the mode does not match or mode is NONE).
     """
 
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(self, vllm_config: VllmConfig, poc_graphs: bool = False):
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.uniform_decode_query_len = 1 + self.vllm_config.num_speculative_tokens
@@ -66,6 +66,9 @@ class CudagraphDispatcher:
             if self.vllm_config.lora_config is not None
             else False
         )
+        # gonka PoC: a second key set for batches with decode-PoC rows, whose
+        # graphs carry the PoC transforms (the first set runs the bare model).
+        self.poc_graphs = poc_graphs
         # Default cudagraph_mode to NONE until initialize_cudagraph_keys is called
         self.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -230,6 +233,10 @@ class CudagraphDispatcher:
                     ),
                 )
 
+        if self.poc_graphs:
+            for keys in self.cudagraph_keys.values():
+                keys |= {replace(k, poc=True) for k in keys}
+
         self.keys_initialized = True
 
     def dispatch(
@@ -238,6 +245,7 @@ class CudagraphDispatcher:
         uniform_decode: bool = False,
         has_lora: bool = False,
         num_active_loras: int = 0,
+        poc: bool = False,
         valid_modes: AbstractSet[CUDAGraphMode] | None = None,
         invalid_modes: AbstractSet[CUDAGraphMode] | None = None,
     ) -> tuple[CUDAGraphMode, BatchDescriptor]:
@@ -253,6 +261,7 @@ class CudagraphDispatcher:
                 length is uniform_decode_query_len).
             has_lora: Whether LoRA is active.
             num_active_loras: Number of distinct active LoRA adapters.
+            poc: Whether the batch carries gonka decode-PoC rows.
             valid_modes: Set of cudagraph modes that are allowed. None means
                 all modes are allowed.
             invalid_modes: Set of cudagraph modes to exclude. Subtracted from
@@ -303,6 +312,8 @@ class CudagraphDispatcher:
         batch_desc = self._create_padded_batch_descriptor(
             num_tokens, normalized_uniform, has_lora, effective_num_active_loras
         )
+        if poc and self.poc_graphs:
+            batch_desc = replace(batch_desc, poc=True)
 
         if CUDAGraphMode.FULL in allowed_modes:
             # check if key exists for full cudagraph
