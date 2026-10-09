@@ -30,6 +30,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.poc.poc_params import PoCParams
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
@@ -3377,6 +3378,62 @@ def test_priority_scheduling_preemption_victim_selection():
     # Should be req_1 (priority 2) then req_0 (priority 3)
     assert waiting_priorities == [2, 3]
     assert waiting_req_ids == ["1", "0"]
+
+
+@pytest.mark.parametrize("bound", ["slots", "kv"])
+def test_poc_row_pauses_chat_and_takes_its_room(bound: str):
+    """While a PoC row is live, chat requests get no tokens. A PoC row that
+    finds the slots or the KV held by paused chat preempts the lowest-priority
+    chat request rather than waiting on it forever."""
+    block_size = 16
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2 if bound == "slots" else 3,
+        max_num_batched_tokens=200,
+        # kv: 4 usable blocks, all held by the two chat requests.
+        num_blocks=5 if bound == "kv" else 10000,
+        block_size=block_size,
+    )
+    chats = create_requests_with_priority(
+        num_requests=2, priorities=[0, 0], num_tokens=2 * block_size
+    )
+    for request in chats:
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["0", "1"],
+            req_id_to_index={"0": 0, "1": 1},
+            sampled_token_ids=[[100], [100]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    poc = Request(
+        request_id="poc",
+        prompt_token_ids=[0] * block_size,
+        sampling_params=None,
+        pooling_params=None,
+        poc_params=PoCParams(
+            block_hash="h",
+            public_key="k",
+            block_height=1,
+            nonce=0,
+            seq_len=block_size,
+            poc_decode=True,
+            max_tokens=4,
+        ),
+        arrival_time=2.0,
+        priority=-1,
+    )
+    scheduler.add_request(poc)
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {"poc": block_size}
+    assert output.preempted_req_ids == {"1"}
+    assert chats[0].status == RequestStatus.RUNNING
 
 
 def test_priority_scheduling_equal_priority_preemption():

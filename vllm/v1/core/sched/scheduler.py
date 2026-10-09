@@ -614,6 +614,13 @@ class Scheduler(SchedulerInterface):
             throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
 
+        # While PoC rows are live, chat requests get no tokens and are not
+        # admitted, so each step of a nonce runs on the PoC rows alone. They keep
+        # their KV and resume afterwards, unless a PoC row needs their slot or KV.
+        poc_gate = self._poc_rows_waiting() or any(
+            r.poc_params is not None for r in self.running
+        )
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -647,6 +654,10 @@ class Scheduler(SchedulerInterface):
             if defer_prefills and request.is_prefill_chunk:
                 # DP prefill balancing: defer this in-progress prefill chunk to a
                 # cadence-aligned step; decodes still run to fill this step.
+                req_index += 1
+                continue
+
+            if poc_gate and request.poc_params is None:
                 req_index += 1
                 continue
 
@@ -877,6 +888,10 @@ class Scheduler(SchedulerInterface):
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
                 if num_running >= self.max_num_running_reqs:
+                    if self._poc_rows_waiting() and self._preempt_paused_chat(
+                        scheduled_timestamp
+                    ):
+                        continue
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
@@ -884,6 +899,11 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+
+                if poc_gate and request.poc_params is None:
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
@@ -1199,6 +1219,10 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+                    if request.poc_params is not None and self._preempt_paused_chat(
+                        scheduled_timestamp
+                    ):
+                        continue
                     break
 
                 # KVTransfer: the connector uses this info to determine
@@ -1538,6 +1562,31 @@ class Scheduler(SchedulerInterface):
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
         self.reset_preempted_req_ids.add(request.request_id)
+
+    def _poc_rows_waiting(self) -> bool:
+        return any(r.poc_params is not None for r in self.waiting) or any(
+            r.poc_params is not None for r in self.skipped_waiting
+        )
+
+    def _preempt_paused_chat(self, timestamp: float) -> bool:
+        """Preempt the lowest-priority chat request to make room for a PoC row.
+
+        Chat requests are paused while PoC rows are live, so without this a
+        waiting PoC row would wait forever on a slot or KV they hold.
+        """
+        chats = [
+            r
+            for r in self.running
+            if r.poc_params is None and self._request_blocks_can_be_freed(r)
+        ]
+        if not chats:
+            return False
+        victim = max(chats, key=lambda r: (r.priority, r.arrival_time))
+        self.running.remove(victim)
+        self._preempt_request(
+            victim, timestamp, drop_stale_output=self.requires_kv_delivery
+        )
+        return True
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
