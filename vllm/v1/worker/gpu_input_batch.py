@@ -30,6 +30,8 @@ from vllm.v1.sample.thinking_budget_state import (
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable, SlotMappingMode
 
+_POC_NEUTRAL_SAMPLING_PARAMS = SamplingParams()
+
 
 @dataclass
 class CachedRequestState:
@@ -349,6 +351,15 @@ class InputBatch:
                     request.output_token_ids,
                 )
             )
+        elif request.poc_params is not None:
+            self.batch_update_builder.added.append(
+                (
+                    new_req_index,
+                    _POC_NEUTRAL_SAMPLING_PARAMS,
+                    request.prompt_token_ids,
+                    request.output_token_ids,
+                )
+            )
 
         return new_req_index
 
@@ -496,7 +507,12 @@ class InputBatch:
             self.pooling_states[req_id] = pooling_states
             self.logits_processing_needs_token_ids[req_index] = False
         elif request.poc_params is not None:
-            pass
+            self.temperature_cpu[req_index] = 1.0
+            self.top_p_cpu[req_index] = 1.0
+            self.top_k_cpu[req_index] = self.vocab_size
+            self.frequency_penalties_cpu[req_index] = 0.0
+            self.presence_penalties_cpu[req_index] = 0.0
+            self.repetition_penalties_cpu[req_index] = 1.0
         else:
             raise NotImplementedError("Unrecognized request type")
 

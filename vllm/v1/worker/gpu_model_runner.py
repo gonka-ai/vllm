@@ -4633,7 +4633,7 @@ class GPUModelRunner(
         self.execute_model_state = None
 
         # Apply structured output bitmasks if present.
-        if grammar_output is not None:
+        if grammar_output is not None and logits is not None:
             apply_grammar_bitmask(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
