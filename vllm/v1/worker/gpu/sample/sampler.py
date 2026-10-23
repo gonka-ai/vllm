@@ -160,7 +160,7 @@ class Sampler:
 
         # Validation replay: force the enforced token after sampling and before
         # logprobs, which stay those of the model's own distribution.
-        self.enforced_tokens_state.apply(sampled, idx_mapping)
+        self.enforced_tokens_state.apply(sampled, idx_mapping, idx_mapping_np)
 
         if logprobs_dims is not None:
             num_logprobs, max_per_req_token_ids = logprobs_dims

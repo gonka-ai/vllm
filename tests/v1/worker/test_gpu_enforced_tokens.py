@@ -22,6 +22,28 @@ DEVICE = "cpu"
 VOCAB = 16
 
 
+@pytest.fixture(autouse=True)
+def _cpu_buffers(monkeypatch):
+    """No pinned memory or Triton on a CPU-only host: plain buffers and a torch
+    stand-in for the staged-write kernel."""
+    from vllm.v1.worker.gpu import buffer_utils
+
+    def apply_write(self):
+        start = 0
+        for idx, col, end in zip(
+            self._staged_write_indices,
+            self._staged_write_starts,
+            self._staged_write_cu_lens,
+        ):
+            vals = self._staged_write_contents[start:end]
+            self.gpu[idx, col : col + len(vals)] = torch.tensor(vals, dtype=self.dtype)
+            start = end
+        self.clear_staged_writes()
+
+    monkeypatch.setattr(buffer_utils, "is_uva_available", lambda: False)
+    monkeypatch.setattr(buffer_utils.StagedWriteTensor, "apply_write", apply_write)
+
+
 def _i32(x) -> torch.Tensor:
     return torch.tensor(x, dtype=torch.int32, device=DEVICE)
 
@@ -70,7 +92,7 @@ def test_step_indexing_and_last_id_repeat():
     for step, want in enumerate(expected):
         _set_step(rs, 0, step)
         sampled = _i64([-7])
-        state.apply(sampled, idx_mapping)
+        state.apply(sampled, idx_mapping, np.array([0]))
         assert sampled.tolist() == [want]
 
 
@@ -83,7 +105,7 @@ def test_mixed_batch_and_padding_rows_untouched():
     _set_step(rs, 0, 0)
     _set_step(rs, 1, 1)
     sampled = _i64([11, 12, 13, 14])
-    state.apply(sampled, _i32([0, 1, -1, 1]))
+    state.apply(sampled, _i32([0, 1, -1, 1]), np.array([0, 1, -1, 1]))
     assert sampled.tolist() == [11, 8, 13, 8]
 
 
@@ -117,7 +139,7 @@ def test_slot_lifecycle_and_overlong_list():
     state.apply_staged_writes()
     _set_step(rs, 0, 0)
     sampled = _i64([42])
-    state.apply(sampled, _i32([0]))
+    state.apply(sampled, _i32([0]), np.array([0]))
     assert sampled.tolist() == [42]
 
     too_long = list(range(MAX_ENFORCED_IDS + 1))
@@ -135,6 +157,29 @@ def test_sampler_call_emits_enforced_token(monkeypatch):
     )
     out = sampler(logits, input_batch)
     assert out.sampled_token_ids.tolist() == [[6]]
+
+
+def test_no_gpu_op_without_enforced_rows(monkeypatch):
+    """A batch with no enforced row launches no torch op in either entry point."""
+    from vllm.v1.worker.gpu.sample import enforced_tokens as mod
+
+    state, rs = _state()
+    state.add_request(0, SamplingParams())
+    state.add_request(1, SamplingParams(enforced_token_ids=[9]))
+    state.apply_staged_writes()
+
+    def boom(*args, **kwargs):
+        raise AssertionError("GPU work launched without enforced rows")
+
+    monkeypatch.setattr(mod, "apply_enforced_tokens", boom)
+    monkeypatch.setattr(torch, "where", boom)
+    sampled = _i64([[11, 12], [13, 14]])
+    num_sampled = _i32([2, 2])
+    idx_np = np.array([0, -1])
+    state.apply(sampled[:, 0], _i32([0, -1]), idx_np)
+    state.apply_to_verified(sampled, num_sampled, _i32([0, -1]), idx_np)
+    assert sampled.tolist() == [[11, 12], [13, 14]]
+    assert num_sampled.tolist() == [2, 2]
 
 
 def _build_sampler(monkeypatch, sampler_mod, logits, sampled_value, ids):
