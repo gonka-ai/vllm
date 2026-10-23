@@ -184,3 +184,89 @@ def _build_sampler(monkeypatch, sampler_mod, logits, sampled_value, ids):
         num_reqs=1,
     )
     return sampler, input_batch, seen
+
+
+def _verify_with_fake_kernel(ids_by_req, steps, sampled, num_sampled):
+    """Run RejectionSampler._verify_in_chunks with a stubbed verify kernel.
+
+    Row layout: req 0 has 2 drafts (3 logits), req 1 has none (1 logit),
+    req 2 has 2 drafts (3 logits).
+    """
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
+
+    state, rs = _state(3)
+    for idx, ids in ids_by_req.items():
+        state.add_request(idx, SamplingParams(enforced_token_ids=ids))
+        _set_step(rs, idx, steps[idx])
+    state.apply_staged_writes()
+
+    logits = torch.randn(7, VOCAB)
+    rejection_sampler = object.__new__(RejectionSampler)
+    rejection_sampler.sampler = SimpleNamespace(
+        enforced_tokens_state=state, logprobs_mode="raw_logprobs"
+    )
+    rejection_sampler.enable_adaptive_verification = False
+    seen: dict = {}
+
+    def fake_verify(*args, **kwargs):
+        return logits, sampled.clone(), num_sampled.clone()
+
+    def fake_logprobs(sampled, num_sampled, logits, *args):
+        seen["sampled"] = sampled.clone()
+        seen["logits"] = logits.clone()
+        return None
+
+    rejection_sampler._verify = fake_verify
+    rejection_sampler._get_logprobs_tensors = fake_logprobs
+    input_batch = SimpleNamespace(
+        num_reqs=3,
+        cu_num_logits_np=np.array([0, 3, 4, 7]),
+        cu_num_logits=_i32([0, 3, 4, 7]),
+        idx_mapping=_i32([0, 1, 2]),
+        idx_mapping_np=np.array([0, 1, 2]),
+        expanded_idx_mapping=_i32([0, 0, 0, 1, 2, 2, 2]),
+        expanded_local_pos=_i32([0, 1, 2, 0, 0, 1, 2]),
+    )
+    out = rejection_sampler._verify_in_chunks(
+        logits, input_batch, None, _i64([0] * 7), _i64([0] * 7), 100, 1
+    )
+    return out, seen, logits
+
+
+def test_rejection_sampler_forces_enforced_row_only():
+    """Enforced 0-draft row emits ids[step] with one sampled token; others as is."""
+    sampled = _i64([[4, 5, 6], [1, 0, 0], [2, 3, 4]])
+    num_sampled = _i32([3, 1, 3])
+    (out_sampled, out_num, _), _, _ = _verify_with_fake_kernel(
+        {1: [9, 8]}, {1: 1}, sampled, num_sampled
+    )
+    assert out_sampled.tolist() == [[4, 5, 6], [8, 0, 0], [2, 3, 4]]
+    assert out_num.tolist() == [3, 1, 3]
+
+
+def test_rejection_sampler_logprobs_see_forced_token_and_raw_logits():
+    sampled = _i64([[4, 5, 6], [1, 0, 0], [2, 3, 4]])
+    num_sampled = _i32([3, 1, 3])
+    (_, _, _), seen, logits = _verify_with_fake_kernel(
+        {1: [9, 8]}, {1: 0}, sampled, num_sampled
+    )
+    assert seen["sampled"][1, 0].item() == 9
+    assert torch.equal(seen["logits"], logits)
+
+
+def test_rejection_sampler_enforced_row_with_drafts_is_cut_to_one_token():
+    """Defensive rule: an enforced row that still has drafts accepts none."""
+    sampled = _i64([[4, 5, 6], [1, 0, 0], [2, 3, 4]])
+    num_sampled = _i32([3, 1, 3])
+    (out_sampled, out_num, _), _, _ = _verify_with_fake_kernel(
+        {2: [7]}, {2: 4}, sampled, num_sampled
+    )
+    assert out_sampled[2, 0].item() == 7
+    assert out_num.tolist() == [3, 1, 1]
+    assert out_sampled[0].tolist() == [4, 5, 6]
+
+
+def test_v2_enforced_tokens_marker():
+    from vllm import validation
+
+    assert validation.V2_ENFORCED_TOKENS is True

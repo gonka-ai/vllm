@@ -63,6 +63,24 @@ class EnforcedTokensState:
             self.req_states.prompt_len.gpu,
         )
 
+    def apply_to_verified(
+        self,
+        sampled: torch.Tensor,  # [num_reqs, num_steps + 1], int64
+        num_sampled: torch.Tensor,  # [num_reqs], int32
+        idx_mapping: torch.Tensor,
+    ) -> None:
+        """Rejection-sampler layout: force column 0 and a single sampled token.
+
+        Enforced rows are scheduled without drafts, so column 0 is their only
+        token. A row that still carries drafts is cut to column 0 so a replay
+        never accepts a free-running draft token.
+        """
+        self.apply(sampled[:, 0], idx_mapping)
+        enforced = (idx_mapping >= 0) & (
+            self.num_ids[idx_mapping.clamp(min=0).long()] > 0
+        )
+        num_sampled.copy_(torch.where(enforced, num_sampled.new_ones(()), num_sampled))
+
 
 def apply_enforced_tokens(
     sampled: torch.Tensor,  # [num_reqs], int64, mutated in place

@@ -252,6 +252,10 @@ class RejectionSampler:
                 input_batch.expanded_idx_mapping[lo:hi],
                 input_batch.expanded_local_pos[lo:hi],
             )
+            # Before the logprobs read the sampled tokens (flatten kernel).
+            self.sampler.enforced_tokens_state.apply_to_verified(
+                sampled, num_sampled, input_batch.idx_mapping[start:end]
+            )
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
                 num_sampled,
