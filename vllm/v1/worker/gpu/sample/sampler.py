@@ -16,6 +16,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import (
 from vllm.v1.worker.gpu.input_batch import InputBatch, get_num_sampled_and_rejected
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
+from vllm.v1.worker.gpu.sample.enforced_tokens import EnforcedTokensState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 from vllm.v1.worker.gpu.sample.logprob import (
@@ -58,6 +59,7 @@ class Sampler:
         self.trace_replay_state = (
             TraceReplayState(req_states) if enable_trace_replay else None
         )
+        self.enforced_tokens_state = EnforcedTokensState(req_states)
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
@@ -76,6 +78,7 @@ class Sampler:
         self.thinking_budget_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
             self.trace_replay_state.add_request(req_idx, sampling_params)
+        self.enforced_tokens_state.add_request(req_idx, sampling_params)
 
         states = self.sampling_states
         temperature = states.temperature.np[req_idx]
@@ -102,6 +105,7 @@ class Sampler:
         self.thinking_budget_state.apply_staged_writes()
         if self.trace_replay_state is not None:
             self.trace_replay_state.apply_staged_writes()
+        self.enforced_tokens_state.apply_staged_writes()
 
     def get_logprobs_dims(
         self, idx_mapping_np: np.ndarray, include_token_ids: bool = True
@@ -153,6 +157,10 @@ class Sampler:
             # Overwrite sampled tokens with the replay trace up-front so that
             # computed logprobs reflect the real distribution of the forced token.
             self.trace_replay_state.apply_trace(sampled, idx_mapping)
+
+        # Validation replay: force the enforced token after sampling and before
+        # logprobs, which stay those of the model's own distribution.
+        self.enforced_tokens_state.apply(sampled, idx_mapping, idx_mapping_np)
 
         if logprobs_dims is not None:
             num_logprobs, max_per_req_token_ids = logprobs_dims

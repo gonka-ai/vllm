@@ -672,6 +672,10 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            if request.spec_token_ids and self._has_enforced_tokens(request):
+                # Also clears the async placeholders set after the last step.
+                request.spec_token_ids = []
+
             num_new_tokens = (
                 request.num_tokens_with_spec
                 + request.num_output_placeholders
@@ -2519,6 +2523,12 @@ class Scheduler(SchedulerInterface):
         if self.ec_connector is not None:
             self.ec_connector.update_state_after_free(request, input_id)
 
+    @staticmethod
+    def _has_enforced_tokens(request: Request) -> bool:
+        # Validation replays decode one enforced token per step, without drafts.
+        params = request.sampling_params
+        return params is not None and bool(params.enforced_token_ids)
+
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for req_id, spec_token_ids in zip(
             draft_token_ids.req_ids,
@@ -2533,6 +2543,9 @@ class Scheduler(SchedulerInterface):
                 # Ignore draft tokens for prefill chunks.
                 if request.spec_token_ids:
                     request.spec_token_ids = []
+                continue
+
+            if self._has_enforced_tokens(request):
                 continue
 
             # Add newly generated spec token ids to the request.
