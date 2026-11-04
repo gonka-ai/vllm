@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.thinking_budget_state import ThinkingBudgetStateHolder
+
+if TYPE_CHECKING:
+    from vllm.v1.sample.tape import TapeBatch
 
 
 @dataclass
@@ -65,3 +69,6 @@ class SamplingMetadata:
     # Enforced next token ids for validation replay (gonka PoC).
     # Shape [num_reqs], -1 means no enforcement for that request.
     enforced_next_token_ids: torch.Tensor | None = None
+
+    # Rows sampling on the public tape (see vllm.v1.sample.tape).
+    tape: TapeBatch | None = None

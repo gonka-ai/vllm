@@ -5,7 +5,7 @@
 import torch
 import torch.nn as nn
 
-from vllm.config.model import LogprobsMode
+from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
@@ -14,6 +14,7 @@ from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.logprobs import batched_count_greater_than
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+from vllm.v1.sample.tape import register_tape_warmups
 
 _SAMPLING_EPS = 1e-5
 
@@ -66,6 +67,7 @@ class Sampler(nn.Module):
     ):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler(logprobs_mode, use_fp64_gumbel)
+        register_tape_warmups()
         self.pin_memory = PIN_MEMORY
         self.logprobs_mode = logprobs_mode
         self.use_fp64_gumbel = use_fp64_gumbel
@@ -149,9 +151,7 @@ class Sampler(nn.Module):
         # logprobs, which stay those of the model's own distribution.
         if sampling_metadata.enforced_next_token_ids is not None:
             enforced = sampling_metadata.enforced_next_token_ids
-            mask = enforced != -1
-            if mask.any():
-                sampled[mask] = enforced[mask]
+            sampled = torch.where(enforced != -1, enforced, sampled)
 
         # Handle logprob_token_ids if specified (more efficient than full vocab)
         # This is used by generative_scoring API to get logprobs for specific tokens
@@ -362,19 +362,44 @@ class Sampler(nn.Module):
             logits, sampling_metadata.temperature, sampling_metadata.all_random
         )
 
-        # Apply logits processors that only apply to random sampling
-        # (argmax invariant)
-        for processor in sampling_metadata.logitsprocs.argmax_invariant:
-            logits = processor.apply(logits)
+        # Rows on the public tape draw on their own set and noise. When they are
+        # all the random rows and no one reads processed logprobs, nothing else
+        # below has work left.
+        tape = sampling_metadata.tape
+        if (
+            tape is not None
+            and tape.covers_random
+            and not need_processed_logprobs
+            and logprobs_mode not in PROCESSED_LOGPROBS_MODES
+        ):
+            processed_logprobs = None
+            random_sampled = logits.new_empty(logits.shape[0], dtype=torch.int64)
+            random_sampled[tape.rows] = tape.sample(
+                logits, sampling_metadata.top_k, sampling_metadata.top_p, in_place=True
+            )
+        else:
+            tape_sampled = (
+                tape.sample(logits, sampling_metadata.top_k, sampling_metadata.top_p)
+                if tape is not None
+                else None
+            )
 
-        # Apply top_k and/or top_p.
-        random_sampled, processed_logprobs = self.topk_topp_sampler.sample(
-            logits,
-            sampling_metadata.generators,
-            sampling_metadata.top_k,
-            sampling_metadata.top_p,
-            need_processed_logprobs=need_processed_logprobs,
-        )
+            # Apply logits processors that only apply to random sampling
+            # (argmax invariant)
+            for processor in sampling_metadata.logitsprocs.argmax_invariant:
+                logits = processor.apply(logits)
+
+            # Apply top_k and/or top_p.
+            random_sampled, processed_logprobs = self.topk_topp_sampler.sample(
+                logits,
+                sampling_metadata.generators,
+                sampling_metadata.top_k,
+                sampling_metadata.top_p,
+                need_processed_logprobs=need_processed_logprobs,
+            )
+            if tape_sampled is not None:
+                assert tape is not None
+                random_sampled[tape.rows] = tape_sampled.to(random_sampled.dtype)
 
         if greedy_sampled is None:
             return random_sampled, processed_logprobs

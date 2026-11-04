@@ -3,7 +3,7 @@
 
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.sched.scheduler import Scheduler, replays_enforced_tokens
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
@@ -41,7 +41,8 @@ class AsyncScheduler(Scheduler):
             )
             # Add placeholders for the new draft/spec tokens.
             # We will update the actual spec token ids in the worker process.
-            request.spec_token_ids = self._spec_token_placeholders
+            if not replays_enforced_tokens(request):
+                request.spec_token_ids = self._spec_token_placeholders
 
             if self.use_v2_model_runner:
                 # Set the next step index in which this request is eligible to be

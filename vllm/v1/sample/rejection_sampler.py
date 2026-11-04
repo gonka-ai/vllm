@@ -146,11 +146,17 @@ class RejectionSampler(nn.Module):
         # won't affect the original logits tensor.
         assert logits is not None
         bonus_logits = logits[bonus_logits_indices]
+        tape = sampling_metadata.tape
         bonus_sampler_output = self.sampler(
             logits=bonus_logits,
             sampling_metadata=replace(
                 sampling_metadata,
                 max_num_logprobs=-1,
+                tape=(
+                    tape.advanced(metadata.num_draft_tokens)
+                    if tape is not None
+                    else None
+                ),
             ),
             predict_bonus_token=True,
             # Override the logprobs mode to return logits because they are
@@ -176,6 +182,19 @@ class RejectionSampler(nn.Module):
         target_logits = self.apply_logits_processors(
             target_logits, sampling_metadata, metadata
         )
+        # Rows on the public tape verify a draft by equality with the tape
+        # winner, on logits before the constraints below cut them their own way.
+        tape_targets = (
+            tape.verify(
+                target_logits,
+                metadata.num_draft_tokens,
+                sampling_metadata.temperature,
+                sampling_metadata.top_k,
+                sampling_metadata.top_p,
+            )
+            if tape is not None
+            else None
+        )
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
         # `apply_sampling_constraints` function.
@@ -197,6 +216,7 @@ class RejectionSampler(nn.Module):
             synthetic_mode=self.synthetic_mode,
             synthetic_conditional_rates=self.synthetic_conditional_rates,
             use_fp64_gumbel=self.use_fp64_gumbel,
+            tape_targets=tape_targets,
         )
 
         logprobs_tensors = None
@@ -422,6 +442,7 @@ def rejection_sample(
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64_gumbel: bool = False,
+    tape_targets: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
     assert draft_probs is None or draft_probs.ndim == 2
@@ -445,17 +466,31 @@ def rejection_sample(
         device=device,
     )
 
-    if sampling_metadata.all_greedy:
+    all_greedy = sampling_metadata.all_greedy
+    if all_greedy:
         is_greedy = None
     else:
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
+    if tape_targets is not None:
+        # The greedy kernel is exactly accept-iff-equal against the tape winner.
+        tape = sampling_metadata.tape
+        assert tape is not None
+        is_greedy = (
+            is_greedy.clone()
+            if is_greedy is not None
+            else torch.ones(batch_size, dtype=torch.bool, device=device)
+        )
+        is_greedy[tape.rows] = True
+        all_greedy = tape.covers_random
+        if all_greedy:
+            is_greedy = None
 
     # Generate uniform probabilities before either kernel because synthetic
     # mode needs them in the greedy kernel too.  Skip only when all requests
     # are greedy *and* synthetic mode is off (the standard fast-path).
     # [num_tokens]
     uniform_probs: torch.Tensor | None = None
-    if synthetic_mode or not sampling_metadata.all_greedy:
+    if synthetic_mode or not all_greedy:
         uniform_probs = generate_uniform_probs(
             num_tokens,
             num_draft_tokens,
@@ -463,9 +498,11 @@ def rejection_sample(
             device,
         )
 
-    if not sampling_metadata.all_random:
+    if not sampling_metadata.all_random or tape_targets is not None:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_logits.argmax(dim=-1)
+        if tape_targets is not None:
+            target_argmax = torch.where(tape_targets >= 0, tape_targets, target_argmax)
         _rejection_greedy_sample(
             output_token_ids,
             cu_num_draft_tokens,
@@ -477,7 +514,7 @@ def rejection_sample(
             uniform_probs,
             synthetic_conditional_rates,
         )
-        if sampling_metadata.all_greedy:
+        if all_greedy:
             return output_token_ids
 
     # Compute probability distribution from target logits.

@@ -3,6 +3,7 @@
 
 import inspect
 from collections.abc import Sequence
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -511,3 +512,50 @@ def test_pooling_metadata_token_id_buffers(
         assert metadata.get_prompt_token_ids_cpu()[0].tolist() == req.prompt_token_ids
     else:
         assert metadata.prompt_token_ids_cpu is None
+
+
+def _batch_awaiting_sampled_ids(output_token_ids, sampled):
+    input_batch = InputBatch(
+        max_num_reqs=1,
+        max_model_len=16,
+        max_num_batched_tokens=16,
+        device=torch.device("cpu"),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+        max_num_blocks_per_req=[1],
+    )
+    input_batch.add_request(
+        CachedRequestState(
+            req_id="req",
+            prompt_token_ids=[10, 11],
+            mm_features=[],
+            sampling_params=SamplingParams(),
+            block_ids=([],),
+            generator=None,
+            num_computed_tokens=2,
+            output_token_ids=output_token_ids,
+        )
+    )
+    input_batch.sampling_metadata.output_token_ids = [output_token_ids]
+    input_batch.prev_req_id_to_index = {"req": 0}
+    input_batch.sampled_token_ids_cpu = torch.tensor([sampled])
+    input_batch.async_copy_ready_event = MagicMock()
+    return input_batch
+
+
+def test_async_output_ids_keep_the_length_when_a_batch_starts_needing_them():
+    # Steps ran without a batch that needed ids; min_tokens reads this length.
+    output_token_ids = [5, -1, -1, -1]
+    batch = _batch_awaiting_sampled_ids(output_token_ids, [7])
+    batch.update_async_output_token_ids()
+    assert output_token_ids == [5, -1, -1, 7]
+
+
+def test_async_output_ids_drop_only_the_rejected_optimistic_placeholders():
+    # One placeholder of an earlier step, then the prior step's bonus token and
+    # its two optimistic drafts, of which none was accepted.
+    output_token_ids = [5, -1, -1, -1, -1]
+    batch = _batch_awaiting_sampled_ids(output_token_ids, [7, -1, -1])
+    batch.update_async_output_token_ids(np.array([2]))
+    assert output_token_ids == [5, -1, 7]
