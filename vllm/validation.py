@@ -6,8 +6,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-# Bound replay work; request-body limits belong to the proxy.
-MAX_ENFORCED_TOKENS = 32768
+# Above any model's context: a replay ends at its max_tokens anyway, and an honest
+# output this long must not be refused. Request-body limits belong to the proxy.
+MAX_ENFORCED_TOKENS = 1 << 20
 MAX_TOP_TOKENS_PER_POSITION = 64
 
 

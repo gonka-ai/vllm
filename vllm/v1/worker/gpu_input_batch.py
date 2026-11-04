@@ -15,7 +15,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.collection_utils import swap_dict_values
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.logits_processor import (
@@ -24,6 +24,7 @@ from vllm.v1.sample.logits_processor import (
     MoveDirectionality,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.tape import TapeBatch, TapeRow, tape_row
 from vllm.v1.sample.thinking_budget_state import (
     maybe_create_thinking_budget_state_holder,
 )
@@ -295,6 +296,7 @@ class InputBatch:
 
         # Enforced next-token IDs keyed by req_id (gonka PoC v2 replay).
         self.req_enforced_token_ids: dict[str, list[int] | None] = {}
+        self.req_tape: dict[str, TapeRow] = {}
 
         # Store provided logitsprocs. If none are provided, initialize empty
         # data structure
@@ -379,6 +381,9 @@ class InputBatch:
             self.spec_token_ids[req_index].clear()
 
         self.req_id_to_index[req_id] = req_index
+        tape = tape_row(request.sampling_params) if request.sampling_params else None
+        if tape is not None:
+            self.req_tape[req_id] = tape
 
         # Copy the prompt token ids and output token ids.
         num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
@@ -563,6 +568,7 @@ class InputBatch:
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
         self.req_enforced_token_ids.pop(req_id, None)
+        self.req_tape.pop(req_id, None)
         self.spec_token_ids[req_index].clear()
         self.block_table.clear_row(req_index)
 
@@ -712,12 +718,8 @@ class InputBatch:
         swap_dict_values(self.bad_words_token_ids, i1, i2)
 
         if self.allowed_token_ids_mask_cpu_tensor is not None:
-            (
-                self.allowed_token_ids_mask_cpu_tensor[i1],
-                self.allowed_token_ids_mask_cpu_tensor[i2],
-            ) = (
-                self.allowed_token_ids_mask_cpu_tensor[i2],
-                self.allowed_token_ids_mask_cpu_tensor[i1],
+            self.allowed_token_ids_mask_cpu_tensor[[i1, i2]] = (
+                self.allowed_token_ids_mask_cpu_tensor[[i2, i1]]
             )
 
     def _get_active_token_count(self, req_index: int) -> int:
@@ -844,6 +846,7 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[empty_index] = (
                     self.allowed_token_ids_mask_cpu_tensor[last_req_index]
                 )
+                self.allowed_token_ids_mask_cpu_tensor[last_req_index].fill_(False)
 
             bad_words_token_ids = self.bad_words_token_ids.pop(last_req_index, None)
             if bad_words_token_ids is not None:
@@ -874,8 +877,9 @@ class InputBatch:
                 self.req_enforced_token_ids.get(req_id) if req_id is not None else None
             )
             if etids:
-                out = self.req_output_token_ids[i]
-                out_len = len(out) if out else 0
+                # Not the length of req_output_token_ids: its async placeholders
+                # collapse when a batch starts needing output ids.
+                out_len = int(self.num_tokens_no_spec[i] - self.num_prompt_tokens[i])
                 enforced_list.append(
                     etids[out_len] if out_len < len(etids) else etids[-1]
                 )
@@ -884,7 +888,7 @@ class InputBatch:
                 enforced_list.append(-1)
         if not has_any:
             return None
-        return torch.tensor(enforced_list, dtype=torch.long, device=self.device)
+        return async_tensor_h2d(enforced_list, self.device, torch.long)
 
     def _update_enforced_tensor(self) -> None:
         """Update enforced_next_token_ids on sampling_metadata each step."""
@@ -914,6 +918,26 @@ class InputBatch:
         # Always update enforced tokens (they advance each step).
         if self.req_enforced_token_ids:
             self._update_enforced_tensor()
+        if (
+            self.sampling_metadata is not None
+            and self.sampling_metadata.tape is not None
+        ):
+            num_reqs = self.num_reqs
+            self.sampling_metadata.tape.set_positions(
+                self.num_tokens_no_spec[:num_reqs] - self.num_prompt_tokens[:num_reqs]
+            )
+
+    def _make_tape_batch(self) -> TapeBatch | None:
+        req_ids = self.req_ids
+        rows = [i for i, req_id in enumerate(req_ids) if req_id in self.req_tape]
+        if not rows:
+            return None
+        return TapeBatch(
+            rows,
+            [self.req_tape[req_ids[i]] for i in rows],
+            self.device,
+            covers_random=self.random_reqs.issubset(self.req_tape),
+        )
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
@@ -1034,6 +1058,7 @@ class InputBatch:
             batch_logprobs_mode=batch_mode,
             logprobs_is_processed=logprobs_is_processed,
             enforced_next_token_ids=self._build_enforced_tensor(),
+            tape=self._make_tape_batch(),
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:
@@ -1118,11 +1143,17 @@ class InputBatch:
             self.sampled_token_ids_cpu = None
             self.async_copy_ready_event = None
 
-    def update_async_output_token_ids(self) -> None:
+    def update_async_output_token_ids(
+        self, prev_num_draft_tokens: np.ndarray | None = None
+    ) -> None:
         """
         In async scheduling case, update output_token_ids in sampling metadata
         from prior steps sampled token ids once they've finished copying to CPU.
         This is called right before they are needed by the logits processors.
+
+        Args:
+            prev_num_draft_tokens: Optimistic placeholders each row of the prior
+                step added for its drafts, ``None`` without async spec decode.
         """
         output_token_ids = self.sampling_metadata.output_token_ids
         if self.sampled_token_ids_cpu is None or not output_token_ids:
@@ -1159,6 +1190,14 @@ class InputBatch:
                 and req_output_token_ids[first_placeholder - 1] == -1
             ):
                 first_placeholder -= 1
+            # Placeholders of earlier steps, left while no batch needed the ids,
+            # stay: min_tokens and others read the length of this list.
+            num_prior_step = 1
+            if prev_num_draft_tokens is not None:
+                num_prior_step += int(prev_num_draft_tokens[prev_index])
+            first_placeholder = max(
+                first_placeholder, len(req_output_token_ids) - num_prior_step
+            )
             num_placeholders = len(req_output_token_ids) - first_placeholder
             num_to_replace = min(num_sampled_ids, num_placeholders)
             del new_ids[num_to_replace:]

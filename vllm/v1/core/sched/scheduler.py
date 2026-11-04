@@ -83,6 +83,12 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
+def replays_enforced_tokens(request: Request) -> bool:
+    """True when a request replays pinned tokens. A replay must not speculate:
+    RejectionSampler has no enforced-token hook."""
+    return bool(getattr(request.sampling_params, "enforced_token_ids", None))
+
+
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -1083,6 +1089,7 @@ class Scheduler(SchedulerInterface):
                         and num_new_tokens == 1
                         and not prefill_scheduled
                         and (scheduled_running_reqs or num_computed_tokens > 0)
+                        and not replays_enforced_tokens(request)
                     ):
                         padded_num_tokens = 1 + self.num_spec_tokens
                         # Pad only when there is room for the sampled token(s).
@@ -2529,7 +2536,7 @@ class Scheduler(SchedulerInterface):
                 # The request may have been finished. Skip.
                 continue
 
-            if request.is_prefill_chunk:
+            if request.is_prefill_chunk or replays_enforced_tokens(request):
                 # Ignore draft tokens for prefill chunks.
                 if request.spec_token_ids:
                     request.spec_token_ids = []

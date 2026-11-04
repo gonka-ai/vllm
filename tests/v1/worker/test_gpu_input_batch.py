@@ -3,6 +3,7 @@
 
 import inspect
 from collections.abc import Sequence
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -511,3 +512,158 @@ def test_pooling_metadata_token_id_buffers(
         assert metadata.get_prompt_token_ids_cpu()[0].tolist() == req.prompt_token_ids
     else:
         assert metadata.prompt_token_ids_cpu is None
+
+
+def _batch_awaiting_sampled_ids(output_token_ids, sampled):
+    input_batch = InputBatch(
+        max_num_reqs=1,
+        max_model_len=16,
+        max_num_batched_tokens=16,
+        device=torch.device("cpu"),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+        max_num_blocks_per_req=[1],
+    )
+    input_batch.add_request(
+        CachedRequestState(
+            req_id="req",
+            prompt_token_ids=[10, 11],
+            mm_features=[],
+            sampling_params=SamplingParams(),
+            block_ids=([],),
+            generator=None,
+            num_computed_tokens=2,
+            output_token_ids=output_token_ids,
+        )
+    )
+    input_batch.sampling_metadata.output_token_ids = [output_token_ids]
+    input_batch.prev_req_id_to_index = {"req": 0}
+    input_batch.sampled_token_ids_cpu = torch.tensor([sampled])
+    input_batch.async_copy_ready_event = MagicMock()
+    return input_batch
+
+
+def test_async_output_ids_keep_the_length_when_a_batch_starts_needing_them():
+    # Steps ran without a batch that needed ids; min_tokens reads this length.
+    output_token_ids = [5, -1, -1, -1]
+    batch = _batch_awaiting_sampled_ids(output_token_ids, [7])
+    batch.update_async_output_token_ids()
+    assert output_token_ids == [5, -1, -1, 7]
+
+
+def test_async_output_ids_drop_only_the_rejected_optimistic_placeholders():
+    # One placeholder of an earlier step, then the prior step's bonus token and
+    # its two optimistic drafts, of which none was accepted.
+    output_token_ids = [5, -1, -1, -1, -1]
+    batch = _batch_awaiting_sampled_ids(output_token_ids, [7, -1, -1])
+    batch.update_async_output_token_ids(np.array([2]))
+    assert output_token_ids == [5, -1, 7]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_condense_clears_stale_allowed_token_ids_mask(device: str):
+    """condense() must clear the mask row a constrained request is moved out
+    of. Otherwise a later request that reuses that row without
+    allowed_token_ids inherits the stale whitelist.
+    See https://github.com/vllm-project/vllm/issues/43894.
+    """
+    batch_size = 4
+    allowed_token_id = 13
+    input_batch = InputBatch(
+        max_num_reqs=batch_size,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        device=torch.device(device),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[1],
+        kernel_block_sizes=[1],
+        max_num_blocks_per_req=[1024],
+    )
+
+    def _make_req(suffix: int, allowed_token_ids=None) -> CachedRequestState:
+        return CachedRequestState(
+            req_id=f"req_id_{suffix}",
+            prompt_token_ids=[1, 2, 3],
+            sampling_params=SamplingParams(allowed_token_ids=allowed_token_ids),
+            mm_features=[],
+            block_ids=([],),
+            generator=None,
+            num_computed_tokens=0,
+            output_token_ids=[],
+        )
+
+    # Only req_id_2 is constrained, and it lands on the highest row.
+    assert input_batch.add_request(_make_req(0)) == 0
+    assert input_batch.add_request(_make_req(1)) == 1
+    assert input_batch.add_request(_make_req(2, [allowed_token_id])) == 2
+
+    mask = input_batch.allowed_token_ids_mask_cpu_tensor
+    assert mask is not None
+    # The constrained row masks every token except the single allowed id.
+    assert not mask[2][allowed_token_id].item()
+    assert int(mask[2].sum().item()) == VOCAB_SIZE - 1
+
+    # Free row 0, then condense: req_id_2 slides from row 2 down into row 0.
+    input_batch.remove_request("req_id_0")
+    input_batch.condense()
+    assert input_batch.req_id_to_index["req_id_2"] == 0
+    assert int(mask[2].sum().item()) == 0
+
+    # A new unrestricted request reuses row 2 and must stay unconstrained.
+    assert input_batch.add_request(_make_req(3)) == 2
+    assert "req_id_3" not in input_batch.has_allowed_token_ids
+    assert int(mask[2].sum().item()) == 0
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_swap_states_preserves_allowed_token_ids_mask(device: str):
+    """swap_states() must exchange the two allowed_token_ids_mask rows.
+
+    Swapping row views via a tuple assignment
+    (t[i1], t[i2] = t[i2], t[i1]) aliases them, so both rows collapse to the
+    second row's contents and one request silently loses its token
+    restriction. This is the sibling of the condense() leak fixed for
+    https://github.com/vllm-project/vllm/issues/43894.
+    """
+    allowed_token_id = 13
+    input_batch = InputBatch(
+        max_num_reqs=2,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        device=torch.device(device),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[1],
+        kernel_block_sizes=[1],
+        max_num_blocks_per_req=[1024],
+    )
+
+    def _make_req(suffix: int, allowed_token_ids=None) -> CachedRequestState:
+        return CachedRequestState(
+            req_id=f"req_id_{suffix}",
+            prompt_token_ids=[1, 2, 3],
+            sampling_params=SamplingParams(allowed_token_ids=allowed_token_ids),
+            mm_features=[],
+            block_ids=([],),
+            generator=None,
+            num_computed_tokens=0,
+            output_token_ids=[],
+        )
+
+    # Row 0 is constrained to a single token; row 1 is unconstrained.
+    assert input_batch.add_request(_make_req(0, [allowed_token_id])) == 0
+    assert input_batch.add_request(_make_req(1)) == 1
+
+    mask = input_batch.allowed_token_ids_mask_cpu_tensor
+    assert mask is not None
+    assert int(mask[0].sum().item()) == VOCAB_SIZE - 1
+    assert not mask[0][allowed_token_id].item()
+    assert int(mask[1].sum().item()) == 0
+
+    input_batch.swap_states(0, 1)
+
+    # The constrained request now sits at row 1 and must keep its mask; the
+    # unconstrained request now sits at row 0 and must stay open.
+    assert int(mask[1].sum().item()) == VOCAB_SIZE - 1
+    assert not mask[1][allowed_token_id].item()
+    assert int(mask[0].sum().item()) == 0
