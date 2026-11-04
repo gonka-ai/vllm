@@ -269,6 +269,7 @@ class TapeRow:
 
     seed: int
     min_p: float
+    temperature: float = 1.0
     committed: list[int] = field(default_factory=list)
     tag: str | None = None
     greedy: bool = False
@@ -278,7 +279,9 @@ def tape_row(params: Any) -> TapeRow | None:
     args = params.extra_args or {}
     if not args.get(TAPE_ARG):
         return None
-    row = TapeRow((params.seed or 0) & 0xFFFFFFFFFFFFFFFF, params.min_p)
+    row = TapeRow(
+        (params.seed or 0) & 0xFFFFFFFFFFFFFFFF, params.min_p, params.temperature
+    )
     committed = params.enforced_token_ids
     if args.get(TAG_ARG) and committed:
         row.committed = committed[: args.get(LEN_ARG) or len(committed)]
@@ -447,7 +450,14 @@ class TapeBatch:
             z = torch.where(greedy, top.indices, z)
             sz = torch.where(greedy, top.values, sz)
             sx = torch.where(greedy, lx.double(), sx)
-        gap = torch.nan_to_num(sz.double() - sx, nan=0.0, posinf=_MASKED_GAP)
+        # In logits as the model gave them: the jitter between two honest runs does
+        # not grow as the temperature falls, but its score does.
+        temperature = async_tensor_h2d(
+            [r.temperature for _, r, _ in live], self.device, torch.float64
+        )
+        gap = torch.nan_to_num(
+            (sz.double() - sx) * temperature, nan=0.0, posinf=_MASKED_GAP
+        )
         stats = torch.stack([(x != z).double(), gap.clamp(min=0.0)], dim=1)
         _pending.append(([(r.tag, t) for _, r, t in live], stats))
         if len(_pending) >= _MAX_PENDING:

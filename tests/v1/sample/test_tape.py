@@ -225,6 +225,17 @@ def test_replay_signals_score_the_committed_token_against_the_winner():
     assert "past the end" not in signals
 
 
+def test_replay_gap_is_in_logits_whatever_the_temperature():
+    # Logits at T = 0.01 are the model's times 100; so is the jitter between runs.
+    torch.manual_seed(7)
+    raw = (torch.randn(1, 4096, device="cuda") * 3).float()
+    other = int(raw[0].argmin())
+    row = TapeRow(9, 0.0, 0.01, committed=[other], tag="cold")
+    tape_batch([row], [0]).sample(raw / 0.01, None, None)
+    expected = float(raw[0].max() - raw[0, other])
+    assert take(["cold"])["cold"]["max_gap"] == pytest.approx(expected, abs=0.1)
+
+
 def test_replay_of_a_token_outside_the_grammar_gets_the_masked_gap():
     logits = torch.zeros(1, 64, device="cuda")
     logits[0, 9] = float("-inf")
