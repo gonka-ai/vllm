@@ -80,7 +80,7 @@ SpeculativeMethod = Literal[
     NgramGPUTypes,
     DSparkModelTypes,
 ]
-RejectionSampleMethod = Literal["standard", "synthetic", "block"]
+RejectionSampleMethod = Literal["standard", "synthetic", "block", "tape"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
@@ -520,7 +520,12 @@ class SpeculativeConfig:
     draft_sample_method). 'synthetic' accepts draft tokens with a decaying
     probability calibrated to synthetic_acceptance_rate. 'block' uses block
     verification (Sun et al.), which jointly verifies the draft tokens as a
-    block instead of one at a time."""
+    block instead of one at a time. 'tape' keeps a draft only while it equals
+    the token the non-speculative seeded sampler draws at that position, so
+    the output matches non-speculative output for the same seed given the same
+    logits. It requires draft_sample_method='probabilistic' and is refused
+    with adaptive verification and by the V1 model runner. Drafters other than
+    DSpark keep separate draft noise, so their acceptance is low."""
 
     synthetic_acceptance_rates: list[float] | None = None
     """Per-position *unconditional* acceptance rates for synthetic rejection
@@ -1793,6 +1798,19 @@ class SpeculativeConfig:
                 "Expected num_speculative_tokens to be greater "
                 f"than zero ({self.num_speculative_tokens})."
             )
+
+        if self.rejection_sample_method == "tape":
+            if self.enable_adaptive_verification:
+                raise ValueError(
+                    "rejection_sample_method='tape' is incompatible with "
+                    "enable_adaptive_verification=True."
+                )
+            if self.draft_sample_method != "probabilistic":
+                raise ValueError(
+                    "rejection_sample_method='tape' requires "
+                    "draft_sample_method='probabilistic' "
+                    f"(got {self.draft_sample_method!r})."
+                )
 
         if self.rejection_sample_method == "synthetic":
             # Consolidate to per-position rates
