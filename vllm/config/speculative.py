@@ -80,7 +80,7 @@ SpeculativeMethod = Literal[
     NgramGPUTypes,
     DSparkModelTypes,
 ]
-RejectionSampleMethod = Literal["standard", "synthetic", "block"]
+RejectionSampleMethod = Literal["standard", "synthetic", "block", "tape"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
@@ -1793,6 +1793,19 @@ class SpeculativeConfig:
                 "Expected num_speculative_tokens to be greater "
                 f"than zero ({self.num_speculative_tokens})."
             )
+
+        if self.rejection_sample_method == "tape":
+            if self.enable_adaptive_verification:
+                raise ValueError(
+                    "rejection_sample_method='tape' is incompatible with "
+                    "enable_adaptive_verification=True."
+                )
+            if self.draft_sample_method != "probabilistic":
+                raise ValueError(
+                    "rejection_sample_method='tape' requires "
+                    "draft_sample_method='probabilistic' "
+                    f"(got {self.draft_sample_method!r})."
+                )
 
         if self.rejection_sample_method == "synthetic":
             # Consolidate to per-position rates
