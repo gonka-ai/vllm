@@ -65,6 +65,7 @@ def _setup(monkeypatch, tape_fn, num_spec=NUM_SPEC):
     sampler = SimpleNamespace(
         apply_sampling_params=apply_params,
         sampling_states=states,
+        req_states=SimpleNamespace(prompt_len=SimpleNamespace(gpu=_i32([1] * 4))),
         use_fp64_gumbel=False,
         logprobs_mode="raw_logprobs",
     )
@@ -163,6 +164,7 @@ def test_tape_gumbel_args_match_nonspeculative(monkeypatch):
         "apply_temperature": False,
         "is_drafting": False,
         "use_fp64": False,
+        "prompt_len": rejection_sampler.sampler.req_states.prompt_len.gpu,
     }
 
 

@@ -348,5 +348,6 @@ class Sampler:
                 apply_temperature=False,
                 is_drafting=False,
                 use_fp64=self.use_fp64_gumbel,
+                prompt_len=self.req_states.prompt_len.gpu,
             )
         return sampled, processed_logits

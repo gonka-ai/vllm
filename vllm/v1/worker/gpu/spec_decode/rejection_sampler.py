@@ -208,6 +208,7 @@ class RejectionSampler:
             apply_temperature=False,
             is_drafting=False,
             use_fp64=sampler.use_fp64_gumbel,
+            prompt_len=sampler.req_states.prompt_len.gpu,
         ).to(torch.int64)
 
         num_reqs = cu_num_logits.shape[0] - 1

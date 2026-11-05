@@ -88,6 +88,51 @@ def tl_rand32(seed, offset, includes_zero: tl.constexpr):
 
 
 @triton.jit
+def tl_torch_gumbel(seed, step, keys, USE_FP64: tl.constexpr):
+    """Gumbel noise from torch's V1 seeded exponential noise.
+
+    torch's `exponential_` on one vocab row is Philox4x32-10 keyed by the 32-bit
+    halves of the seed, with counter (step_lo, step_hi, token, 0); the first
+    output word is the uniform draw. `step` is the output index of the sampled
+    token. The V1 sampler argmaxes probs / q, which is logit - log(q) + const,
+    so the noise is -log(q).
+    """
+    token = keys.to(tl.uint32)
+    _0 = token * 0
+    step_lo = step.to(tl.uint32)
+    step_hi = (step >> 32).to(tl.uint32)
+    word, _, _, _ = tl.philox(seed, _0 + step_lo, _0 + step_hi, token, _0)
+    # curand_uniform: (0, 1], computed in fp32.
+    u = word.to(tl.float32) * 2.3283064365386963e-10 + 1.1641532182693481e-10
+    if USE_FP64:
+        u = u.to(tl.float64)
+    # torch clamps log(u) to -eps/2 for u >= 1 - eps/2, eps = 2**-23.
+    q = tl.where(u >= 0.99999994039535522, 5.9604644775390625e-08, -tl.log(u))
+    return -tl.log(q)
+
+
+@triton.jit
+def tl_domain_word(seed, offset, DOMAIN: tl.constexpr):
+    """First Philox word for counter (offset_lo, offset_hi, 0, DOMAIN).
+
+    DOMAIN 0 is reserved: with a zero third counter it would coincide with
+    torch's layout for token 0. Domain 1 is the accept draw, 2 the sub-seed.
+    """
+    lo = offset.to(tl.uint32)
+    hi = (offset >> 32).to(tl.uint32)
+    _0 = lo * 0
+    word, _, _, _ = tl.philox(seed, lo, hi, _0, _0 + DOMAIN)
+    return word
+
+
+@triton.jit
+def tl_rand32_accept(seed, offset):
+    """Uniform in (0, 1] for accept tests, off the torch noise counters."""
+    word = tl_domain_word(seed, offset, DOMAIN=1)
+    return tl.maximum(tl.uint_to_uniform_float(word), _TL_RAND_MIN)
+
+
+@triton.jit
 def gumbel_noised_argmax(
     logits,
     keys,
@@ -98,12 +143,14 @@ def gumbel_noised_argmax(
     IS_DRAFTING: tl.constexpr,
     USE_FP64: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr = True,
+    step=None,
 ):
     """Argmax of logits under Gumbel-max sampling, or plain argmax at temp 0.
 
     `keys` indexes the noise, so the same token draws the same noise wherever it
     appears; `pos` and `seed` place the draw in the request's stream, which is
-    what lets a draft and its verification agree.
+    what lets a draft and its verification agree. A non-drafting draw given
+    `step` (the output index of the sampled token) uses torch's V1 noise instead.
     """
     if temp != 0.0 and APPLY_TEMPERATURE:
         # Match the behavior of _temperature_kernel: if that kernel uses
@@ -115,16 +162,19 @@ def gumbel_noised_argmax(
     if USE_FP64:
         logits = logits.to(tl.float64)
     if temp != 0.0:
-        if IS_DRAFTING:
-            pos = pos + _DRAFT_NOISE_SALT
-        gumbel_seed = tl.randint(seed, pos)
-        if USE_FP64:
-            u = tl_rand64(gumbel_seed, keys, includes_zero=False)
-            gumbel_noise = -tl.log(-tl.log(u))
+        if step is not None and not IS_DRAFTING:
+            gumbel_noise = tl_torch_gumbel(seed, step, keys, USE_FP64=USE_FP64)
         else:
-            u = tl_rand32(gumbel_seed, keys, includes_zero=False)
-            # log1p keeps the winning tail at u -> 0, where fp32 resolves it.
-            gumbel_noise = -tl.log(-tldevice.log1p(-u))
+            if IS_DRAFTING:
+                pos = pos + _DRAFT_NOISE_SALT
+            gumbel_seed = tl_domain_word(seed, pos, DOMAIN=2)
+            if USE_FP64:
+                u = tl_rand64(gumbel_seed, keys, includes_zero=False)
+                gumbel_noise = -tl.log(-tl.log(u))
+            else:
+                u = tl_rand32(gumbel_seed, keys, includes_zero=False)
+                # log1p keeps the winning tail at u -> 0, where fp32 resolves it.
+                gumbel_noise = -tl.log(-tldevice.log1p(-u))
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
 
     return tl.max(logits, axis=0, return_indices=True)
@@ -150,6 +200,7 @@ def gumbel_block_argmax(
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr = False,
+    prompt_len_ptr=None,
 ):
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
     is_valid_req = req_state_idx >= 0
@@ -176,6 +227,11 @@ def gumbel_block_argmax(
 
     seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
     pos = tl.load(pos_ptr + token_idx)
+    step = None
+    if prompt_len_ptr is not None:
+        # pos is the position before the sampled token.
+        prompt_len = tl.load(prompt_len_ptr + req_state_idx, mask=is_valid_req, other=0)
+        step = pos + 1 - prompt_len.to(tl.int64)
     return gumbel_noised_argmax(
         logits,
         block,
@@ -186,6 +242,7 @@ def gumbel_block_argmax(
         IS_DRAFTING=IS_DRAFTING,
         USE_FP64=USE_FP64,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
+        step=step,
     )
 
 
@@ -206,6 +263,7 @@ def _gumbel_sample_kernel(
     seeds_ptr,
     pos_ptr,
     temp_ptr,
+    prompt_len_ptr,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     IS_DRAFTING: tl.constexpr,
@@ -242,6 +300,7 @@ def _gumbel_sample_kernel(
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
         USE_FP64=USE_FP64,
         PER_TOKEN_COL=PER_TOKEN_COL,
+        prompt_len_ptr=prompt_len_ptr,
     )
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
@@ -259,7 +318,13 @@ def gumbel_sample(
     logits_cache: torch.Tensor | None = None,  # [max_num_reqs, num_cols, vocab_size]
     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
+    prompt_len: torch.Tensor | None = None,  # [max_num_reqs]
 ) -> torch.Tensor:
+    """Gumbel-max sample each row.
+
+    With `prompt_len`, a non-drafting draw uses torch's V1 seeded noise at
+    output step pos + 1 - prompt_len; without it, the V2 stream keyed by pos.
+    """
     # Enforce contiguity on non-strided input tensors
     expanded_idx_mapping = expanded_idx_mapping.contiguous()
     pos = pos.contiguous()
@@ -293,6 +358,7 @@ def gumbel_sample(
         seed,
         pos,
         temperature,
+        prompt_len,
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
         IS_DRAFTING=is_drafting,
