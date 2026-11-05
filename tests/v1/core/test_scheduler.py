@@ -3436,6 +3436,93 @@ def test_poc_row_pauses_chat_and_takes_its_room(bound: str):
     assert chats[0].status == RequestStatus.RUNNING
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_poc_and_chat_never_share_a_step(async_scheduling: bool):
+    block_size = 16
+    poc_tokens = 4
+    scheduler = create_scheduler(
+        max_num_seqs=8,
+        max_num_batched_tokens=512,
+        block_size=block_size,
+        async_scheduling=async_scheduling,
+        scheduling_policy="priority",
+    )
+    chats = create_requests_with_priority(
+        num_requests=3, priorities=[0, 0, 0], num_tokens=block_size, max_tokens=64
+    )
+    for request in chats:
+        scheduler.add_request(request)
+    chat_ids = {r.request_id for r in chats}
+
+    def poc_request(req_id: str, nonce: int) -> Request:
+        return Request(
+            request_id=req_id,
+            prompt_token_ids=[0] * block_size,
+            sampling_params=None,
+            pooling_params=None,
+            poc_params=PoCParams(
+                block_hash="h",
+                public_key="k",
+                block_height=1,
+                nonce=nonce,
+                seq_len=block_size,
+                poc_decode=True,
+                max_tokens=poc_tokens,
+            ),
+            arrival_time=10.0 + nonce,
+            priority=-1,
+        )
+
+    poc_steps: dict[str, int] = {}
+    finished_poc: set[str] = set()
+    chat_steps_after_poc = 0
+
+    def runner_output(output: SchedulerOutput) -> ModelRunnerOutput:
+        req_ids = list(output.num_scheduled_tokens)
+        poc_outputs = {}
+        for req_id in req_ids:
+            if req_id in poc_steps:
+                poc_steps[req_id] += 1
+                if poc_steps[req_id] == poc_tokens + 1:
+                    poc_outputs[req_id] = SimpleNamespace(nonce=0, vector_b64="")
+                    finished_poc.add(req_id)
+        return ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={r: i for i, r in enumerate(req_ids)},
+            sampled_token_ids=[[100] for _ in req_ids],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            poc_outputs=poc_outputs,
+        )
+
+    pending: list[SchedulerOutput] = []
+    for step in range(40):
+        if step == 3:
+            for i in range(2):
+                poc_steps[f"poc{i}"] = 0
+                scheduler.add_request(poc_request(f"poc{i}", i))
+        if step == 5:
+            poc_steps["poc2"] = 0
+            scheduler.add_request(poc_request("poc2", 2))
+        output = scheduler.schedule()
+        scheduled = set(output.num_scheduled_tokens)
+        assert not (scheduled & set(poc_steps) and scheduled & chat_ids), (
+            step,
+            scheduled,
+        )
+        if finished_poc == set(poc_steps) and poc_steps and scheduled & chat_ids:
+            chat_steps_after_poc += 1
+        pending.append(output)
+        if async_scheduling and len(pending) < 2:
+            continue
+        done = pending.pop(0)
+        scheduler.update_from_output(done, runner_output(done))
+
+    assert finished_poc == {"poc0", "poc1", "poc2"}
+    assert chat_steps_after_poc > 0
+
+
 def test_priority_scheduling_equal_priority_preemption():
     """Test arrival time tiebreaker when requests have equal priority."""
     # This test verifies that arrival time is used as a tiebreaker for equal

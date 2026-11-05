@@ -93,3 +93,58 @@ def test_swap_exchanges_two_budgeted_states():
     )
     assert h._state[0]["thinking_token_budget"] == b1
     assert h._state[1]["thinking_token_budget"] == b0
+
+
+def test_unidirectional_move_of_unbudgeted_clears_destination():
+    h = _make_holder()
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=3,
+            removed=(),
+            added=[
+                (0, SamplingParams(thinking_token_budget=0), None, []),
+                (1, SamplingParams(), None, []),
+                (2, SamplingParams(), None, []),
+            ],
+            moved=(),
+        )
+    )
+    assert list(h._state.keys()) == [0]
+
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=(),
+            moved=[(2, 0, MoveDirectionality.UNIDIRECTIONAL)],
+        )
+    )
+    assert h._state == {}
+    assert not h.has_tracked_requests()
+
+
+def test_unidirectional_move_of_budgeted_replaces_destination():
+    h = _make_holder()
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=3,
+            removed=(),
+            added=[
+                (0, SamplingParams(thinking_token_budget=0), None, []),
+                (2, SamplingParams(thinking_token_budget=9), None, []),
+            ],
+            moved=(),
+        )
+    )
+    moved_state = h._state[2]
+
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=(),
+            moved=[(2, 0, MoveDirectionality.UNIDIRECTIONAL)],
+        )
+    )
+    assert list(h._state.keys()) == [0]
+    assert h._state[0] is moved_state

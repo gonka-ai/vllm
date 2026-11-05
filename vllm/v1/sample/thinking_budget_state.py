@@ -110,6 +110,8 @@ class ThinkingBudgetStateHolder:
                 state = self._state.pop(i1, None)
                 if state is not None:
                     self._state[i2] = state
+                else:
+                    self._state.pop(i2, None)
 
     def update_state(
         self,
