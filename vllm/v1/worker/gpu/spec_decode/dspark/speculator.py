@@ -63,6 +63,11 @@ class DSparkSpeculator(DFlashSpeculator):
             self.max_num_tokens, draft_hidden, dtype=self.dtype, device=device
         )
 
+        if self.speculative_config.rejection_sample_method == "tape":
+            self.prompt_len = torch.zeros(
+                self.max_num_reqs, dtype=torch.int32, device=device
+            )
+
         self._step_cols = torch.arange(
             self.num_speculative_steps, dtype=torch.int32, device=device
         )
@@ -135,6 +140,7 @@ class DSparkSpeculator(DFlashSpeculator):
 
         # sample_pos is the predicted token's position P. Sampling keys a draw
         # by the position before the sampled token, P-1.
+        is_tape = self.speculative_config.rejection_sample_method == "tape"
         sampled = gumbel_sample(
             logits,
             idx_map,
@@ -143,8 +149,10 @@ class DSparkSpeculator(DFlashSpeculator):
             sample_pos - 1,
             apply_temperature=True,
             # Tape verification compares against the target's own noise at this
-            # position, so the draft must not use the salted draft noise.
-            is_drafting=self.speculative_config.rejection_sample_method != "tape",
+            # position, so the draft must not use the salted draft noise and
+            # must use the target's torch-layout noise (needs prompt_len).
+            is_drafting=not is_tape,
+            prompt_len=self.prompt_len if is_tape else None,
             logits_cache=self.draft_logits,
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,

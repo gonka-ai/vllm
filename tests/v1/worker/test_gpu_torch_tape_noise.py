@@ -321,3 +321,83 @@ def test_tape_verify_emits_non_speculative_tokens(interp, monkeypatch):
     assert num_sampled.tolist() == [2, 2]
     assert sampled[0, :2].tolist() == tape[:2]
     assert sampled[1, :2].tolist() == tape[3:5]
+
+
+def _draft_speculator(method, temperature):
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+    spec = object.__new__(DSparkSpeculator)
+    _, seeds, prompt_len = _states()
+    spec.draft_logits = torch.zeros(4, 2, VOCAB)
+    spec._step_cols = [torch.tensor(0), torch.tensor(1)]
+    spec._d2t_scatter_index = None
+    spec.acceptance_estimator = None
+    spec.draft_watermarker = None
+    spec.use_fp64_gumbel = False
+    spec.temperature = torch.full((4,), temperature)
+    spec.seeds = seeds
+    # Plain assignment: a base without the prompt-length buffer accepts it.
+    spec.prompt_len = prompt_len
+    spec.speculative_config = SimpleNamespace(rejection_sample_method=method)
+    return spec
+
+
+@pytest.mark.parametrize("temperature", [1.0, 0.7])
+def test_tape_draft_draw_equals_target_tape_draw(interp, temperature):
+    torch.manual_seed(3)
+    logits = torch.randn(4, VOCAB) * 2
+    idx_map = torch.tensor([2, 0, 1, 3], dtype=torch.int32)
+    sample_pos = torch.tensor([8, 5, 13, 10], dtype=torch.int64)
+    spec = _draft_speculator("tape", temperature)
+    draft = spec._sample_logits(logits.clone(), idx_map, sample_pos, 0)
+    target = gumbel_mod.gumbel_sample(
+        logits / temperature,
+        idx_map,
+        spec.temperature,
+        spec.seeds,
+        sample_pos - 1,
+        apply_temperature=False,
+        is_drafting=False,
+        prompt_len=spec.prompt_len,
+    )
+    assert draft.tolist() == target.tolist()
+
+
+def test_standard_draft_keeps_salted_stream_without_prompt_len(monkeypatch):
+    from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_mod
+
+    calls = []
+    monkeypatch.setattr(
+        dspark_mod, "gumbel_sample", lambda *a, **kw: calls.append(kw) or a[0]
+    )
+    spec = _draft_speculator("standard", 1.0)
+    idx_map = torch.tensor([0, 1], dtype=torch.int32)
+    spec._sample_logits(
+        torch.zeros(2, VOCAB), idx_map, torch.tensor([3, 4], dtype=torch.int64), 0
+    )
+    assert calls[0]["is_drafting"] is True
+    assert calls[0]["prompt_len"] is None
+
+
+def test_draft_prompt_len_buffer_follows_source_pool_cycling(monkeypatch):
+    """The source tensor rebinds .gpu on every update; the buffer must follow."""
+    from vllm.v1.worker.gpu import buffer_utils
+    from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+    # No pinned memory on the CPU test platform; use the explicit-copy buffers.
+    monkeypatch.setattr(buffer_utils, "is_uva_available", lambda: False)
+    source = UvaBackedTensor(4, torch.int32)
+    source.np[:] = PROMPT_LEN
+    source.copy_to_uva()
+    stale = source.gpu
+    spec = object.__new__(DSparkSpeculator)
+    spec.prompt_len = torch.zeros(4, dtype=torch.int32)
+    spec.copy_prompt_len(source.gpu)
+    assert spec.prompt_len.tolist() == PROMPT_LEN
+
+    source.np[:] = [9, 8, 7, 6]
+    source.copy_to_uva()
+    assert stale.tolist() == PROMPT_LEN
+    spec.copy_prompt_len(source.gpu)
+    assert spec.prompt_len.tolist() == [9, 8, 7, 6]
