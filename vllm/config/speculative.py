@@ -520,7 +520,12 @@ class SpeculativeConfig:
     draft_sample_method). 'synthetic' accepts draft tokens with a decaying
     probability calibrated to synthetic_acceptance_rate. 'block' uses block
     verification (Sun et al.), which jointly verifies the draft tokens as a
-    block instead of one at a time."""
+    block instead of one at a time. 'tape' keeps a draft only while it equals
+    the token the non-speculative seeded sampler draws at that position, so
+    the output matches non-speculative output for the same seed given the same
+    logits. It requires draft_sample_method='probabilistic' and is refused
+    with adaptive verification and by the V1 model runner. Drafters other than
+    DSpark keep separate draft noise, so their acceptance is low."""
 
     synthetic_acceptance_rates: list[float] | None = None
     """Per-position *unconditional* acceptance rates for synthetic rejection

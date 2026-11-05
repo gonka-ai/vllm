@@ -214,7 +214,9 @@ class RejectionSampler:
         num_rows = tape.shape[0]
         counts = cu_num_logits[1:] - cu_num_logits[:-1]
         req_ids = torch.repeat_interleave(
-            torch.arange(num_reqs, device=tape.device), counts.long()
+            torch.arange(num_reqs, device=tape.device),
+            counts.long(),
+            output_size=num_rows,
         )
         starts = cu_num_logits[:-1].long()
         local = torch.arange(num_rows, device=tape.device) - starts[req_ids]
@@ -229,13 +231,14 @@ class RejectionSampler:
             0, req_ids, torch.where(accepted, big, local), "amin", include_self=True
         )
         keep = local <= stop[req_ids]
-        sampled = torch.zeros(
-            num_reqs,
-            self.num_speculative_steps + 1,
-            dtype=torch.int64,
-            device=tape.device,
-        )
-        sampled[req_ids[keep], local[keep]] = tape[keep]
+        # Rows that are not kept write to a trailing trash slot, which avoids
+        # boolean-mask indexing (a host sync).
+        width = self.num_speculative_steps + 1
+        trash = num_reqs * width
+        flat_idx = torch.where(keep, req_ids * width + local, trash)
+        flat = torch.zeros(trash + 1, dtype=torch.int64, device=tape.device)
+        flat.scatter_(0, flat_idx, tape)
+        sampled = flat[:trash].view(num_reqs, width)
         num_sampled = (stop + 1).to(torch.int32)
         return processed_logits, sampled, num_sampled
 

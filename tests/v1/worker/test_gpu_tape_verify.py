@@ -30,7 +30,7 @@ def _i64(x) -> torch.Tensor:
     return torch.tensor(x, dtype=torch.int64, device=DEVICE)
 
 
-def _setup(monkeypatch, tape_fn):
+def _setup(monkeypatch, tape_fn, num_spec=NUM_SPEC):
     """Build a tape-mode sampler; `tape_fn(pos) -> tape tokens` fakes the draw."""
     calls: dict = {}
     marker_logits = torch.randn(1, VOCAB)
@@ -69,7 +69,7 @@ def _setup(monkeypatch, tape_fn):
         logprobs_mode="raw_logprobs",
     )
     spec_config = SimpleNamespace(
-        num_speculative_tokens=NUM_SPEC,
+        num_speculative_tokens=num_spec,
         enable_adaptive_verification=False,
         rejection_sample_method="tape",
         synthetic_acceptance_rates=None,
@@ -152,6 +152,7 @@ def test_tape_gumbel_args_match_nonspeculative(monkeypatch):
     pos = [10, 11, 12, 13]
     _, _, _ = _verify(rejection_sampler, [3, 5, 9, 2], pos)
     assert calls["apply_kwargs"] == {"skip_top_k_top_p": True}
+    assert calls["args"][0].tolist() == [0, 0, 0, 0]
     assert calls["top_k_top_p"][0] is calls["marker_logits"]
     assert calls["logits"] is calls["marker_logits"]
     _, temperature, seed, got_pos = calls["args"]
@@ -163,6 +164,51 @@ def test_tape_gumbel_args_match_nonspeculative(monkeypatch):
         "is_drafting": False,
         "use_fp64": False,
     }
+
+
+def _verify_three_requests(monkeypatch):
+    """Requests with 0, 2 and 4 drafts, so 1, 3 and 5 rows."""
+    tape = [7, 5, 6, 8, 1, 2, 3, 4, 9]
+    rejection_sampler, _ = _setup(monkeypatch, lambda pos: tape, num_spec=4)
+    # Row r holds the draft verified by row r - 1; each request's first row
+    # holds a non-draft token.
+    drafts = [0, 0, 5, 0, 0, 1, 2, -1, 4]
+    return rejection_sampler._verify(
+        torch.randn(9, VOCAB),
+        None,
+        _i32(drafts),
+        _i64(list(range(9))),
+        _i32([0, 1, 4, 9]),
+        _i32([0, 1, 2]),
+        np.arange(3),
+        _i32([0, 1, 1, 1, 2, 2, 2, 2, 2]),
+        _i32([0, 0, 1, 2, 0, 1, 2, 3, 4]),
+    )
+
+
+def test_tape_multi_request_layout(monkeypatch):
+    """Bonus-only, rejected and placeholder-cut requests in one batch."""
+    _, sampled, num_sampled = _verify_three_requests(monkeypatch)
+    assert num_sampled.tolist() == [1, 2, 3]
+    assert sampled.tolist() == [
+        [7, 0, 0, 0, 0],
+        [5, 6, 0, 0, 0],
+        [1, 2, 3, 0, 0],
+    ]
+
+
+def test_tape_repeat_interleave_has_output_size(monkeypatch):
+    """A missing output_size makes torch read the total back to the host."""
+    seen = []
+    real = torch.repeat_interleave
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("output_size"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(rs_mod.torch, "repeat_interleave", spy)
+    _verify_three_requests(monkeypatch)
+    assert seen == [9]
 
 
 def _spec_config(**kwargs):
