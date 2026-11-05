@@ -4612,6 +4612,12 @@ class GPUModelRunner(
             # receive sampled token ids from the last PP rank.
             if self.use_async_scheduling and not get_pp_group().is_last_rank:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
+            # decode-PoC prev_k is broadcast by the last rank inside extract.
+            if (
+                not get_pp_group().is_last_rank
+                and getattr(self, "_poc_bridge", None) is not None
+            ):
+                self._poc_bridge.pp_recv_prev_k()
             # In case of PP with kv transfer, we need to pass through the
             # kv_connector_output
             return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
