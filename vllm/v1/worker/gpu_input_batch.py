@@ -874,8 +874,9 @@ class InputBatch:
                 self.req_enforced_token_ids.get(req_id) if req_id is not None else None
             )
             if etids:
-                out = self.req_output_token_ids[i]
-                out_len = len(out) if out else 0
+                # Not len(output_token_ids): async scheduling shrinks that list
+                # when it starts patching its placeholders.
+                out_len = int(self.num_tokens_no_spec[i] - self.num_prompt_tokens[i])
                 enforced_list.append(
                     etids[out_len] if out_len < len(etids) else etids[-1]
                 )
