@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 # Bound replay work; request-body limits belong to the proxy.
 MAX_ENFORCED_TOKENS = 32768
 MAX_TOP_TOKENS_PER_POSITION = 64
+# Capability marker: Model Runner V2 honors enforced_token_ids, also with spec decode.
+V2_ENFORCED_TOKENS = True
 
 
 class EnforcedToken(BaseModel):

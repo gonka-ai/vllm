@@ -142,7 +142,9 @@ class DSparkSpeculator(DFlashSpeculator):
             self.seeds,
             sample_pos - 1,
             apply_temperature=True,
-            is_drafting=True,
+            # Tape verification compares against the target's own noise at this
+            # position, so the draft must not use the salted draft noise.
+            is_drafting=self.speculative_config.rejection_sample_method != "tape",
             logits_cache=self.draft_logits,
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,

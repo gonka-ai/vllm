@@ -10,6 +10,7 @@ from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.worker.gpu.input_batch import (
@@ -17,6 +18,7 @@ from vllm.v1.worker.gpu.input_batch import (
     get_num_sampled_and_rejected,
 )
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -91,6 +93,7 @@ class RejectionSampler:
         self.enable_adaptive_verification = spec_config.enable_adaptive_verification
         rejection_sample_method = spec_config.rejection_sample_method
         self.use_block_verification: bool = False
+        self.use_tape_verification = rejection_sample_method == "tape"
         self.synthetic_conditional_rates: torch.Tensor | None = None
         if rejection_sample_method == "synthetic":
             assert spec_config.synthetic_acceptance_rates is not None
@@ -165,6 +168,80 @@ class RejectionSampler:
             "watermark_key": self.watermark_key,
         }
 
+    def _verify_tape(
+        self,
+        logits: torch.Tensor,
+        draft_sampled: torch.Tensor,
+        pos: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        expanded_idx_mapping: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Keep drafts equal to the non-speculative seeded draw of their row.
+
+        The tape is computed exactly as in Sampler.sample, so the emitted
+        tokens equal non-speculative sampling for the same seed.
+        """
+        sampler = self.sampler
+        processed_logits = sampler.apply_sampling_params(
+            logits,
+            expanded_idx_mapping,
+            idx_mapping,
+            idx_mapping_np,
+            pos,
+            draft_sampled,
+            expanded_local_pos,
+            skip_top_k_top_p=True,
+        )
+        top_k, top_p = sampler.sampling_states.get_top_k_top_p(
+            expanded_idx_mapping, idx_mapping_np
+        )
+        processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
+        tape = gumbel_sample(
+            processed_logits,
+            expanded_idx_mapping,
+            sampler.sampling_states.temperature.gpu,
+            sampler.sampling_states.seeds.gpu,
+            pos,
+            apply_temperature=False,
+            is_drafting=False,
+            use_fp64=sampler.use_fp64_gumbel,
+        ).to(torch.int64)
+
+        num_reqs = cu_num_logits.shape[0] - 1
+        num_rows = tape.shape[0]
+        counts = cu_num_logits[1:] - cu_num_logits[:-1]
+        req_ids = torch.repeat_interleave(
+            torch.arange(num_reqs, device=tape.device),
+            counts.long(),
+            output_size=num_rows,
+        )
+        starts = cu_num_logits[:-1].long()
+        local = torch.arange(num_rows, device=tape.device) - starts[req_ids]
+        is_bonus = local == counts.long()[req_ids] - 1
+        # Row r verifies the draft stored at row r + 1; negative ids are
+        # placeholders and always reject.
+        next_draft = torch.cat([draft_sampled[1:], draft_sampled[:1]]).long()
+        accepted = ~is_bonus & (next_draft >= 0) & (next_draft == tape)
+        big = self.num_speculative_steps + 1
+        stop = torch.full((num_reqs,), big, dtype=torch.int64, device=tape.device)
+        stop.scatter_reduce_(
+            0, req_ids, torch.where(accepted, big, local), "amin", include_self=True
+        )
+        keep = local <= stop[req_ids]
+        # Rows that are not kept write to a trailing trash slot, which avoids
+        # boolean-mask indexing (a host sync).
+        width = self.num_speculative_steps + 1
+        trash = num_reqs * width
+        flat_idx = torch.where(keep, req_ids * width + local, trash)
+        flat = torch.zeros(trash + 1, dtype=torch.int64, device=tape.device)
+        flat.scatter_(0, flat_idx, tape)
+        sampled = flat[:trash].view(num_reqs, width)
+        num_sampled = (stop + 1).to(torch.int32)
+        return processed_logits, sampled, num_sampled
+
     def _verify(
         self,
         logits: torch.Tensor,
@@ -177,6 +254,17 @@ class RejectionSampler:
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.use_tape_verification:
+            return self._verify_tape(
+                logits,
+                draft_sampled,
+                pos,
+                cu_num_logits,
+                idx_mapping,
+                idx_mapping_np,
+                expanded_idx_mapping,
+                expanded_local_pos,
+            )
         processed_logits = self.sampler.apply_sampling_params(
             logits,
             expanded_idx_mapping,
@@ -251,6 +339,13 @@ class RejectionSampler:
                 input_batch.idx_mapping_np[start:end],
                 input_batch.expanded_idx_mapping[lo:hi],
                 input_batch.expanded_local_pos[lo:hi],
+            )
+            # Before the logprobs read the sampled tokens (flatten kernel).
+            self.sampler.enforced_tokens_state.apply_to_verified(
+                sampled,
+                num_sampled,
+                input_batch.idx_mapping[start:end],
+                input_batch.idx_mapping_np[start:end],
             )
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
