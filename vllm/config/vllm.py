@@ -2891,6 +2891,8 @@ class VllmConfig:
         if self.speculative_config:
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
+            if self.speculative_config.rejection_sample_method == "tape":
+                unsupported.append("tape rejection sampling")
             if self.speculative_config.enable_adaptive_verification:
                 unsupported.append("adaptive draft verification")
 

@@ -152,6 +152,10 @@ class DraftModelSpeculator(BaseSpeculator):
             self.max_num_reqs, dtype=torch.float32, device=device
         )
         self.seeds = torch.zeros(self.max_num_reqs, dtype=torch.int64, device=device)
+        # Allocated only by speculators that sample with the target's torch-layout
+        # noise. A fixed buffer, since req_states.prompt_len.gpu rebinds on every
+        # update and drafting may run inside a CUDA graph.
+        self.prompt_len: torch.Tensor | None = None
         self.draft_tokens = torch.zeros(
             self.max_num_reqs,
             self.num_speculative_steps,
@@ -471,6 +475,10 @@ class DraftModelSpeculator(BaseSpeculator):
         if self.draft_watermarker is None:
             return
         self.draft_watermarker.prepare(contexts, watermarking)
+
+    def copy_prompt_len(self, prompt_len: torch.Tensor) -> None:
+        assert self.prompt_len is not None
+        self.prompt_len.copy_(prompt_len)
 
     def _copy_request_inputs(
         self,
