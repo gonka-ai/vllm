@@ -1,107 +1,143 @@
-# Gonka MLNode Integration: Decode PoC
+# Decode PoC: how to reproduce it
 
-Extends [`poc-integration.md`](poc-integration.md) (prefill PoC). Reuse its RNG primitives ([`gpu_random.py`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/poc/gpu_random.py)) and API.
+## Versions
 
-Reference implementation: [`gonka-poc` v0.2.1](https://github.com/gonka-ai/gonka-vllm-plugins/tree/v0.2.1/src/gonka_poc) on [vLLM 0.30](https://github.com/gonka-ai/vllm/tree/92aa868134deabbeec758f42508fe0719b8f2e33).
+| | |
+| --- | --- |
+| MLNode image | `ghcr.io/gonka-ai/mlnode:4.0.0-sigma3@sha256:ce449de9545b55a8c55d495eaa512beebb72cd29478d4f4b672a1c231ce89d1f` |
+| MLNode image, NVIDIA driver older than 580 | `ghcr.io/gonka-ai/mlnode:4.0.0-sigma3-cu12@sha256:3e4588d1dc33f4a09a1d099cb491348cdc80849ad7bad883da184ccf055f9aca` |
+| vLLM in the image | [gonka-ai/vllm](https://github.com/gonka-ai/vllm/tree/c694cd48fb04c11b608c52384a3e508b14d3c915), branch `release/v0.30-decode-int`, commit `c694cd48fb` |
+| PoC plugin in the image | [gonka-ai/gonka-vllm-plugins](https://github.com/gonka-ai/gonka-vllm-plugins/tree/v0.2.1), tag `v0.2.1` (commit `c98fc00`, reports version 0.2.0) |
+| Presets and scripts | [gonka-ai/gonka](https://github.com/gonka-ai/gonka/tree/aa3c763ab814aa1af9694de76df6fe7dabd3ef50), branch `upgrade-v0.2.17`, commit `aa3c763ab` |
 
-The upgrade to v0.2.17 keeps prefill as the regular scheme and runs decode as a trial in the first confirmation PoC of each epoch. Governance switches the regular scheme later. A node must support both schemes.
+To build the image: `docker/Dockerfile.gonka-poc` in the vLLM commit, then `mlnode/packages/api/Dockerfile` in the gonka commit on top of it (`--build-arg VLLM_BASE_IMAGE`).
 
-## Overview
+## Models and GPUs
 
-A nonce is a synthetic prompt of `seq_len` embeddings and then `N = max_tokens` decode steps on the same KV cache (256 and 256). No token is sampled. Each step snaps the final hidden state to one of 16 codebook points; the point seeds the next step.
+| `MODEL` | `COMMIT` | `NAME` | `TAU` | GPUs per instance: H100 / H200 / B200 / B300 |
+| --- | --- | --- | --- | --- |
+| `MiniMaxAI/MiniMax-M2.7` | `d494266a4affc0d2995ba1fa35c8481cbd84294b` | `minimaxm27` | 0.0395 | 4 / 2 / 2 / 1 |
+| `deepseek-ai/DeepSeek-V4-Flash-0731` | `7872f01b1d1fe23eabc4c98b48bffcef5a386062` | `deepseekv4flash0731` | 0.027 | 4 / 2 / 2 / 1 |
+| `zai-org/GLM-5.3-Flash` | `04c4e9e95c5da8862dced7e5056455116f83a7e0` | `glm53flash` | 0.017 | 8 / 4 / 4 / 2 |
 
+The vLLM arguments are in `deploy/join/node-config-<NAME>-<GPU>-decode-max.json`. MLNode starts one instance per `--tensor-parallel-size` GPUs. Two additions:
+
+- GLM: add `--max-model-len 400000`. The chain sends it, the preset does not have it.
+- DeepSeek on 2×H200: start the container with `-e VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`.
+
+On another GPU, start from the nearest preset:
+
+- `--tensor-parallel-size`: enough GPUs for the weights.
+- `--max-num-seqs`: at most the KV cache size in tokens (vLLM prints it at startup) divided by 512. Set `max_cudagraph_capture_size` to the same value.
+- Keep `--kv-cache-dtype fp8`. Do not use pipeline parallelism: decode stalls.
+
+Another model runs with the same commands and its own arguments. It has no golden reference and no network thresholds: record a reference in step 5.
+
+## Run
+
+```bash
+git clone https://github.com/gonka-ai/gonka && cd gonka && git checkout aa3c763ab
+pip install requests
+
+export IMAGE=ghcr.io/gonka-ai/mlnode:4.0.0-sigma3@sha256:ce449de9545b55a8c55d495eaa512beebb72cd29478d4f4b672a1c231ce89d1f
+export MODEL=MiniMaxAI/MiniMax-M2.7 COMMIT=d494266a4affc0d2995ba1fa35c8481cbd84294b
+export NAME=minimaxm27 GPU=B300 TAU=0.0395
+export URL=http://127.0.0.1:8080
+export CFG=deploy/join/node-config-$NAME-$GPU-decode-max.json
+export POC=mlnode/packages/benchmarks/scripts/poc_validation
 ```
-prompt embeddings -> prefill -> k_0 -> decode 1 -> k_1 -> ... -> decode N -> k_N
-```
 
-The artifact is `[k_0, ..., k_N]`, 257 integers in `0..15`.
-
-## Forward pass
-
-Notation: `seed(s)` is the first 4 bytes of SHA-256, big-endian (`_seed_from_string`). `mm(key, seed)` is `_murmur3_32`. `normal(seed, n)` is `_normal`. `H` is the hidden size. `base = seed(f"{block_hash}_{public_key}_nonce{nonce}")`.
-
-```
-step_seed(i, salt) = mm((k_{i-1} * 0x9E3779B1 + i * 0x85EBCA77 + salt) mod 2^32, base)
-```
-
-| | Prefill (step 0) | Decode step `i` = 1..N |
-| --- | --- | --- |
-| position | `0..seq_len-1` | `seq_len + i - 1` |
-| input embedding | `normal(base, seq_len * H)` as `[seq_len, H]`, same as prefill PoC | `normal(step_seed(i, 0x0D), H)` |
-| pick seed | `seed(f"{block_hash}_{public_key}_nonce_{nonce}_pick_256_decode0")` | `step_seed(i, 0x91)` |
-
-`poc_stronger_rng` does not apply to decode. Code: [`decode_random.py`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/poc/decode_random.py#L57-L123).
-
-**Householder.** Same as prefill PoC: after every decoder layer `l`, vector `normal(seed(f"{block_hash}_layer_{l}_householder"), H)` normalized to unit length. If the layer returns `(hidden, residual)`, reflect both. If it keeps several copies per token, reflect each. Code: [`native.py`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/mixed/native.py#L87-L126).
-
-**MoE routing.** Replace the router logits ([`_forced_logits`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/poc/decode_random.py#L147-L171)). The model's own scoring and weighting then run on them unchanged.
-
-```
-start  = mm(step, seed(f"{block_hash}_n{nonce}_route_layer_{j}")) mod n_experts
-expert (start + r) mod n_experts  ->  100 + top_k - r     for r = 0..top_k-1
-all other experts                 ->  -10000
-```
-
-- `j` counts the seeded MoE layers from 0. Dense layers and layers routed by token id are not counted.
-- `step` is 0 for every prompt token, then 1..N.
-
-**Layers routed by token id** (DeepSeek-V4 `tid2eid`). Keep their router logits. Use these token ids:
-
-- prompt position `p`: `mm(p, seed(f"{block_hash}_{public_key}_nonce{nonce}_input_ids")) mod vocab_size`
-- decode step `i`: `mm(0, step_seed(i, 0x57)) mod vocab_size`
-
-## Snap
-
-Input: the last position's hidden state after the final norm, float32.
-
-1. Take the 256 coordinates `d` with the smallest `mm(d, pick_seed)`. Order: the 255 smallest by ascending `d`, then the 256th.
-2. Normalize to unit length: `q`.
-3. `scores = codebook @ q`, `k = argmax(scores)`.
-
-The order in step 1 is what `torch.topk(..., sorted=False)` returns on CUDA. It matters: with fully sorted indices, `k` matched in 13% of random inputs.
-
-Codebook: [`sphere_codebook.pt`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/poc/sphere_codebook.pt), `[16, 256]` float32. SHA-256 of the raw float32 data: `2201d1093583f43f328dd4643ddf1f34737f6da8c1956395c43fd093e357e34f`. Load this file, do not rebuild it. Code: [`sphere.py`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/poc/sphere.py).
-
-## Validation
-
-Run the same forward, seeding step `i` with the prover's point `c_{i-1}` instead of `k_{i-1}`, so a disagreement does not change later steps ([`runtime.py`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/mixed/runtime.py#L689-L749), [`validation.py`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/poc/validation.py#L149-L238)).
-
-1. Step margin, where `k_i != c_i`: `max(scores) - scores[c_i]`. A `c_i` outside `0..15` gives 2.0.
-2. Nonce distance: the largest margin. The nonce mismatches if it exceeds `dist_threshold`.
-3. Verdict: one-sided binomial test of the mismatch count against `p_mismatch`. Fraud if `p_value < fraud_threshold`.
-
-A nonce with a non-finite hidden state is dropped. When validating, report it in `n_excluded`; the API node then abstains.
-
-Thresholds come in the request's `stat_test`. Chain values in v0.2.17:
-
-| Model | `dist_threshold` | `p_mismatch` | `fraud_threshold` |
-| --- | --- | --- | --- |
-| MiniMax-M2.7 | 0.0395 | 0.1 | 0.01 |
-| DeepSeek-V4-Flash-0731 | 0.027 | 0.1 | 0.01 |
-| GLM-5.3-Flash | 0.017 | 0.1 | 0.01 |
-
-For 200 nonces, fraud starts at 31 mismatches.
-
-## API
-
-Same endpoints as prefill PoC. Differences:
-
-- `params`: `"decode": true, "seq_len": 256, "max_tokens": 256`. Without `decode`, run prefill PoC.
-- artifact: `{"nonce": n, "vector_b64": "", "k_points_steps": [k_0, ..., k_N]}` in `/generated` callbacks, `/generate` responses and `validation.artifacts`.
-- `/validated` callback: `n_total`, `n_mismatch`, `mismatch_nonces`, `p_value`, `fraud_detected`, `n_excluded`, `excluded_nonces`.
-
-> **vLLM:** each nonce is an engine request ([`scheduler.py`](https://github.com/gonka-ai/vllm/blob/92aa868134deabbeec758f42508fe0719b8f2e33/vllm/v1/core/sched/scheduler.py#L620)). Its prompt is prefilled in one step and never read from the prefix cache. Chat gets 503 during mining and is paused during validation.
-
-## Check
-
-1. Compare seeds, pick indices and routing with the plugin. They are integer-only and must match exactly.
-2. Run [`validate.py --scheme decode`](https://github.com/gonka-ai/gonka/tree/upgrade-v0.2.17/mlnode/packages/benchmarks/scripts/poc_validation) against the golden references. Pass the chain thresholds: the references carry looser ones.
+1. Start MLNode.
 
     ```bash
-    python3 validate.py --mlnode-url "$URL" --model MiniMaxAI/MiniMax-M2.7 --scheme decode \
-        --threshold 0.0395 --p-mismatch 0.1 --fraud-threshold 0.01
+    docker run -d --name mlnode --gpus all --ipc host --ulimit nofile=65535:65535 \
+        -v "$HOME/.cache:/root/.cache" -e HF_HOME=/root/.cache -p 8080:8080 \
+        $IMAGE uvicorn api.app:app --host=0.0.0.0 --port=8080
     ```
 
-    For another model, record a reference on an NVIDIA MLNode with `make_artifact.py --scheme decode --num-nonces 200`.
-3. Validate custom-node artifacts on NVIDIA GPUs.
-4. Confirm that a quantized or pruned model is rejected.
+2. Download the model. Repeat the second command until it returns `DOWNLOADED`.
+
+    ```bash
+    curl $URL/api/v1/models/download -H 'Content-Type: application/json' \
+        -d "{\"hf_repo\":\"$MODEL\",\"hf_commit\":\"$COMMIT\"}"
+    curl $URL/api/v1/models/status -H 'Content-Type: application/json' \
+        -d "{\"hf_repo\":\"$MODEL\",\"hf_commit\":\"$COMMIT\"}"
+    ```
+
+3. Start vLLM. Repeat the second command until `is_running` is true. For GLM, replace the last field with `additional_args: (.[0].models[$m].args + ["--max-model-len", "400000"])`.
+
+    ```bash
+    jq -c --arg m "$MODEL" '{model: $m, dtype: "auto", additional_args: .[0].models[$m].args}' $CFG \
+        | curl $URL/api/v1/inference/up/async -H 'Content-Type: application/json' -d @-
+    curl $URL/api/v1/inference/up/status
+    ```
+
+4. Measure the nonce rate and validate the golden reference, 200 nonces recorded on another node.
+
+    ```bash
+    python3 $POC/validate.py --mlnode-url $URL --model $MODEL --scheme decode \
+        --skip-download --skip-deploy \
+        --threshold $TAU --p-mismatch 0.1 --fraud-threshold 0.01
+    ```
+
+    Exit code 0 is `PASS`, 2 is `FAIL`. The rate is the sum over all instances; it grows during the first minute because decode mining starts in groups, so read the last sample. The three threshold flags are the v0.2.17 chain values. Without them the script uses the values stored in the reference, which differ.
+
+5. Check the node in the other direction. Record its nonces and validate them on a second node.
+
+    ```bash
+    python3 $POC/make_artifact.py --mlnode-url $URL --model $MODEL --scheme decode \
+        --num-nonces 200 --out ref.json
+    python3 $POC/validate.py --mlnode-url $URL2 --model $MODEL --scheme decode --reference ref.json \
+        --skip-download --skip-deploy --skip-throughput \
+        --threshold $TAU --p-mismatch 0.1 --fraud-threshold 0.01
+    ```
+
+## Expected result
+
+With these thresholds, fraud starts at 31 mismatches of 200. Honest nodes gave 0–8 against the golden references on B300, H200 and H100. B200, and DeepSeek on H100, were not measured. MiniMax AWQ gave 43, DeepSeek REAP 200.
+
+Compare nodes only through validation. Free-running trajectories from two honest nodes differ: one near-tie changes every later step.
+
+## What happens
+
+1. The API node sends `block_hash`, `public_key` and nonces, with `params: {model, decode: true, seq_len: 256, max_tokens: 256}`. `/pow/init/generate` mines until `/pow/stop`; `/pow/generate` computes the given nonces.
+2. Each nonce becomes one vLLM request. Its prompt is 256 embeddings derived from `(block_hash, public_key, nonce)`, prefilled in one step.
+3. During the forward, every decoder layer output is reflected (Householder, seeded by `block_hash` and layer), and MoE routers pick experts from a seed instead of from the hidden state.
+4. The last hidden state after the final norm is snapped to one of 16 fixed points: take 256 seeded coordinates, normalize, choose the point with the highest cosine. This is `k_0`.
+5. `k_0` seeds the next input embedding and the next 256 coordinates. The model runs one decode step on the same KV cache, which gives `k_1`. This repeats 256 times.
+6. The artifact is `k_points_steps = [k_0, ..., k_256]`. No token is sampled. `vector_b64` is empty.
+7. A validator runs the same nonce but feeds the prover's points into the chain. At each step where its own point differs, the margin is `best_score - score_of_the_claimed_point`. A nonce mismatches if its largest margin exceeds τ.
+8. A one-sided binomial test compares the number of mismatched nonces with `p_mismatch = 0.1`. Fraud if the p-value is below 0.01.
+
+While mining, chat gets 503. While validating, chat waits. A nonce with a non-finite value is dropped; a validator that drops one abstains.
+
+## Exact formulas
+
+Needed only for another engine. `seed(s)` is the first 4 bytes of SHA-256, big-endian. `mm(key, seed)`, `normal(seed, n)` are `_murmur3_32`, `_normal` from [`gpu_random.py`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/poc/gpu_random.py#L22-L129). `H` is the hidden size.
+
+```
+base               = seed(f"{block_hash}_{public_key}_nonce{nonce}")
+step_seed(i, salt) = mm((k_{i-1} * 0x9E3779B1 + i * 0x85EBCA77 + salt) mod 2^32, base)
+
+prompt embeddings  = normal(base, seq_len * H), shape [seq_len, H], positions 0..seq_len-1
+input of step i    = normal(step_seed(i, 0x0D), H), position seq_len + i - 1, i = 1..max_tokens
+reflection, layer l: x - 2 (x·v) v,  v = unit(normal(seed(f"{block_hash}_layer_{l}_householder"), H))
+
+pick seed, k_0     = seed(f"{block_hash}_{public_key}_nonce_{nonce}_pick_256_decode0")
+pick seed, step i  = step_seed(i, 0x91)
+coordinates        = the 256 values d with the smallest mm(d, pick_seed)
+q                  = unit(hidden[coordinates]), float32
+k                  = argmax(codebook @ q)
+
+router, MoE gate j : start = mm(step, seed(f"{block_hash}_n{nonce}_route_layer_{j}")) mod n_experts
+                     logit of expert (start + r) mod n_experts = 100 + top_k - r, r = 0..top_k-1; others -10000
+```
+
+- Coordinate order: the 255 smallest by ascending `d`, then the 256th. This is `torch.topk(sorted=False)` on CUDA. Another order gives other points.
+- [`sphere_codebook.pt`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/poc/sphere_codebook.pt): `[16, 256]` float32, SHA-256 of the data `2201d1093583f43f328dd4643ddf1f34737f6da8c1956395c43fd093e357e34f`. Do not rebuild it.
+- Embeddings and `v` are computed in float32, then cast to the model dtype.
+- If a layer returns `(hidden, residual)`, reflect both.
+- `j` counts only the gates with replaced logits, from 0. `step` is 0 for prompt tokens. The model then applies its own scoring, bias and top-k to these logits.
+- DeepSeek-V4 gates that route by token id (`tid2eid`) keep their logits. Token ids there: `mm(p, seed(f"{block_hash}_{public_key}_nonce{nonce}_input_ids")) mod vocab` for prompt position `p`, `mm(0, step_seed(i, 0x57)) mod vocab` for step `i`.
+
+Code: [`decode_random.py`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/poc/decode_random.py), [`native.py`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/mixed/native.py), [`sphere.py`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/poc/sphere.py), [`runtime.py`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/mixed/runtime.py), [`validation.py`](https://github.com/gonka-ai/gonka-vllm-plugins/blob/v0.2.1/src/gonka_poc/poc/validation.py).
