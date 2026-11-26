@@ -147,7 +147,7 @@ class HPUTorchWorker(Worker):
             self.rank,
             self.distributed_init_method,
             self.local_rank,
-            current_platform.dist_backend,
+            "hccl",
         )
         set_random_seed(self.model_config.seed)
         init_workspace_manager(
