@@ -30,6 +30,15 @@ elif current_platform.is_xpu():
     from .xpu.dspark import DSparkDeepseekV4ForCausalLM  # type: ignore[assignment]
     from .xpu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .xpu.mtp import DeepSeekV4MTP  # type: ignore[assignment]
+elif current_platform.device_type == "hpu":
+    from .hpu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
+    from .hpu.unsupported import (  # type: ignore[assignment]
+        DeepSeekV4MTP,
+        DSparkDeepseekV4ForCausalLM,
+    )
+    from .vl_stub import (  # type: ignore[assignment]
+        DeepseekV4ForConditionalGeneration,
+    )
 elif current_platform.is_cpu():
     from .cpu.dspark import DSparkDeepseekV4ForCausalLM  # type: ignore[assignment]
     from .cpu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]

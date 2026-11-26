@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
+from vllm.platforms import current_platform
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 
@@ -145,6 +146,9 @@ class DeepseekV4FP8Config(Fp8Config):
                 )
             )
         ):
+            return None
+        if current_platform.device_type == "hpu":
+            # The hpu variant reads the checkpoint's FP8 and FP4 tensors itself.
             return None
         model_type = getattr(hf_config, "model_type", None)
         if model_type == "deepseek_v4" or user_quant == "deepseek_v4_fp8":
