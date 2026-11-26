@@ -182,18 +182,24 @@ class DeepseekV4HPUMetadataBuilder(AttentionMetadataBuilder[DeepseekV4HPUMetadat
         fast_build: bool = False,
     ) -> DeepseekV4HPUMetadata:
         cm = common_attn_metadata
-        num_reqs = cm.num_reqs
-        query_start = cm.query_start_loc_cpu[: num_reqs + 1].to(torch.int64)
-        seq_lens = cm.seq_lens_cpu_upper_bound
-        if seq_lens is None:
-            seq_lens = cm.seq_lens.cpu()
-        return build_metadata(
-            query_start,
-            seq_lens[:num_reqs].to(torch.int64),
-            cm.block_table_tensor[:num_reqs],
-            self.block_size,
-            self.window,
-        )
+        # The caches of a layer differ in shape, so the runner builds once per
+        # shape; they share the block table, hence the indices.
+        metadata = getattr(cm, "_deepseek_v4_hpu", None)
+        if metadata is None:
+            num_reqs = cm.num_reqs
+            query_start = cm.query_start_loc_cpu[: num_reqs + 1].to(torch.int64)
+            seq_lens = cm.seq_lens_cpu_upper_bound
+            if seq_lens is None:
+                seq_lens = cm.seq_lens.cpu()
+            metadata = build_metadata(
+                query_start,
+                seq_lens[:num_reqs].to(torch.int64),
+                cm.block_table_tensor[:num_reqs],
+                self.block_size,
+                self.window,
+            )
+            cm._deepseek_v4_hpu = metadata  # type: ignore[attr-defined]
+        return metadata
 
 
 def build_metadata(
