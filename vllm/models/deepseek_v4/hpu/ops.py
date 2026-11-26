@@ -216,22 +216,22 @@ def hc_head(
 
 
 def route(
-    x: torch.Tensor,
-    gate_weight: torch.Tensor,
+    logits: torch.Tensor,
     gate_bias: torch.Tensor | None,
     hash_experts: torch.Tensor | None,
     top_k: int,
     route_scale: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Gate.forward with sqrtsoftplus scores.
+    """Gate.forward after its linear, with sqrtsoftplus scores.
 
     Args:
+        logits: [tokens, experts] float32.
         hash_experts: [tokens, top_k], the experts of a hash layer, or None.
 
     Returns:
         The routing weights [tokens, top_k] float32 and the expert ids.
     """
-    scores = F.softplus(F.linear(x.float(), gate_weight)).sqrt()
+    scores = F.softplus(logits).sqrt()
     if hash_experts is not None:
         indices = hash_experts
     else:

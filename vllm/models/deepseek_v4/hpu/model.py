@@ -45,8 +45,7 @@ from vllm.sequence import IntermediateTensors
 _ATTENTION_CHUNK = 1 << 27
 _EXPERT = re.compile(r"layers\.(\d+)\.ffn\.experts\.(\d+)\.(w[123])\.(weight|scale)")
 _RENAMES = (
-    (".ffn.gate.bias", ".ffn.gate_bias"),
-    (".ffn.gate.tid2eid", ".ffn.tid2eid"),
+    (".ffn.gate.bias", ".ffn.gate.e_score_correction_bias"),
     (".ffn.shared_experts.w", ".ffn.shared_w"),
 )
 
@@ -384,37 +383,58 @@ def _native_experts(x, ids, weights, w13, w2, w13_scale, w2_scale, first, last):
     return _native_moe(x, ids, weights, w13, w2, w13_scale, w2_scale, first, last)
 
 
-class DeepseekV4HPUMoE(nn.Module):
-    """MoE: the routed experts of this rank, packed, and the shared expert."""
+class DeepseekV4HPUNorm(nn.Module):
+    """RMSNorm with a float32 weight."""
 
-    def __init__(self, vllm_config: VllmConfig, layer_id: int, gemm_dtype) -> None:
+    def __init__(self, dim: int, eps: float) -> None:
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        self.weight = _param(dim, dtype=torch.float32)
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return ops.rms_norm(x, self.weight, self.eps)
+
+
+class DeepseekV4HPUGate(nn.Module):
+    """The router: the logit of every expert, and on a hash layer the experts
+    of every token id."""
+
+    def __init__(self, config, layer_id: int) -> None:
+        super().__init__()
+        num_experts = config.n_routed_experts
+        self.weight = _param(num_experts, config.hidden_size, dtype=torch.float32)
+        if layer_id < config.num_hash_layers:
+            self.register_parameter("e_score_correction_bias", None)
+            self.tid2eid = _param(
+                config.vocab_size, config.num_experts_per_tok, dtype=torch.int32
+            )
+        else:
+            self.e_score_correction_bias = _param(num_experts, dtype=torch.float32)
+            self.register_parameter("tid2eid", None)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.linear(x.float(), self.weight)
+
+
+class DeepseekV4HPUExperts(nn.Module):
+    """The routed experts of this rank, packed as in the checkpoint."""
+
+    def __init__(self, config, gemm_dtype: torch.dtype) -> None:
+        super().__init__()
+        self.num_experts = config.n_routed_experts
         self.top_k = config.num_experts_per_tok
-        self.route_scale = config.routed_scaling_factor
         self.limit = config.swiglu_limit
+        self.gemm_dtype = gemm_dtype
         self.hidden = hidden = config.hidden_size
         self.inter = inter = config.moe_intermediate_size
-        self.tp_size = get_tensor_model_parallel_world_size()
-        num_experts = config.n_routed_experts
-        assert num_experts % self.tp_size == 0
-        self.num_local = local = num_experts // self.tp_size
+        tp_size = get_tensor_model_parallel_world_size()
+        assert self.num_experts % tp_size == 0
+        self.num_local = local = self.num_experts // tp_size
         self.first = get_tensor_model_parallel_rank() * local
         self.native = (
             current_platform.device_type == "hpu"
             and os.environ.get("VLLM_HPU_DEEPSEEK_V4_MOE", "native") == "native"
         )
-
-        self.gate = _param(num_experts, hidden, dtype=torch.float32)
-        if layer_id < config.num_hash_layers:
-            self.register_parameter("gate_bias", None)
-            self.tid2eid = _param(config.vocab_size, self.top_k, dtype=torch.int32)
-        else:
-            self.gate_bias = _param(num_experts, dtype=torch.float32)
-            self.register_parameter("tid2eid", None)
-        self.shared_w1 = _param(inter, hidden, dtype=gemm_dtype)
-        self.shared_w3 = _param(inter, hidden, dtype=gemm_dtype)
-        self.shared_w2 = _param(hidden, inter, dtype=gemm_dtype)
         # Gate (w1) over up (w3), two float4_e2m1 codes per byte, and one
         # E8M0 scale per 32 codes of a row.
         self.w13 = _param(local, 2 * inter, hidden // 2, dtype=torch.uint8)
@@ -439,53 +459,40 @@ class DeepseekV4HPUMoE(nn.Module):
         target.copy_(tensor.view(torch.uint8))
         self.pieces_loaded += 1
 
-    def forward(self, x: torch.Tensor, input_ids: torch.Tensor | None) -> torch.Tensor:
-        hash_experts = None
-        if self.tid2eid is not None:
-            if input_ids is None:
-                raise ValueError("DeepSeek-V4 hash MoE routing requires input_ids.")
-            hash_experts = self.tid2eid.index_select(0, input_ids).long()
-        weights, indices = ops.route(
-            x, self.gate, self.gate_bias, hash_experts, self.top_k, self.route_scale
-        )
-        if self.native:
-            if self._lists is None:
-                self._lists = tuple(
-                    tuple(p[i] for i in range(self.num_local))
-                    for p in (self.w13, self.w2, self.w13_scale, self.w2_scale)
-                )
-            w13, w2, w13_scale, w2_scale = self._lists
-            routed = _native_experts(
-                x,
-                indices.to(torch.int32),
-                weights.to(x.dtype),
-                w13,
-                w2,
-                w13_scale,
-                w2_scale,
-                self.first,
-                self.first + self.num_local - 1,
-            ).float()
-        else:
-            routed = self._experts(x, indices, weights)
-        if self.tp_size > 1:
-            routed = tensor_model_parallel_all_reduce(routed)
-
-        gemm = self.shared_w1.dtype
-        xq = ops.fp8_quant_dequant(x).to(gemm)
-        hidden = ops.swiglu(
-            F.linear(xq, self.shared_w1).to(x.dtype),
-            F.linear(xq, self.shared_w3).to(x.dtype),
-            self.limit,
-        )
-        shared = ops.fp8_linear(hidden.to(x.dtype), self.shared_w2)
-        return (routed + shared.float()).to(x.dtype)
-
-    def _experts(
+    def forward(
         self, x: torch.Tensor, indices: torch.Tensor, weights: torch.Tensor
     ) -> torch.Tensor:
-        """The routed experts in plain torch, dequantized as they are used."""
-        gemm = self.shared_w1.dtype
+        """The share of this rank's experts in the output, float32.
+
+        Args:
+            indices: [tokens, top_k] expert ids over all ranks.
+            weights: [tokens, top_k] float32.
+        """
+        if not self.native:
+            return self._torch(x, indices, weights)
+        if self._lists is None:
+            self._lists = tuple(
+                tuple(p[i] for i in range(self.num_local))
+                for p in (self.w13, self.w2, self.w13_scale, self.w2_scale)
+            )
+        w13, w2, w13_scale, w2_scale = self._lists
+        return _native_experts(
+            x,
+            indices.to(torch.int32),
+            weights.to(x.dtype),
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            self.first,
+            self.first + self.num_local - 1,
+        ).float()
+
+    def _torch(
+        self, x: torch.Tensor, indices: torch.Tensor, weights: torch.Tensor
+    ) -> torch.Tensor:
+        """The experts in plain torch, dequantized as they are used."""
+        gemm = self.gemm_dtype
         out = torch.zeros(x.shape[0], self.hidden, dtype=torch.float32, device=x.device)
         xg = x.to(gemm)
         for local in range(self.num_local):
@@ -503,6 +510,52 @@ class DeepseekV4HPUMoE(nn.Module):
                 0, rows, F.linear(hidden.to(gemm), w2.to(gemm)).to(x.dtype).float()
             )
         return out
+
+
+class DeepseekV4HPUMoE(nn.Module):
+    """MoE: a gate, the routed experts and the shared expert. The names
+    ``gate`` and ``experts`` are what the PoC plugin looks for."""
+
+    def __init__(self, vllm_config: VllmConfig, layer_id: int, gemm_dtype) -> None:
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        self.top_k = config.num_experts_per_tok
+        self.route_scale = config.routed_scaling_factor
+        self.limit = config.swiglu_limit
+        self.tp_size = get_tensor_model_parallel_world_size()
+        hidden, inter = config.hidden_size, config.moe_intermediate_size
+        self.gate = DeepseekV4HPUGate(config, layer_id)
+        self.experts = DeepseekV4HPUExperts(config, gemm_dtype)
+        self.shared_w1 = _param(inter, hidden, dtype=gemm_dtype)
+        self.shared_w3 = _param(inter, hidden, dtype=gemm_dtype)
+        self.shared_w2 = _param(hidden, inter, dtype=gemm_dtype)
+
+    def forward(self, x: torch.Tensor, input_ids: torch.Tensor | None) -> torch.Tensor:
+        hash_experts = None
+        if self.gate.tid2eid is not None:
+            if input_ids is None:
+                raise ValueError("DeepSeek-V4 hash MoE routing requires input_ids.")
+            hash_experts = self.gate.tid2eid.index_select(0, input_ids).long()
+        weights, indices = ops.route(
+            self.gate(x),
+            self.gate.e_score_correction_bias,
+            hash_experts,
+            self.top_k,
+            self.route_scale,
+        )
+        routed = self.experts(x, indices, weights)
+        if self.tp_size > 1:
+            routed = tensor_model_parallel_all_reduce(routed)
+
+        gemm = self.shared_w1.dtype
+        xq = ops.fp8_quant_dequant(x).to(gemm)
+        hidden = ops.swiglu(
+            F.linear(xq, self.shared_w1).to(x.dtype),
+            F.linear(xq, self.shared_w3).to(x.dtype),
+            self.limit,
+        )
+        shared = ops.fp8_linear(hidden.to(x.dtype), self.shared_w2)
+        return (routed + shared.float()).to(x.dtype)
 
 
 class DeepseekV4HPULayer(nn.Module):
@@ -564,7 +617,8 @@ class DeepseekV4Model(nn.Module):
             DeepseekV4HPULayer(vllm_config, i, f"{prefix}.layers.{i}")
             for i in range(config.num_hidden_layers)
         )
-        self.norm = _param(hidden, dtype=torch.float32)
+        # A module: the PoC plugin wraps the final norm.
+        self.norm = DeepseekV4HPUNorm(hidden, config.rms_norm_eps)
         self.hc_head_fn = _param(hc, hc * hidden, dtype=torch.float32)
         self.hc_head_base = _param(hc, dtype=torch.float32)
         self.hc_head_scale = _param(1, dtype=torch.float32)
@@ -589,7 +643,7 @@ class DeepseekV4Model(nn.Module):
                 scaling["beta_fast"],
                 scaling["beta_slow"],
             )
-            device = self.norm.device
+            device = self.hc_head_fn.device
             self.register_buffer(f"{name}_cos", cos.to(device), persistent=False)
             self.register_buffer(f"{name}_sin", sin.to(device), persistent=False)
 
@@ -622,7 +676,7 @@ class DeepseekV4Model(nn.Module):
             self.config.rms_norm_eps,
             self.config.hc_eps,
         )
-        return ops.rms_norm(h, self.norm, self.config.rms_norm_eps)
+        return self.norm(h)
 
 
 class DeepseekV4ForCausalLM(nn.Module):
@@ -674,7 +728,7 @@ class DeepseekV4ForCausalLM(nn.Module):
                 continue
             if expert := _EXPERT.fullmatch(name):
                 layer, index, matrix, kind = expert.groups()
-                self.model.layers[int(layer)].ffn.load_expert(
+                self.model.layers[int(layer)].ffn.experts.load_expert(
                     int(index), matrix, kind, tensor
                 )
                 continue
@@ -707,8 +761,9 @@ class DeepseekV4ForCausalLM(nn.Module):
 
         assert not halves, sorted(halves)
         for index, layer in enumerate(self.model.layers):
-            ffn = layer.ffn
-            assert ffn.pieces_loaded == 6 * ffn.num_local, (index, ffn.pieces_loaded)
+            experts = layer.ffn.experts
+            pieces = experts.pieces_loaded
+            assert pieces == 6 * experts.num_local, (index, pieces)
             for name in ("w13", "w13_scale", "w2", "w2_scale"):
-                loaded.add(f"model.layers.{index}.ffn.{name}")
+                loaded.add(f"model.layers.{index}.ffn.experts.{name}")
         return loaded
