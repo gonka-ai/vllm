@@ -565,41 +565,70 @@ class DeepseekV4HPUAttention(nn.Module):
         return outs[0] if len(outs) == 1 else torch.cat(outs)
 
 
-_native_moe = None
+def _limited_moe(x, ids, weights, w13, w2, s13, s2, b13, b2, *consts):
+    first, last, total, limit = consts
+    return torch.ops.hpu.mixture_of_experts.bias_mxfp4_fused_weights(
+        x,
+        ids.to(torch.int32),
+        weights.to(x.dtype),
+        w13,
+        w2,
+        b13,
+        b2,
+        s13,
+        s2,
+        block_size=32,
+        permuted_weights=True,
+        experts_min=first,
+        experts_max=last,
+        is_fp4=True,
+        total_experts=total,
+        alpha=1.0,
+        limit=limit,
+    ).float()
 
 
-def _native_experts(x, ids, weights, w13, w2, w13_scale, w2_scale, first, last, total):
+def _unlimited_moe(x, ids, weights, w13, w2, s13, s2, *consts):
+    first, last, total, _ = consts
+    return torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights(
+        x,
+        ids.to(torch.int32),
+        weights.to(x.dtype),
+        w13,
+        w2,
+        s13,
+        s2,
+        block_size=32,
+        permuted_weights=True,
+        activation="silu",
+        experts_min=first,
+        experts_max=last,
+        is_fp4=True,
+        total_experts=total,
+    ).float()
+
+
+_native_moe: dict[bool, Callable] = {}
+
+
+def _native_experts(x, ids, weights, lists, first, last, total, limit):
     """The card's MoE kernel on packed MXFP4 experts; it runs compiled only.
 
     Its time is that of reading the experts the tokens use, some 0.1 ms each
     whatever the tokens; told how many experts the ids span, it is a third
-    faster on a few tokens."""
-    global _native_moe
-    if _native_moe is None:
+    faster on a few tokens.
 
-        def moe(x, ids, weights, w13, w2, w13_scale, w2_scale, first, last, total):
-            return torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights(
-                x,
-                ids.to(torch.int32),
-                weights.to(x.dtype),
-                w13,
-                w2,
-                w13_scale,
-                w2_scale,
-                block_size=32,
-                permuted_weights=True,
-                activation="silu",
-                experts_min=first,
-                experts_max=last,
-                is_fp4=True,
-                total_experts=total,
-            ).float()
-
+    Args:
+        lists: A tensor per expert for the gate and up rows, the down rows and
+            the scales of both; with two more, the biases of both, the kernel
+            that has a SwiGLU limit is used.
+    """
+    limited = len(lists) == 6
+    if limited not in _native_moe:
         # Without graphs a step is not padded and its token count is free.
-        _native_moe = _compile(moe, static=GRAPHS)
-    return _native_moe(
-        x, ids, weights, w13, w2, w13_scale, w2_scale, first, last, total
-    )
+        moe = _limited_moe if limited else _unlimited_moe
+        _native_moe[limited] = _compile(moe, static=GRAPHS)
+    return _native_moe[limited](x, ids, weights, *lists, first, last, total, limit)
 
 
 class DeepseekV4HPUNorm(nn.Module):
@@ -636,7 +665,24 @@ class DeepseekV4HPUGate(nn.Module):
 
 
 class DeepseekV4HPUExperts(nn.Module):
-    """The routed experts of this rank, packed as in the checkpoint."""
+    """The routed experts of this rank, packed as in the checkpoint.
+
+    On the card they run in its MoE kernel, by ``VLLM_HPU_DEEPSEEK_V4_MOE``:
+
+    - ``unlimited``, the default: the kernel without a SwiGLU limit. Where a
+      value passes the limit the output of that expert is off by its own size
+      and more.
+    - ``limited``: the kernel with a limit. It computes
+      silu(min(gate, limit)) * (clamp(up + bias, -limit, limit) + 1); with a
+      bias of -1 on up that is clamp(up, 1 - limit, 1 + limit), the model's
+      limit on the gate and one off it on up, and within a tenth of the
+      model's output where the limit acts. A third more time at a hundred
+      tokens.
+    - ``torch``: plain torch with the model's limit, as off the card.
+
+    Scored on text against ``torch``, the two kernels are equally far, and as
+    far as from each other: there the limit acts too seldom to tell them apart.
+    """
 
     def __init__(self, config, gemm_dtype: torch.dtype) -> None:
         super().__init__()
@@ -650,17 +696,26 @@ class DeepseekV4HPUExperts(nn.Module):
         assert self.num_experts % tp_size == 0
         self.num_local = local = self.num_experts // tp_size
         self.first = get_tensor_model_parallel_rank() * local
-        self.native = (
-            current_platform.device_type == "hpu"
-            and os.environ.get("VLLM_HPU_DEEPSEEK_V4_MOE", "native") == "native"
-        )
-        # Gate (w1) over up (w3), two float4_e2m1 codes per byte, and one
-        # E8M0 scale per 32 codes of a row.
+        mode = os.environ.get("VLLM_HPU_DEEPSEEK_V4_MOE", "unlimited")
+        self.native = current_platform.device_type == "hpu" and mode != "torch"
+        # The limited kernel takes gate (w1) and up (w3) rows by turns, the
+        # unlimited one all gate rows and then all up rows.
+        self.interleaved = mode == "limited"
+        # Two float4_e2m1 codes per byte, one E8M0 scale per 32 codes of a row.
         self.w13 = _param(local, 2 * inter, hidden // 2, dtype=torch.uint8)
         self.w13_scale = _param(local, 2 * inter, hidden // 32, dtype=torch.uint8)
         self.w2 = _param(local, hidden, inter // 2, dtype=torch.uint8)
         self.w2_scale = _param(local, hidden, inter // 32, dtype=torch.uint8)
+        if self.native and self.interleaved:
+            # A row per expert: the kernel takes no tensor twice.
+            device = self.w13.device
+            bias = torch.zeros(local, 2 * inter, dtype=gemm_dtype)
+            bias[:, 1::2] = -1.0
+            self.register_buffer("w13_bias", bias.to(device), persistent=False)
+            bias = torch.zeros(local, hidden, dtype=gemm_dtype, device=device)
+            self.register_buffer("w2_bias", bias, persistent=False)
         self.pieces_loaded = 0
+        self._waiting: dict[tuple[int, str], tuple[str, torch.Tensor]] = {}
         self._lists: tuple | None = None
 
     def load_expert(
@@ -669,14 +724,23 @@ class DeepseekV4HPUExperts(nn.Module):
         local = expert - self.first
         if not 0 <= local < self.num_local:
             return
-        if matrix == "w2":
-            target = (self.w2 if kind == "weight" else self.w2_scale).data[local]
-        else:
-            target = (self.w13 if kind == "weight" else self.w13_scale).data[local]
-            half = slice(0, self.inter) if matrix == "w1" else slice(self.inter, None)
-            target = target[half]
-        target.copy_(tensor.view(torch.uint8))
         self.pieces_loaded += 1
+        piece = tensor.view(torch.uint8)
+        if matrix == "w2":
+            (self.w2 if kind == "weight" else self.w2_scale).data[local].copy_(piece)
+            return
+        target = (self.w13 if kind == "weight" else self.w13_scale).data[local]
+        if not self.interleaved:
+            half = slice(0, self.inter) if matrix == "w1" else slice(self.inter, None)
+            target[half].copy_(piece)
+            return
+        # w1 and w3 come apart: the first waits on the host for the other.
+        waiting = self._waiting.pop((local, kind), None)
+        if waiting is None:
+            self._waiting[local, kind] = (matrix, piece)
+            return
+        gate, up = (waiting[1], piece) if waiting[0] == "w1" else (piece, waiting[1])
+        target.copy_(torch.stack([gate, up], dim=1).flatten(0, 1))
 
     def forward(
         self, x: torch.Tensor, indices: torch.Tensor, weights: torch.Tensor
@@ -690,22 +754,21 @@ class DeepseekV4HPUExperts(nn.Module):
         if not self.native:
             return self._torch(x, indices, weights)
         if self._lists is None:
+            stacked = [self.w13, self.w2, self.w13_scale, self.w2_scale]
+            if self.interleaved:
+                stacked += [self.w13_bias, self.w2_bias]
             self._lists = tuple(
-                tuple(p[i] for i in range(self.num_local))
-                for p in (self.w13, self.w2, self.w13_scale, self.w2_scale)
+                tuple(p[i] for i in range(self.num_local)) for p in stacked
             )
-        w13, w2, w13_scale, w2_scale = self._lists
         return _native_experts(
             x,
             indices,
             weights,
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
+            self._lists,
             self.first,
             self.first + self.num_local - 1,
             self.num_experts,
+            self.limit,
         )
 
     def _torch(
@@ -721,9 +784,11 @@ class DeepseekV4HPUExperts(nn.Module):
                 continue
             w13 = ops.dequant_fp4_weight(self.w13[local], self.w13_scale[local])
             gate_up = F.linear(xg[rows], w13.to(gemm)).to(x.dtype)
-            hidden = ops.swiglu(
-                gate_up[:, : self.inter], gate_up[:, self.inter :], self.limit
-            )
+            if self.interleaved:
+                gate, up = gate_up[:, 0::2], gate_up[:, 1::2]
+            else:
+                gate, up = gate_up[:, : self.inter], gate_up[:, self.inter :]
+            hidden = ops.swiglu(gate, up, self.limit)
             hidden = (hidden * weights[rows, slots, None]).to(x.dtype)
             w2 = ops.dequant_fp4_weight(self.w2[local], self.w2_scale[local])
             out.index_add_(
@@ -1038,6 +1103,7 @@ class DeepseekV4ForCausalLM(nn.Module):
             experts = layer.ffn.experts
             pieces = experts.pieces_loaded
             assert pieces == 6 * experts.num_local, (index, pieces)
+            assert not experts._waiting, (index, sorted(experts._waiting))
             for name in ("w13", "w13_scale", "w2", "w2_scale"):
                 loaded.add(f"model.layers.{index}.ffn.experts.{name}")
         return loaded
