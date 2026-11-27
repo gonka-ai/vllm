@@ -123,6 +123,11 @@ class DeepseekV4HPUImpl(AttentionImpl):
 
 class DeepseekV4HPUBackend(AttentionBackend):
     forward_includes_kv_cache_update: bool = True
+    # A layer writes its caches and reads them back in one forward, and the
+    # engine's KV cache groups alias the same bytes: a sequence cannot lie
+    # on the same blocks in two groups. The PoC plugin, which lays out blocks
+    # of its own, reads this.
+    exclusive_kv_blocks: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16, torch.float32]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
 
