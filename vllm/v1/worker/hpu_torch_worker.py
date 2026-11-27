@@ -64,7 +64,9 @@ def _compute_slot_mapping(
     slot_mapping[:num_tokens] = (
         block_numbers * self.block_size + positions % self.block_size
     )
-    slot_mapping[num_tokens:] = PAD_SLOT_ID
+    # Not on an empty slice: the card's cache of eager recipes fails on one.
+    if num_tokens < slot_mapping.shape[0]:
+        slot_mapping[num_tokens:] = PAD_SLOT_ID
 
 
 def _memory_usage(cls, device: torch.device | None = None) -> float:

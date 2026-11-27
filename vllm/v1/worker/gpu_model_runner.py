@@ -2207,7 +2207,8 @@ class GPUModelRunner(
         self.seq_lens[:num_reqs] = (
             self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
         )
-        self.seq_lens[num_reqs:].fill_(0)
+        if num_reqs < self.seq_lens.shape[0]:
+            self.seq_lens[num_reqs:].fill_(0)
 
         self.input_batch.block_table.compute_slot_mapping(
             num_reqs,
