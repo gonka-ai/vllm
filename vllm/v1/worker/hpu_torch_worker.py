@@ -17,6 +17,7 @@ import torch
 
 from vllm.config import set_current_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import attention
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import format_gib
@@ -91,6 +92,10 @@ def _use_torch_kernels() -> None:
     BlockTable.compute_slot_mapping = (  # type: ignore[method-assign]
         _compute_slot_mapping
     )
+    # A compiled forward must not trace into the attention calls: they are
+    # keyed by layer name, so each layer would get its own compiled copy.
+    for name in ("unified_kv_cache_update", "unified_attention_with_output"):
+        setattr(attention, name, torch.compiler.disable(getattr(attention, name)))
     torch.accelerator.synchronize = lambda *args, **kwargs: torch.hpu.synchronize()
     torch.accelerator.empty_cache = lambda *args, **kwargs: None
 
