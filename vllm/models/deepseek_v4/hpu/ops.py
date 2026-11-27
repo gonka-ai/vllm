@@ -15,20 +15,22 @@ _FP4_CODES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
 
 def _pow2_ceil(v: torch.Tensor) -> torch.Tensor:
-    """The smallest power of two not below v, a positive normal float32."""
-    bits = v.contiguous().view(torch.int32)
-    exponent = (bits >> 23) + (bits & 0x7FFFFF).ne(0)
-    return (exponent << 23).view(torch.float32)
+    """The smallest power of two not below v, a positive normal float32.
+
+    By frexp, not by the bits of v viewed as int32: compiled, the card takes
+    no dtype view of a tensor whose shape changes, and its log2 is not exact."""
+    mantissa, exponent = torch.frexp(v)
+    exponent = exponent - (mantissa == 0.5).to(exponent.dtype)
+    return torch.ldexp(torch.ones_like(v), exponent)
 
 
 def _fp8_round(v: torch.Tensor) -> torch.Tensor:
     """v, a float32 within the E4M3 range, rounded to that grid, a tie to even.
 
     Not a cast to float8_e4m3fn: the card's cast rounds a tie away from zero."""
-    bits = v.contiguous().view(torch.int32) & 0x7FFFFFFF
     # Three mantissa bits; below 2**-6 the subnormals keep the step of 2**-9.
-    exponent = (bits >> 23).clamp(min=127 - 6)
-    step = ((exponent - 3) << 23).view(torch.float32)
+    _, exponent = torch.frexp(v.abs().clamp(min=2.0**-6))
+    step = torch.ldexp(torch.ones_like(v), exponent - 4)
     return torch.round(v / step) * step
 
 
@@ -46,7 +48,10 @@ def fp4_quant_dequant(x: torch.Tensor, block: int = 32) -> torch.Tensor:
     """fp4_act_quant: x as the float32 value of its float4_e2m1 image under a
     power-of-two scale per ``block`` values of the last dim."""
     v = x.float().unflatten(-1, (-1, block))
-    amax = v.abs().amax(dim=-1, keepdim=True).clamp(min=FP4_MAX * 2.0**-126)
+    # The reference floors at 6 * 2**-126, a scale of 2**-126, which the card's
+    # ldexp turns into 0 and a zero block into NaN. The image is the same
+    # under either floor unless the largest value lies below 6 * 2**-120.
+    amax = v.abs().amax(dim=-1, keepdim=True).clamp(min=FP4_MAX * 2.0**-120)
     scale = _pow2_ceil(amax * (1.0 / FP4_MAX))
     m = (v / scale).clamp(-FP4_MAX, FP4_MAX)
     a = m.abs()
@@ -162,7 +167,10 @@ def sparse_attn(
         attn_sink: [heads], a logit that takes part in the softmax only.
     """
     scores = torch.matmul(q, kv.transpose(1, 2)).float() * scale + bias.unsqueeze(1)
-    sink = attn_sink.view(1, -1, 1).expand(scores.shape[0], -1, 1)
+    # The head count spelled out: compiled for a changing token count, the
+    # card resolves a -1 here to another dim.
+    heads = attn_sink.shape[0]
+    sink = attn_sink.view(1, heads, 1).expand(scores.shape[0], heads, 1)
     weights = torch.softmax(torch.cat([scores, sink], dim=-1), dim=-1)[..., :-1]
     return torch.matmul(weights.to(kv.dtype), kv)
 

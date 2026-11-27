@@ -8,10 +8,15 @@ activation in bfloat16; the FP8 weights are held dequantized; attention is a
 gather, a GEMM and a softmax over paged caches. Attention and the shared
 expert are whole on every tensor-parallel rank, the routed experts are split
 between the ranks.
+
+On the card the math between two cache accesses runs as compiled graphs
+(``_graph``); the cache reads and writes and the modules the PoC plugin wraps
+stay calls of their own.
 """
 
+import functools
 import os
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import cast
 
@@ -35,6 +40,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.models.deepseek_v4.hpu import ops
 from vllm.models.deepseek_v4.hpu.attention import (
+    GRAPHS,
     DeepseekV4HPUCache,
     DeepseekV4HPUMetadata,
     pack_blocks,
@@ -81,6 +87,89 @@ def _rotate_tail(
     return torch.cat([x[..., :-dim], tail], dim=-1)
 
 
+# A function compiles once per shape it meets: the token counts, candidate
+# counts and block-end counts a step is padded to, by the kind of layer.
+_RECOMPILE_LIMITS = {"recompile_limit": 1024, "accumulated_recompile_limit": 8192}
+
+
+def _graph(fn: Callable) -> Callable:
+    """``fn``, a pure function of tensors, as one graph of the card.
+
+    Op by op the card takes about 60 us per call whatever the size, and a
+    layer is some two thousand calls. A graph is static: compiled for changing
+    shapes, the card resolves some of them wrongly or fails to patch them,
+    hence the padding of a step (attention.bucket). Off the card ``fn`` runs
+    as it is."""
+    compiled = None
+
+    @functools.wraps(fn)
+    def run(*args):
+        nonlocal compiled
+        if not GRAPHS or args[0].device.type != "hpu":
+            return fn(*args)
+        if compiled is None:
+            config = torch._dynamo.config
+            for name, limit in _RECOMPILE_LIMITS.items():
+                setattr(config, name, max(getattr(config, name), limit))
+            compiled = torch.compile(fn, backend="hpu_backend", dynamic=False)
+        return compiled(*args)
+
+    return run
+
+
+@_graph
+def _token_state(
+    x: torch.Tensor,
+    wkv: torch.Tensor,
+    wgate: torch.Tensor,
+    ape: torch.Tensor,
+    offsets: torch.Tensor,
+) -> torch.Tensor:
+    """What a token adds to its block: its KV and its score, float32."""
+    x = x.float()
+    score = F.linear(x, wgate) + ape.index_select(0, offsets)
+    return torch.cat([F.linear(x, wkv), score], dim=-1)
+
+
+@_graph
+def _pool(
+    block: torch.Tensor,
+    previous: torch.Tensor | None,
+    previous_bias: torch.Tensor | None,
+    norm: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    rotation: torch.Tensor | None,
+    head_dim: int,
+    eps: float,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """The KV of closed blocks from the states of their tokens.
+
+    Args:
+        block: [ends, ratio, 2, width] KV and score of every token.
+        previous: The same of the block before, at ratio 4.
+        rotation: The Hadamard rotation of an indexer key, or None for a KV.
+    """
+    kvs, scores = block[:, :, 0], block[:, :, 1]
+    if previous is not None:
+        # The first half of the dims belongs to the window that overlaps
+        # the previous block, the second half to the block itself.
+        d = head_dim
+        kvs = torch.cat([previous[:, :, 0, :d], kvs[..., d:]], dim=1)
+        scores = torch.cat(
+            [previous[:, :, 1, :d] + previous_bias, scores[..., d:]], dim=1
+        )
+    pooled = (kvs * scores.softmax(dim=1)).sum(dim=1)
+    out = _rotate_tail(ops.rms_norm(pooled.to(dtype), norm, eps), cos, sin)
+    if rotation is not None:
+        out = torch.matmul(out.float(), rotation).to(dtype)
+        return ops.fp4_quant_dequant(out)
+    rope_dim = 2 * cos.shape[-1]
+    head = ops.fp8_quant_dequant(out[..., :-rope_dim], 64)
+    return torch.cat([head, out[..., -rope_dim:].float()], dim=-1)
+
+
 class DeepseekV4HPUCompressor(nn.Module):
     """Compressor: a block of ``ratio`` tokens pooled into one KV."""
 
@@ -118,55 +207,82 @@ class DeepseekV4HPUCompressor(nn.Module):
         x: torch.Tensor,
         metadata: dict[str, DeepseekV4HPUMetadata],
         rope: _Rope,
-        dtype: torch.dtype,
     ) -> None:
         """Stores the step's tokens and compresses the blocks they close.
 
         Args:
-            x: [tokens, hidden] float32.
+            x: [tokens, hidden].
             metadata: The indices of every cache, by its name.
-            dtype: The activation dtype.
         """
         tokens = metadata[self.states.prefix]
-        kv = F.linear(x, self.wkv)
-        score = F.linear(x, self.wgate) + self.ape.index_select(
-            0, tokens.offsets[self.ratio]
-        )
         states = self.states.entries()
-        states.index_copy_(0, tokens.rows, torch.cat([kv, score], dim=-1))
+        states.index_copy_(
+            0,
+            tokens.rows,
+            _token_state(x, self.wkv, self.wgate, self.ape, tokens.offsets[self.ratio]),
+        )
         ends = tokens.ends[self.ratio]
         if ends is None:
             return
 
-        d = self.head_dim
-        block = states.index_select(0, ends.rows).view(-1, self.ratio, 2, kv.shape[-1])
-        kvs, scores = block[:, :, 0], block[:, :, 1]
+        shape = (-1, self.ratio, 2, self.wkv.shape[0])
+        block = states.index_select(0, ends.rows).view(shape)
+        previous = previous_bias = None
         if self.overlap:
-            # The first half of the dims belongs to the window that overlaps
-            # the previous block, the second half to the block itself.
-            previous = states.index_select(0, ends.previous_rows).view(block.shape)
-            kvs = torch.cat([previous[:, :, 0, :d], kvs[..., d:]], dim=1)
-            scores = torch.cat(
-                [previous[:, :, 1, :d] + ends.previous_bias, scores[..., d:]], dim=1
-            )
-        pooled = (kvs * scores.softmax(dim=1)).sum(dim=1)
-        out = ops.rms_norm(pooled.to(dtype), self.norm, self.eps)
-        out = _rotate_tail(
-            out,
+            previous = states.index_select(0, ends.previous_rows).view(shape)
+            previous_bias = ends.previous_bias
+        out = _pool(
+            block,
+            previous,
+            previous_bias,
+            self.norm,
             rope.cos_table.index_select(0, ends.starts),
             rope.sin_table.index_select(0, ends.starts),
+            self.rotation if self.rotate else None,
+            self.head_dim,
+            self.eps,
+            x.dtype,
         )
-        if self.rotate:
-            out = torch.matmul(out.float(), self.rotation).to(dtype)
-            out = ops.fp4_quant_dequant(out)
-        else:
-            rope_dim = 2 * rope.cos.shape[-1]
-            head = ops.fp8_quant_dequant(out[..., :-rope_dim], 64)
-            out = torch.cat([head, out[..., -rope_dim:].float()], dim=-1)
         targets = metadata[self.blocks.prefix].ends[self.ratio]
         assert targets is not None
         cache = self.blocks.entries()
         cache.index_copy_(0, targets.states, out.to(cache.dtype))
+
+
+@_graph
+def _index_queries(
+    x: torch.Tensor,
+    qr: torch.Tensor,
+    wq_b: torch.Tensor,
+    weights_proj: torch.Tensor,
+    rotation: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    n_heads: int,
+    weight_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    dtype = x.dtype
+    q = F.linear(qr, wq_b).to(dtype).view(x.shape[0], n_heads, -1)
+    q = _rotate_tail(q, cos[:, None], sin[:, None])
+    q = torch.matmul(q.float(), rotation).to(dtype)
+    q = ops.fp4_quant_dequant(q).to(dtype)
+    weights = F.linear(x.to(weights_proj.dtype), weights_proj).to(dtype)
+    return q, weights * weight_scale
+
+
+@_graph
+def _rank(
+    q: torch.Tensor,
+    weights: torch.Tensor,
+    keys: torch.Tensor,
+    bias: torch.Tensor,
+    topk: int,
+) -> torch.Tensor:
+    scores = torch.matmul(q.to(keys.dtype), keys.transpose(1, 2)).float().relu()
+    scores = (scores * weights.float().unsqueeze(-1)).sum(dim=1)
+    # Not ``+ bias``: the key of a block that is not closed may be NaN.
+    scores = scores.masked_fill(bias < 0, float("-inf"))
+    return scores.topk(topk, dim=-1).indices
 
 
 class DeepseekV4HPUIndexer(nn.Module):
@@ -194,13 +310,17 @@ class DeepseekV4HPUIndexer(nn.Module):
         Args:
             qr: The low-rank query through its FP8 image, in the GEMM dtype.
         """
-        dtype = x.dtype
-        q = F.linear(qr, self.wq_b).to(dtype).view(-1, self.n_heads, self.head_dim)
-        q = _rotate_tail(q, rope.cos[:, None], rope.sin[:, None])
-        q = torch.matmul(q.float(), self.compressor.rotation).to(dtype)
-        q = ops.fp4_quant_dequant(q).to(dtype)
-        weights = F.linear(x.to(self.weights_proj.dtype), self.weights_proj).to(dtype)
-        return q, weights * self.weight_scale
+        return _index_queries(
+            x,
+            qr,
+            self.wq_b,
+            self.weights_proj,
+            self.compressor.rotation,
+            rope.cos,
+            rope.sin,
+            self.n_heads,
+            self.weight_scale,
+        )
 
     def select(
         self,
@@ -212,11 +332,77 @@ class DeepseekV4HPUIndexer(nn.Module):
         """The top blocks of every token, as columns of ``states`` [tokens, n]."""
         keys = self.compressor.blocks.entries().index_select(0, states.reshape(-1))
         keys = keys.view(*states.shape, self.head_dim).to(self.wq_b.dtype)
-        scores = torch.matmul(q.to(keys.dtype), keys.transpose(1, 2)).float().relu()
-        scores = (scores * weights.float().unsqueeze(-1)).sum(dim=1)
-        # Not ``+ bias``: the key of a block that is not closed may be NaN.
-        scores = scores.masked_fill(bias < 0, float("-inf"))
-        return scores.topk(self.topk, dim=-1).indices
+        return _rank(q, weights, keys, bias, self.topk)
+
+
+@_graph
+def _queries(
+    x: torch.Tensor,
+    wq_a: torch.Tensor,
+    q_norm: torch.Tensor,
+    wq_b: torch.Tensor,
+    wkv: torch.Tensor,
+    kv_norm: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    n_heads: int,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The queries [tokens, heads, dim] and the low-rank query under them, both
+    in the GEMM dtype, and the KV of every token as its cache holds it."""
+    dtype, gemm = x.dtype, wq_a.dtype
+    xq = ops.fp8_quant_dequant(x).to(gemm)
+    qr = ops.rms_norm(F.linear(xq, wq_a).to(dtype), q_norm, eps)
+    qr = ops.fp8_quant_dequant(qr).to(gemm)
+    q = F.linear(qr, wq_b).to(dtype).view(x.shape[0], n_heads, -1)
+    q = _rotate_tail(ops.unit_rms(q, eps), cos[:, None], sin[:, None])
+
+    kv = ops.rms_norm(F.linear(xq, wkv).to(dtype), kv_norm, eps)
+    kv = _rotate_tail(kv, cos, sin)
+    rope_dim = 2 * cos.shape[-1]
+    head = ops.fp8_quant_dequant(kv[..., :-rope_dim], 64).to(dtype)
+    return q.to(gemm), qr, torch.cat([head, kv[..., -rope_dim:]], dim=-1)
+
+
+@_graph
+def _sparse_attn(
+    q: torch.Tensor,
+    keys: torch.Tensor,
+    bias: torch.Tensor,
+    blocks: torch.Tensor | None,
+    block_bias: torch.Tensor | None,
+    attn_sink: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    """Attention over the window keys and, after them, compressed blocks."""
+    if blocks is not None:
+        assert block_bias is not None
+        keys = torch.cat([keys, blocks], dim=1)
+        bias = torch.cat([bias, block_bias], dim=1)
+    # A key a token does not attend to may be a row nobody wrote: a block that
+    # is not closed, the null block under a padded row. Bytes left there by a
+    # cache of another dtype read as NaN, and the bias alone would let that
+    # through the softmax.
+    keys = keys.masked_fill((bias < 0).unsqueeze(-1), 0)
+    return ops.sparse_attn(q, keys.to(q.dtype), bias, attn_sink, scale)
+
+
+@_graph
+def _project(
+    out: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    wo_a: torch.Tensor,
+    wo_b: torch.Tensor,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """The attention output [tokens, heads, dim] through the grouped low-rank
+    output projection."""
+    gemm, n_groups = wo_a.dtype, wo_a.shape[0]
+    out = _rotate_tail(out.to(dtype), cos[:, None], sin[:, None], inverse=True)
+    out = out.view(out.shape[0], n_groups, -1).transpose(0, 1).to(gemm)
+    out = torch.matmul(out, wo_a.transpose(1, 2)).transpose(0, 1).to(dtype)
+    return ops.fp8_linear(out.flatten(1), wo_b)
 
 
 class DeepseekV4HPUAttention(nn.Module):
@@ -269,42 +455,31 @@ class DeepseekV4HPUAttention(nn.Module):
             return torch.zeros_like(x)
         metadata = cast(dict[str, DeepseekV4HPUMetadata], context)
         tokens = metadata[self.kv.prefix]
-        assert x.shape[0] == tokens.num_tokens, (x.shape, tokens.num_tokens)
-        dtype = x.dtype
-        gemm = self.wq_a.dtype
-
-        xq = ops.fp8_quant_dequant(x).to(gemm)
-        qr = ops.rms_norm(F.linear(xq, self.wq_a).to(dtype), self.q_norm, self.eps)
-        qr = ops.fp8_quant_dequant(qr).to(gemm)
-        q = F.linear(qr, self.wq_b).to(dtype).view(-1, self.n_heads, self.head_dim)
-        q = _rotate_tail(
-            ops.unit_rms(q, self.eps), rope.cos[:, None], rope.sin[:, None]
+        assert x.shape[0] == tokens.padded_tokens, (x.shape, tokens.padded_tokens)
+        q, qr, kv = _queries(
+            x,
+            self.wq_a,
+            self.q_norm,
+            self.wq_b,
+            self.wkv,
+            self.kv_norm,
+            rope.cos,
+            rope.sin,
+            self.n_heads,
+            self.eps,
         )
-
-        kv = ops.rms_norm(F.linear(xq, self.wkv).to(dtype), self.kv_norm, self.eps)
-        kv = _rotate_tail(kv, rope.cos, rope.sin)
-        rope_dim = 2 * rope.cos.shape[-1]
-        head = ops.fp8_quant_dequant(kv[..., :-rope_dim], 64).to(dtype)
         cache = self.kv.entries()
-        cache.index_copy_(
-            0,
-            tokens.rows,
-            torch.cat([head, kv[..., -rope_dim:]], dim=-1).to(cache.dtype),
-        )
+        cache.index_copy_(0, tokens.rows, kv.to(cache.dtype))
 
         index_q = index_weights = None
         if self.compressor is not None:
-            xf = x.float()
-            self.compressor(xf, metadata, rope, dtype)
+            self.compressor(x, metadata, rope)
             if self.indexer is not None:
-                self.indexer.compressor(xf, metadata, rope, dtype)
+                self.indexer.compressor(x, metadata, rope)
                 index_q, index_weights = self.indexer.queries(x, qr, rope)
 
-        out = self._attend(q.to(gemm), metadata, index_q, index_weights).to(dtype)
-        out = _rotate_tail(out, rope.cos[:, None], rope.sin[:, None], inverse=True)
-        out = out.view(out.shape[0], self.n_groups, -1).transpose(0, 1).to(gemm)
-        out = torch.matmul(out, self.wo_a.transpose(1, 2)).transpose(0, 1).to(dtype)
-        return ops.fp8_linear(out.flatten(1), self.wo_b)
+        out = self._attend(q, metadata, index_q, index_weights)
+        return _project(out, rope.cos, rope.sin, self.wo_a, self.wo_b, x.dtype)
 
     def _attend(
         self,
@@ -343,6 +518,7 @@ class DeepseekV4HPUAttention(nn.Module):
             n = bias.shape[0]
             keys = kv_cache.index_select(0, tokens.window_rows[part].reshape(-1))
             keys = keys.view(n, self.window, self.head_dim)
+            compressed = block_bias = None
             if candidates is not None:
                 states = candidates.states.index_select(0, tokens.requests[part])
                 order = torch.arange(num_blocks, device=states.device)
@@ -362,17 +538,16 @@ class DeepseekV4HPUAttention(nn.Module):
                     states = states.gather(1, top)
                     block_bias = block_bias.gather(1, top)
                 compressed = block_cache.index_select(0, states.reshape(-1))
-                # A block that is not closed is a row nobody wrote: bytes left
-                # by a cache of another dtype, NaN among them. The bias alone
-                # would let those through the softmax.
-                compressed = compressed.view(n, kept, self.head_dim).masked_fill(
-                    (block_bias < 0).unsqueeze(-1), 0
-                )
-                keys = torch.cat([keys, compressed], dim=1)
-                bias = torch.cat([bias, block_bias], dim=1)
+                compressed = compressed.view(n, kept, self.head_dim)
             outs.append(
-                ops.sparse_attn(
-                    q[part], keys.to(q.dtype), bias, self.attn_sink, self.scale
+                _sparse_attn(
+                    q if n == q.shape[0] else q[part],
+                    keys,
+                    bias,
+                    compressed,
+                    block_bias,
+                    self.attn_sink,
+                    self.scale,
                 )
             )
         return outs[0] if len(outs) == 1 else torch.cat(outs)
@@ -389,8 +564,8 @@ def _native_experts(x, ids, weights, w13, w2, w13_scale, w2_scale, first, last):
         def moe(x, ids, weights, w13, w2, w13_scale, w2_scale, first, last):
             return torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights(
                 x,
-                ids,
-                weights,
+                ids.to(torch.int32),
+                weights.to(x.dtype),
                 w13,
                 w2,
                 w13_scale,
@@ -401,7 +576,7 @@ def _native_experts(x, ids, weights, w13, w2, w13_scale, w2_scale, first, last):
                 experts_min=first,
                 experts_max=last,
                 is_fp4=True,
-            )
+            ).float()
 
         _native_moe = torch.compile(moe, backend="hpu_backend")
     return _native_moe(x, ids, weights, w13, w2, w13_scale, w2_scale, first, last)
@@ -502,15 +677,15 @@ class DeepseekV4HPUExperts(nn.Module):
         w13, w2, w13_scale, w2_scale = self._lists
         return _native_experts(
             x,
-            indices.to(torch.int32),
-            weights.to(x.dtype),
+            indices,
+            weights,
             w13,
             w2,
             w13_scale,
             w2_scale,
             self.first,
             self.first + self.num_local - 1,
-        ).float()
+        )
 
     def _torch(
         self, x: torch.Tensor, indices: torch.Tensor, weights: torch.Tensor
@@ -534,6 +709,28 @@ class DeepseekV4HPUExperts(nn.Module):
                 0, rows, F.linear(hidden.to(gemm), w2.to(gemm)).to(x.dtype).float()
             )
         return out
+
+
+_route = _graph(ops.route)
+
+
+@_graph
+def _add_shared(
+    x: torch.Tensor,
+    routed: torch.Tensor,
+    w1: torch.Tensor,
+    w3: torch.Tensor,
+    w2: torch.Tensor,
+    limit: float,
+) -> torch.Tensor:
+    """The shared expert on top of the routed experts' output."""
+    gemm = w1.dtype
+    xq = ops.fp8_quant_dequant(x).to(gemm)
+    hidden = ops.swiglu(
+        F.linear(xq, w1).to(x.dtype), F.linear(xq, w3).to(x.dtype), limit
+    )
+    shared = ops.fp8_linear(hidden.to(x.dtype), w2)
+    return (routed + shared.float()).to(x.dtype)
 
 
 class DeepseekV4HPUMoE(nn.Module):
@@ -560,7 +757,7 @@ class DeepseekV4HPUMoE(nn.Module):
             if input_ids is None:
                 raise ValueError("DeepSeek-V4 hash MoE routing requires input_ids.")
             hash_experts = self.gate.tid2eid.index_select(0, input_ids).long()
-        weights, indices = ops.route(
+        weights, indices = _route(
             self.gate(x),
             self.gate.e_score_correction_bias,
             hash_experts,
@@ -570,16 +767,27 @@ class DeepseekV4HPUMoE(nn.Module):
         routed = self.experts(x, indices, weights)
         if self.tp_size > 1:
             routed = tensor_model_parallel_all_reduce(routed)
-
-        gemm = self.shared_w1.dtype
-        xq = ops.fp8_quant_dequant(x).to(gemm)
-        hidden = ops.swiglu(
-            F.linear(xq, self.shared_w1).to(x.dtype),
-            F.linear(xq, self.shared_w3).to(x.dtype),
-            self.limit,
+        return _add_shared(
+            x, routed, self.shared_w1, self.shared_w3, self.shared_w2, self.limit
         )
-        shared = ops.fp8_linear(hidden.to(x.dtype), self.shared_w2)
-        return (routed + shared.float()).to(x.dtype)
+
+
+def _hc_enter(h, fn, scale, base, norm, rms_eps, eps, iters):
+    """hc_pre and the norm of the half of a layer it leads into."""
+    x, post, comb = ops.hc_pre(h, fn, scale, base, rms_eps, eps, iters)
+    return ops.rms_norm(x, norm, rms_eps), post, comb
+
+
+def _hc_cross(x, h, post, comb, fn, scale, base, norm, rms_eps, eps, iters):
+    """hc_post of the attention and hc_pre of the MoE."""
+    h = ops.hc_post(x, h, post, comb)
+    return (h, *_hc_enter(h, fn, scale, base, norm, rms_eps, eps, iters))
+
+
+_enter = _graph(_hc_enter)
+_cross = _graph(_hc_cross)
+_leave = _graph(ops.hc_post)
+_head = _graph(ops.hc_head)
 
 
 class DeepseekV4HPULayer(nn.Module):
@@ -606,26 +814,32 @@ class DeepseekV4HPULayer(nn.Module):
             setattr(self, f"hc_{name}_base", _param((2 + hc) * hc, dtype=torch.float32))
             setattr(self, f"hc_{name}_scale", _param(3, dtype=torch.float32))
 
-    def _hc_pre(self, h: torch.Tensor, name: str):
-        return ops.hc_pre(
-            h,
-            getattr(self, f"hc_{name}_fn"),
-            getattr(self, f"hc_{name}_scale"),
-            getattr(self, f"hc_{name}_base"),
-            self.eps,
-            self.hc_eps,
-            self.hc_iters,
-        )
-
     def forward(
         self, h: torch.Tensor, input_ids: torch.Tensor | None, rope: _Rope
     ) -> torch.Tensor:
-        x, post, comb = self._hc_pre(h, "attn")
-        x = self.attn(ops.rms_norm(x, self.attn_norm, self.eps), rope)
-        h = ops.hc_post(x, h, post, comb)
-        x, post, comb = self._hc_pre(h, "ffn")
-        x = self.ffn(ops.rms_norm(x, self.ffn_norm, self.eps), input_ids)
-        return ops.hc_post(x, h, post, comb)
+        consts = (self.eps, self.hc_eps, self.hc_iters)
+        x, post, comb = _enter(
+            h,
+            self.hc_attn_fn,
+            self.hc_attn_scale,
+            self.hc_attn_base,
+            self.attn_norm,
+            *consts,
+        )
+        x = self.attn(x, rope)
+        h, x, post, comb = _cross(
+            x,
+            h,
+            post,
+            comb,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            self.ffn_norm,
+            *consts,
+        )
+        x = self.ffn(x, input_ids)
+        return _leave(x, h, post, comb)
 
 
 class DeepseekV4Model(nn.Module):
@@ -684,6 +898,20 @@ class DeepseekV4Model(nn.Module):
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
+        # A step padded to a static size: the rows added here attend to
+        # nothing and are dropped before the final norm, which the PoC plugin
+        # reads.
+        num_tokens = inputs_embeds.shape[0]
+        context = get_forward_context().attn_metadata
+        extra = 0
+        if isinstance(context, dict):
+            metadata = cast(dict[str, DeepseekV4HPUMetadata], context)
+            extra = next(iter(metadata.values())).padded_tokens - num_tokens
+        if extra:
+            inputs_embeds = F.pad(inputs_embeds, (0, 0, 0, extra))
+            positions = F.pad(positions, (0, extra))
+            if input_ids is not None:
+                input_ids = F.pad(input_ids, (0, extra))
         h = inputs_embeds.unsqueeze(1).repeat(1, self.config.hc_mult, 1)
         ropes = {}
         for compressed, name in ((False, "window"), (True, "compress")):
@@ -693,7 +921,7 @@ class DeepseekV4Model(nn.Module):
             )
         for layer in self.layers:
             h = layer(h, input_ids, ropes[layer.attn.ratio > 0])
-        h = ops.hc_head(
+        h = _head(
             h,
             self.hc_head_fn,
             self.hc_head_scale,
@@ -701,7 +929,7 @@ class DeepseekV4Model(nn.Module):
             self.config.rms_norm_eps,
             self.config.hc_eps,
         )
-        return self.norm(h)
+        return self.norm(h[:num_tokens] if extra else h)
 
 
 class DeepseekV4ForCausalLM(nn.Module):

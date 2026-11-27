@@ -9,10 +9,12 @@ block table then resolves any of them, a cached prefix is reusable as it is,
 and no state lives outside the caches.
 """
 
+import os
 from dataclasses import dataclass
 from typing import ClassVar
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -34,6 +36,17 @@ from vllm.v1.kv_cache_interface import (
 )
 
 RATIOS = (4, 128)
+# On the card the math of a step runs as compiled graphs of static shapes
+# (model._graph), so a step is padded to one of a few sizes.
+GRAPHS = os.environ.get("VLLM_HPU_DEEPSEEK_V4_GRAPHS", "1") == "1"
+# The least candidate blocks a graph is built for.
+_MIN_CANDIDATES = 64
+
+
+def bucket(n: int) -> int:
+    """The smallest of 1, 2, 3, 4, 6, 8, 12, 16, 24, ... not below n."""
+    power = 1 << (n - 1).bit_length()
+    return power * 3 // 4 if power * 3 // 4 >= n else power
 
 
 @dataclass
@@ -67,9 +80,14 @@ class Candidates:
 @dataclass
 class DeepseekV4HPUMetadata:
     """Every index of a step, built on the host and resolved through the
-    block table on the device. The device is never read back."""
+    block table on the device. The device is never read back.
+
+    A padded step has ``padded_tokens`` rows: the rows after ``num_tokens``
+    attend to nothing and, as the padded block ends do, read and write entry
+    0 of the null block."""
 
     num_tokens: int
+    padded_tokens: int
     # [tokens] token entry and request of every token of the step.
     rows: torch.Tensor
     requests: torch.Tensor
@@ -245,6 +263,8 @@ class DeepseekV4HPUMetadataBuilder(AttentionMetadataBuilder[DeepseekV4HPUMetadat
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.block_size = kv_cache_spec.block_size
         self.window = vllm_config.model_config.hf_config.sliding_window
+        self.pad = GRAPHS and device.type == "hpu"
+        self.max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         # The caches of a builder share a shape, hence the rows of a block.
         context = vllm_config.compilation_config.static_forward_context
         self.cache: DeepseekV4HPUCache = context[layer_names[0]]
@@ -269,6 +289,11 @@ class DeepseekV4HPUMetadataBuilder(AttentionMetadataBuilder[DeepseekV4HPUMetadat
             seq_lens = cm.seq_lens_cpu_upper_bound
             if seq_lens is None:
                 seq_lens = cm.seq_lens.cpu()
+            padded = None
+            if self.pad:
+                # No further than the rows the engine and the PoC plugin hold.
+                num_tokens = int(query_start[-1])
+                padded = min(bucket(num_tokens), max(self.max_tokens, num_tokens))
             built[step] = build_metadata(
                 query_start,
                 seq_lens[:num_reqs].to(torch.int64),
@@ -276,6 +301,7 @@ class DeepseekV4HPUMetadataBuilder(AttentionMetadataBuilder[DeepseekV4HPUMetadat
                 self.block_size,
                 self.window,
                 step,
+                padded,
             )
         return built[step]
 
@@ -287,6 +313,7 @@ def build_metadata(
     block_size: int,
     window: int,
     step: int | None = None,
+    padded_tokens: int | None = None,
 ) -> DeepseekV4HPUMetadata:
     """The indices of a step, as rows of a cache.
 
@@ -296,76 +323,124 @@ def build_metadata(
         block_table: [reqs, blocks per request], on the device.
         step: Rows from a block of the cache to the next; by default the
             entries of a block, that is blocks stored back to back.
+        padded_tokens: Pads the step to that many tokens, and the block ends
+            and the candidate blocks to a ``bucket`` each.
     """
     device = block_table.device
     num_reqs = seq_lens.shape[0]
     width = block_table.shape[1]
-    table = block_table.reshape(-1)
+    # One entry more, the null block: where the padding points.
+    table = torch.cat([block_table.reshape(-1), block_table.new_zeros(1)])
+    null = num_reqs * width
 
     def entries_of(
-        reqs: torch.Tensor, index: torch.Tensor, per_block: int
+        reqs: torch.Tensor,
+        index: torch.Tensor,
+        per_block: int,
+        valid: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Cache rows of the index-th entries of requests, both on the host."""
+        """Cache rows of the index-th entries of requests, all on the host;
+        entry 0 of the null block where ``valid`` is False."""
         index = index.clamp(min=0)
-        blocks = table.index_select(
-            0, (reqs * width + index // per_block).reshape(-1).to(device)
-        )
-        offsets = (index % per_block).reshape(-1).to(device)
-        return blocks * (step or per_block) + offsets
+        slots, offsets = reqs * width + index // per_block, index % per_block
+        if valid is not None:
+            slots = slots.masked_fill(~valid, null)
+            offsets = offsets.masked_fill(~valid, 0)
+        blocks = table.index_select(0, slots.reshape(-1).to(device))
+        return blocks * (step or per_block) + offsets.reshape(-1).to(device)
 
     query_lens = query_start[1:] - query_start[:-1]
     num_tokens = int(query_start[-1])
+    padded = max(padded_tokens or 0, num_tokens)
     reqs = torch.repeat_interleave(torch.arange(num_reqs), query_lens)
     positions = (seq_lens - query_lens)[reqs] + (
         torch.arange(num_tokens) - query_start[:-1][reqs]
     )
+    real = None
+    if padded > num_tokens:
+        reqs = F.pad(reqs, (0, padded - num_tokens))
+        positions = F.pad(positions, (0, padded - num_tokens))
+        real = torch.arange(padded) < num_tokens
 
     in_window = positions[:, None] - (window - 1) + torch.arange(window)
-    window_rows = entries_of(reqs[:, None].expand(-1, window), in_window, block_size)
+    unseen = in_window < 0
+    window_real = None
+    if real is not None:
+        window_real = real[:, None].expand(-1, window)
+        unseen = unseen | ~window_real
+    window_rows = entries_of(
+        reqs[:, None].expand(-1, window), in_window, block_size, window_real
+    )
     window_bias = torch.zeros(in_window.shape, dtype=torch.float32)
-    window_bias.masked_fill_(in_window < 0, float("-inf"))
+    window_bias.masked_fill_(unseen, float("-inf"))
 
     offsets: dict[int, torch.Tensor] = {}
     ends: dict[int, BlockEnds | None] = {}
     candidates: dict[int, Candidates | None] = {}
     for ratio in RATIOS:
         offsets[ratio] = (positions % ratio).to(device)
-        closing = torch.nonzero((positions + 1) % ratio == 0).flatten()
+        closes = (positions + 1) % ratio == 0
+        if real is not None:
+            closes = closes & real
+        closing = torch.nonzero(closes).flatten()
         ends[ratio] = None
         if len(closing) > 0:
+            live = None
+            extra = bucket(len(closing)) - len(closing)
+            if padded_tokens is not None and extra:
+                live = torch.arange(len(closing) + extra) < len(closing)
+                closing = F.pad(closing, (0, extra))
             last = positions[closing]
             in_block = last[:, None] - (ratio - 1) + torch.arange(ratio)
             block_reqs = reqs[closing, None].expand(-1, ratio)
             no_previous = (last < 2 * ratio - 1)[:, None, None]
+            starts = in_block[:, 0]
+            live_rows = None
+            if live is not None:
+                starts = starts.masked_fill(~live, 0)
+                live_rows = live[:, None].expand(-1, ratio)
             ends[ratio] = BlockEnds(
                 tokens=closing.to(device),
-                starts=in_block[:, 0].contiguous().to(device),
-                rows=entries_of(block_reqs, in_block, block_size),
-                previous_rows=entries_of(block_reqs, in_block - ratio, block_size),
+                starts=starts.contiguous().to(device),
+                rows=entries_of(block_reqs, in_block, block_size, live_rows),
+                previous_rows=entries_of(
+                    block_reqs, in_block - ratio, block_size, live_rows
+                ),
                 previous_bias=torch.zeros(no_previous.shape, dtype=torch.float32)
                 .masked_fill_(no_previous, float("-inf"))
                 .to(device),
-                states=entries_of(reqs[closing], last // ratio, block_size // ratio),
+                states=entries_of(
+                    reqs[closing], last // ratio, block_size // ratio, live
+                ),
             )
         max_blocks = int((seq_lens // ratio).max())
         candidates[ratio] = None
         if max_blocks > 0:
+            columns = max_blocks
+            if padded_tokens is not None:
+                columns = max(bucket(max_blocks), _MIN_CANDIDATES)
+            index = torch.arange(columns)[None, :].expand(num_reqs, -1)
             states = entries_of(
-                torch.arange(num_reqs)[:, None].expand(-1, max_blocks),
-                torch.arange(max_blocks)[None, :].expand(num_reqs, -1),
+                torch.arange(num_reqs)[:, None].expand(-1, columns),
+                index,
                 block_size // ratio,
+                None if columns == max_blocks else index < max_blocks,
             )
+            counts = (positions + 1) // ratio
+            if real is not None:
+                counts = counts.masked_fill(~real, 0)
             candidates[ratio] = Candidates(
                 # int32: the card gathers no int64, and the layer gathers these.
-                states=states.view(num_reqs, max_blocks).to(torch.int32),
-                counts=((positions + 1) // ratio).to(device),
+                states=states.view(num_reqs, columns).to(torch.int32),
+                counts=counts.to(device),
             )
 
     return DeepseekV4HPUMetadata(
         num_tokens=num_tokens,
-        rows=entries_of(reqs, positions, block_size),
+        padded_tokens=padded,
+        rows=entries_of(reqs, positions, block_size, real),
         requests=reqs.to(device),
-        window_rows=window_rows.view(num_tokens, window),
+        window_rows=window_rows.view(padded, window),
         window_bias=window_bias.to(device),
         offsets=offsets,
         ends=ends,
