@@ -43,13 +43,13 @@ from vllm.models.deepseek_v4.hpu.attention import (
     GRAPHS,
     DeepseekV4HPUCache,
     DeepseekV4HPUMetadata,
-    pack_blocks,
+    align_rows,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 # Elements one attention chunk may gather.
-_ATTENTION_CHUNK = 1 << 27
+_ATTENTION_CHUNK = 1 << 29
 _EXPERT = re.compile(r"layers\.(\d+)\.ffn\.experts\.(\d+)\.(w[123])\.(weight|scale)")
 _RENAMES = (
     (".ffn.gate.bias", ".ffn.gate.e_score_correction_bias"),
@@ -92,6 +92,13 @@ def _rotate_tail(
 _RECOMPILE_LIMITS = {"recompile_limit": 1024, "accumulated_recompile_limit": 8192}
 
 
+def _compile(fn: Callable, static: bool = True) -> Callable:
+    config = torch._dynamo.config
+    for name, limit in _RECOMPILE_LIMITS.items():
+        setattr(config, name, max(getattr(config, name), limit))
+    return torch.compile(fn, backend="hpu_backend", dynamic=False if static else None)
+
+
 def _graph(fn: Callable) -> Callable:
     """``fn``, a pure function of tensors, as one graph of the card.
 
@@ -108,10 +115,7 @@ def _graph(fn: Callable) -> Callable:
         if not GRAPHS or args[0].device.type != "hpu":
             return fn(*args)
         if compiled is None:
-            config = torch._dynamo.config
-            for name, limit in _RECOMPILE_LIMITS.items():
-                setattr(config, name, max(getattr(config, name), limit))
-            compiled = torch.compile(fn, backend="hpu_backend", dynamic=False)
+            compiled = _compile(fn)
         return compiled(*args)
 
     return run
@@ -187,11 +191,14 @@ class DeepseekV4HPUCompressor(nn.Module):
         self.wkv = _param(width, config.hidden_size, dtype=torch.float32)
         self.wgate = _param(width, config.hidden_size, dtype=torch.float32)
         self.norm = _param(head_dim, dtype=torch.float32)
-        # Per token: the KV and the score it adds to its block.
-        # A block draws on its own tokens and, at ratio 4, on the block before:
-        # never further back than the attention window.
+        # Per token: the KV and the score it adds to its block. A block draws
+        # on its own tokens and, at ratio 4, on the block before.
         self.states = DeepseekV4HPUCache(
-            f"{prefix}.states", 2 * width, torch.float32, window=config.sliding_window
+            f"{prefix}.states",
+            2 * width,
+            torch.float32,
+            ratio,
+            window=(1 + self.overlap) * ratio,
         )
         self.blocks = DeepseekV4HPUCache(
             f"{prefix}.blocks", head_dim, torch.bfloat16, ratio
@@ -215,6 +222,7 @@ class DeepseekV4HPUCompressor(nn.Module):
             metadata: The indices of every cache, by its name.
         """
         tokens = metadata[self.states.prefix]
+        assert tokens.rows is not None
         states = self.states.entries()
         states.index_copy_(
             0,
@@ -243,10 +251,10 @@ class DeepseekV4HPUCompressor(nn.Module):
             self.eps,
             x.dtype,
         )
-        targets = metadata[self.blocks.prefix].ends[self.ratio]
+        targets = metadata[self.blocks.prefix].targets[self.ratio]
         assert targets is not None
         cache = self.blocks.entries()
-        cache.index_copy_(0, targets.states, out.to(cache.dtype))
+        cache.index_copy_(0, targets, out.to(cache.dtype))
 
 
 @_graph
@@ -468,6 +476,7 @@ class DeepseekV4HPUAttention(nn.Module):
             self.n_heads,
             self.eps,
         )
+        assert tokens.rows is not None
         cache = self.kv.entries()
         cache.index_copy_(0, tokens.rows, kv.to(cache.dtype))
 
@@ -509,14 +518,17 @@ class DeepseekV4HPUAttention(nn.Module):
             index_keys = metadata[ranker.compressor.blocks.prefix].candidates[
                 self.ratio
             ]
-        chunk = max(1, _ATTENTION_CHUNK // per_token)
+        # A power of two: it cuts a padded step into chunks of padded sizes.
+        chunk = 1 << (max(1, _ATTENTION_CHUNK // per_token).bit_length() - 1)
 
+        window_rows, window_bias = tokens.window_rows, tokens.window_bias
+        assert window_rows is not None and window_bias is not None
         outs = []
         for start in range(0, q.shape[0], chunk):
             part = slice(start, start + chunk)
-            bias = tokens.window_bias[part]
+            bias = window_bias[part]
             n = bias.shape[0]
-            keys = kv_cache.index_select(0, tokens.window_rows[part].reshape(-1))
+            keys = kv_cache.index_select(0, window_rows[part].reshape(-1))
             keys = keys.view(n, self.window, self.head_dim)
             compressed = block_bias = None
             if candidates is not None:
@@ -556,12 +568,16 @@ class DeepseekV4HPUAttention(nn.Module):
 _native_moe = None
 
 
-def _native_experts(x, ids, weights, w13, w2, w13_scale, w2_scale, first, last):
-    """The card's MoE kernel on packed MXFP4 experts; it runs compiled only."""
+def _native_experts(x, ids, weights, w13, w2, w13_scale, w2_scale, first, last, total):
+    """The card's MoE kernel on packed MXFP4 experts; it runs compiled only.
+
+    Its time is that of reading the experts the tokens use, some 0.1 ms each
+    whatever the tokens; told how many experts the ids span, it is a third
+    faster on a few tokens."""
     global _native_moe
     if _native_moe is None:
 
-        def moe(x, ids, weights, w13, w2, w13_scale, w2_scale, first, last):
+        def moe(x, ids, weights, w13, w2, w13_scale, w2_scale, first, last, total):
             return torch.ops.hpu.mixture_of_experts.mxfp4_fused_weights(
                 x,
                 ids.to(torch.int32),
@@ -576,10 +592,14 @@ def _native_experts(x, ids, weights, w13, w2, w13_scale, w2_scale, first, last):
                 experts_min=first,
                 experts_max=last,
                 is_fp4=True,
+                total_experts=total,
             ).float()
 
-        _native_moe = torch.compile(moe, backend="hpu_backend")
-    return _native_moe(x, ids, weights, w13, w2, w13_scale, w2_scale, first, last)
+        # Without graphs a step is not padded and its token count is free.
+        _native_moe = _compile(moe, static=GRAPHS)
+    return _native_moe(
+        x, ids, weights, w13, w2, w13_scale, w2_scale, first, last, total
+    )
 
 
 class DeepseekV4HPUNorm(nn.Module):
@@ -685,6 +705,7 @@ class DeepseekV4HPUExperts(nn.Module):
             w2_scale,
             self.first,
             self.first + self.num_local - 1,
+            self.num_experts,
         )
 
     def _torch(
@@ -860,7 +881,7 @@ class DeepseekV4Model(nn.Module):
         self.hc_head_fn = _param(hc, hc * hidden, dtype=torch.float32)
         self.hc_head_base = _param(hc, dtype=torch.float32)
         self.hc_head_scale = _param(1, dtype=torch.float32)
-        pack_blocks([m for m in self.modules() if isinstance(m, DeepseekV4HPUCache)])
+        align_rows([m for m in self.modules() if isinstance(m, DeepseekV4HPUCache)])
 
         # A layer with no compressor rotates by the base theta without YaRN.
         scaling = config.rope_scaling
