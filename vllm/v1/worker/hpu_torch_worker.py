@@ -122,6 +122,11 @@ class HPUTorchModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         torch.hpu.synchronize()
 
+    def _init_kv_zero_meta(self) -> None:
+        # The stock zeroer is a Triton kernel fed uint64 addresses; the card
+        # has neither. _zero_block_ids goes through the cache views instead.
+        pass
+
     def _zero_block_ids(self, block_ids: list[int]) -> None:
         seen: set[int] = set()
         for group in self.kv_cache_config.kv_cache_groups:

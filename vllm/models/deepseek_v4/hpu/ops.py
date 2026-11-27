@@ -21,13 +21,24 @@ def _pow2_ceil(v: torch.Tensor) -> torch.Tensor:
     return (exponent << 23).view(torch.float32)
 
 
+def _fp8_round(v: torch.Tensor) -> torch.Tensor:
+    """v, a float32 within the E4M3 range, rounded to that grid, a tie to even.
+
+    Not a cast to float8_e4m3fn: the card's cast rounds a tie away from zero."""
+    bits = v.contiguous().view(torch.int32) & 0x7FFFFFFF
+    # Three mantissa bits; below 2**-6 the subnormals keep the step of 2**-9.
+    exponent = (bits >> 23).clamp(min=127 - 6)
+    step = ((exponent - 3) << 23).view(torch.float32)
+    return torch.round(v / step) * step
+
+
 def fp8_quant_dequant(x: torch.Tensor, block: int = 128) -> torch.Tensor:
     """act_quant(scale_fmt="ue8m0"): x as the float32 value of its FP8 E4M3
     image under a power-of-two scale per ``block`` values of the last dim."""
     v = x.float().unflatten(-1, (-1, block))
     amax = v.abs().amax(dim=-1, keepdim=True).clamp(min=1e-4)
     scale = _pow2_ceil(amax * (1.0 / FP8_MAX))
-    q = (v / scale).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn).float()
+    q = _fp8_round((v / scale).clamp(-FP8_MAX, FP8_MAX))
     return (q * scale).flatten(-2)
 
 

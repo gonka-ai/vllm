@@ -213,7 +213,9 @@ class DeepseekV4HPUIndexer(nn.Module):
         keys = self.compressor.blocks.entries().index_select(0, states.reshape(-1))
         keys = keys.view(*states.shape, self.head_dim).to(self.wq_b.dtype)
         scores = torch.matmul(q.to(keys.dtype), keys.transpose(1, 2)).float().relu()
-        scores = (scores * weights.float().unsqueeze(-1)).sum(dim=1) + bias
+        scores = (scores * weights.float().unsqueeze(-1)).sum(dim=1)
+        # Not ``+ bias``: the key of a block that is not closed may be NaN.
+        scores = scores.masked_fill(bias < 0, float("-inf"))
         return scores.topk(self.topk, dim=-1).indices
 
 
@@ -360,7 +362,13 @@ class DeepseekV4HPUAttention(nn.Module):
                     states = states.gather(1, top)
                     block_bias = block_bias.gather(1, top)
                 compressed = block_cache.index_select(0, states.reshape(-1))
-                keys = torch.cat([keys, compressed.view(n, kept, self.head_dim)], dim=1)
+                # A block that is not closed is a row nobody wrote: bytes left
+                # by a cache of another dtype, NaN among them. The bias alone
+                # would let those through the softmax.
+                compressed = compressed.view(n, kept, self.head_dim).masked_fill(
+                    (block_bias < 0).unsqueeze(-1), 0
+                )
+                keys = torch.cat([keys, compressed], dim=1)
                 bias = torch.cat([bias, block_bias], dim=1)
             outs.append(
                 ops.sparse_attn(

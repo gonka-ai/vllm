@@ -350,12 +350,14 @@ def build_metadata(
         max_blocks = int((seq_lens // ratio).max())
         candidates[ratio] = None
         if max_blocks > 0:
+            states = entries_of(
+                torch.arange(num_reqs)[:, None].expand(-1, max_blocks),
+                torch.arange(max_blocks)[None, :].expand(num_reqs, -1),
+                block_size // ratio,
+            )
             candidates[ratio] = Candidates(
-                states=entries_of(
-                    torch.arange(num_reqs)[:, None].expand(-1, max_blocks),
-                    torch.arange(max_blocks)[None, :].expand(num_reqs, -1),
-                    block_size // ratio,
-                ).view(num_reqs, max_blocks),
+                # int32: the card gathers no int64, and the layer gathers these.
+                states=states.view(num_reqs, max_blocks).to(torch.int32),
                 counts=((positions + 1) // ratio).to(device),
             )
 
