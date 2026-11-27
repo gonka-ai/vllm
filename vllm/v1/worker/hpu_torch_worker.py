@@ -100,8 +100,16 @@ def _use_torch_kernels() -> None:
     torch.accelerator.empty_cache = lambda *args, **kwargs: None
 
 
+def _token_bucket(num_tokens: int) -> int:
+    """The batch size a compiled forward runs a step of num_tokens at."""
+    if num_tokens <= 256:
+        return max(8, 1 << (num_tokens - 1).bit_length())
+    return -(-num_tokens // 256) * 256
+
+
 class HPUTorchModelRunner(GPUModelRunner):
     def __init__(self, vllm_config, device: torch.device):
+        self.compiled = os.environ.get("VLLM_HPU_TORCH_COMPILE") == "1"
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
         self.use_cuda_graph = False
@@ -109,12 +117,19 @@ class HPUTorchModelRunner(GPUModelRunner):
 
     def load_model(self, load_dummy_weights: bool = False) -> None:
         super().load_model(load_dummy_weights=load_dummy_weights)
-        if os.environ.get("VLLM_HPU_TORCH_COMPILE") == "1":
+        if self.compiled:
             # One static graph per batch size.
             torch._dynamo.config.recompile_limit = 256
             self.model.forward = torch.compile(
                 self.model.forward, backend="hpu_backend", dynamic=False
             )
+
+    def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
+        # A compiled forward is built per batch size, and decode mining
+        # changes it every few steps: pad to a few sizes, not to each.
+        if not self.compiled:
+            return num_scheduled_tokens
+        return min(_token_bucket(num_scheduled_tokens), self.max_num_tokens)
 
     def _init_device_properties(self) -> None:
         pass

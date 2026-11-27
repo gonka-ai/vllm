@@ -234,7 +234,8 @@ class TorchPagedAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
-        slots = slot_mapping[: key.shape[0]]
+        # Padding rows carry no slot; they land in the null block.
+        slots = slot_mapping[: key.shape[0]].clamp(min=0)
         self._slots(kv_cache).index_copy_(
             0, slots, torch.cat([key, value], dim=-1).to(kv_cache.dtype)
         )
@@ -287,4 +288,6 @@ class TorchPagedAttentionImpl(AttentionImpl):
         output[: m.num_actual_tokens] = out.index_select(0, m.output_rows).to(
             output.dtype
         )
+        if output.shape[0] > m.num_actual_tokens:
+            output[m.num_actual_tokens :] = 0
         return output
