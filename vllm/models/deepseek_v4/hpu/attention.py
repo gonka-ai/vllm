@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
 )
 
 RATIOS = (4, 128)
@@ -102,7 +103,9 @@ class DeepseekV4HPUBackend(AttentionBackend):
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        return (KVCacheLayout.LBNHC,)
+        # Block-outermost: the engine then packs caches of different shapes
+        # and lifetimes into one block and keeps the spec of every cache.
+        return (KVCacheLayout.BLNHC,)
 
     @staticmethod
     def get_name() -> str:
@@ -119,16 +122,25 @@ class DeepseekV4HPUBackend(AttentionBackend):
 
 class DeepseekV4HPUCache(nn.Module, AttentionLayerBase):
     """One paged cache of a layer: ``width`` values per ``tokens_per_entry``
-    tokens."""
+    tokens. With ``window`` only the last that many tokens of a request are
+    ever read, and the engine frees the blocks behind them."""
 
     def __init__(
-        self, prefix: str, width: int, dtype: torch.dtype, tokens_per_entry: int = 1
+        self,
+        prefix: str,
+        width: int,
+        dtype: torch.dtype,
+        tokens_per_entry: int = 1,
+        window: int | None = None,
     ) -> None:
         super().__init__()
         self.prefix = prefix
         self.width = width
         self.dtype = dtype
         self.tokens_per_entry = tokens_per_entry
+        self.window = window
+        # Engine blocks a block of this cache spans, see pack_blocks.
+        self.block_scale = 1
         self.kv_cache = torch.tensor([])
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -145,22 +157,81 @@ class DeepseekV4HPUCache(nn.Module, AttentionLayerBase):
                 f"DeepSeek-V4 needs a KV cache block of a multiple of {max(RATIOS)} "
                 f"tokens, got --block-size {block_size}."
             )
+        if self.window is not None:
+            return SlidingWindowMLASpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=self.width,
+                dtype=self.dtype,
+                sliding_window=self.window,
+            )
         return MLAAttentionSpec(
-            block_size=block_size,
+            block_size=block_size * self.block_scale,
             num_kv_heads=1,
             head_size=self.width,
             dtype=self.dtype,
             tokens_per_state=self.tokens_per_entry,
         )
 
-    def entries(self) -> torch.Tensor:
-        """The cache as [entries, width].
+    @property
+    def bytes_per_token(self) -> float:
+        return self.width * self.dtype.itemsize / self.tokens_per_entry
 
-        The layer sees [blocks, 1, entries per block, width] over memory laid
-        out entry-major (LBNHC), so an entry is one flat index."""
-        cache = self.kv_cache.permute(0, 2, 1, 3)
-        assert cache.is_contiguous(), tuple(self.kv_cache.shape)
-        return cache.view(-1, self.width)
+    @property
+    def kv_cache(self) -> torch.Tensor:
+        return self._kv_cache
+
+    @kv_cache.setter
+    def kv_cache(self, cache: torch.Tensor) -> None:
+        """Takes [blocks, 1, entries per block, width] over the engine's buffer.
+
+        The blocks of a cache need not be adjacent there, so the cache is
+        addressed as rows of the whole buffer from its first entry on: entry
+        ``n`` of block ``b`` is row ``b * step + n``."""
+        self._kv_cache = cache
+        self._rows = None
+        self.step = 0
+        if cache.dim() != 4:
+            return
+        blocks, heads, per_block, width = cache.shape
+        stride = cache.stride()
+        if (
+            (heads, width, cache.dtype) != (1, self.width, self.dtype)
+            or stride[2:] != (width, 1)
+            or stride[0] % width
+        ):
+            raise ValueError(
+                f"{self.prefix}: a cache of {self.width} {self.dtype} values per "
+                f"entry got a view {tuple(cache.shape)} {cache.dtype} with strides "
+                f"{stride}."
+            )
+        self.step = stride[0] // width
+        self._rows = torch.as_strided(
+            cache,
+            ((blocks - 1) * self.step + per_block, width),
+            (width, 1),
+            cache.storage_offset(),
+        )
+
+    def entries(self) -> torch.Tensor:
+        """The rows the cache is addressed by, [rows, width]."""
+        assert self._rows is not None, f"{self.prefix} has no KV cache bound"
+        return self._rows
+
+
+def pack_blocks(caches: list[DeepseekV4HPUCache]) -> None:
+    """Sizes the blocks of the caches that are kept whole.
+
+    The engine cuts its memory into blocks of one size, set by the windowed
+    caches, which are far wider per token. A block of the kept caches spans as
+    many times more tokens as fit that size, or the memory of a context would
+    be that of the windowed caches again."""
+    windowed = sum(c.bytes_per_token for c in caches if c.window is not None)
+    kept = sum(c.bytes_per_token for c in caches if c.window is None)
+    scale = max(int(windowed // kept), 1) if kept else 1
+    for cache in caches:
+        if cache.window is None:
+            cache.block_scale = scale
 
 
 class DeepseekV4HPUMetadataBuilder(AttentionMetadataBuilder[DeepseekV4HPUMetadata]):
@@ -174,6 +245,9 @@ class DeepseekV4HPUMetadataBuilder(AttentionMetadataBuilder[DeepseekV4HPUMetadat
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.block_size = kv_cache_spec.block_size
         self.window = vllm_config.model_config.hf_config.sliding_window
+        # The caches of a builder share a shape, hence the rows of a block.
+        context = vllm_config.compilation_config.static_forward_context
+        self.cache: DeepseekV4HPUCache = context[layer_names[0]]
 
     def build(
         self,
@@ -182,24 +256,28 @@ class DeepseekV4HPUMetadataBuilder(AttentionMetadataBuilder[DeepseekV4HPUMetadat
         fast_build: bool = False,
     ) -> DeepseekV4HPUMetadata:
         cm = common_attn_metadata
-        # The caches of a layer differ in shape, so the runner builds once per
-        # shape; they share the block table, hence the indices.
-        metadata = getattr(cm, "_deepseek_v4_hpu", None)
-        if metadata is None:
+        # A KV cache group holds caches of several shapes and the runner builds
+        # once per shape; shapes with the same rows per block share the result.
+        built = getattr(cm, "_deepseek_v4_hpu", None)
+        if built is None:
+            built = {}
+            cm._deepseek_v4_hpu = built  # type: ignore[attr-defined]
+        step = self.cache.step
+        if step not in built:
             num_reqs = cm.num_reqs
             query_start = cm.query_start_loc_cpu[: num_reqs + 1].to(torch.int64)
             seq_lens = cm.seq_lens_cpu_upper_bound
             if seq_lens is None:
                 seq_lens = cm.seq_lens.cpu()
-            metadata = build_metadata(
+            built[step] = build_metadata(
                 query_start,
                 seq_lens[:num_reqs].to(torch.int64),
                 cm.block_table_tensor[:num_reqs],
                 self.block_size,
                 self.window,
+                step,
             )
-            cm._deepseek_v4_hpu = metadata  # type: ignore[attr-defined]
-        return metadata
+        return built[step]
 
 
 def build_metadata(
@@ -208,13 +286,16 @@ def build_metadata(
     block_table: torch.Tensor,
     block_size: int,
     window: int,
+    step: int | None = None,
 ) -> DeepseekV4HPUMetadata:
-    """The indices of a step.
+    """The indices of a step, as rows of a cache.
 
     Args:
         query_start: [reqs + 1] first token of every request, on the host.
         seq_lens: [reqs] length of every request after the step, on the host.
         block_table: [reqs, blocks per request], on the device.
+        step: Rows from a block of the cache to the next; by default the
+            entries of a block, that is blocks stored back to back.
     """
     device = block_table.device
     num_reqs = seq_lens.shape[0]
@@ -224,12 +305,13 @@ def build_metadata(
     def entries_of(
         reqs: torch.Tensor, index: torch.Tensor, per_block: int
     ) -> torch.Tensor:
-        """Cache entries of the index-th entries of requests, both on the host."""
+        """Cache rows of the index-th entries of requests, both on the host."""
         index = index.clamp(min=0)
         blocks = table.index_select(
             0, (reqs * width + index // per_block).reshape(-1).to(device)
         )
-        return blocks * per_block + (index % per_block).reshape(-1).to(device)
+        offsets = (index % per_block).reshape(-1).to(device)
+        return blocks * (step or per_block) + offsets
 
     query_lens = query_start[1:] - query_start[:-1]
     num_tokens = int(query_start[-1])

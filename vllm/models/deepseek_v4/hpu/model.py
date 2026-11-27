@@ -37,6 +37,7 @@ from vllm.models.deepseek_v4.hpu import ops
 from vllm.models.deepseek_v4.hpu.attention import (
     DeepseekV4HPUCache,
     DeepseekV4HPUMetadata,
+    pack_blocks,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -98,7 +99,11 @@ class DeepseekV4HPUCompressor(nn.Module):
         self.wgate = _param(width, config.hidden_size, dtype=torch.float32)
         self.norm = _param(head_dim, dtype=torch.float32)
         # Per token: the KV and the score it adds to its block.
-        self.states = DeepseekV4HPUCache(f"{prefix}.states", 2 * width, torch.float32)
+        # A block draws on its own tokens and, at ratio 4, on the block before:
+        # never further back than the attention window.
+        self.states = DeepseekV4HPUCache(
+            f"{prefix}.states", 2 * width, torch.float32, window=config.sliding_window
+        )
         self.blocks = DeepseekV4HPUCache(
             f"{prefix}.blocks", head_dim, torch.bfloat16, ratio
         )
@@ -111,8 +116,7 @@ class DeepseekV4HPUCompressor(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        tokens: DeepseekV4HPUMetadata,
-        blocks: DeepseekV4HPUMetadata,
+        metadata: dict[str, DeepseekV4HPUMetadata],
         rope: _Rope,
         dtype: torch.dtype,
     ) -> None:
@@ -120,8 +124,10 @@ class DeepseekV4HPUCompressor(nn.Module):
 
         Args:
             x: [tokens, hidden] float32.
+            metadata: The indices of every cache, by its name.
             dtype: The activation dtype.
         """
+        tokens = metadata[self.states.prefix]
         kv = F.linear(x, self.wkv)
         score = F.linear(x, self.wgate) + self.ape.index_select(
             0, tokens.offsets[self.ratio]
@@ -157,7 +163,7 @@ class DeepseekV4HPUCompressor(nn.Module):
             rope_dim = 2 * rope.cos.shape[-1]
             head = ops.fp8_quant_dequant(out[..., :-rope_dim], 64)
             out = torch.cat([head, out[..., -rope_dim:].float()], dim=-1)
-        targets = blocks.ends[self.ratio]
+        targets = metadata[self.blocks.prefix].ends[self.ratio]
         assert targets is not None
         cache = self.blocks.entries()
         cache.index_copy_(0, targets.states, out.to(cache.dtype))
@@ -242,7 +248,9 @@ class DeepseekV4HPUAttention(nn.Module):
             dtype=gemm_dtype,
         )
         self.wo_b = _param(hidden, self.n_groups * config.o_lora_rank, dtype=gemm_dtype)
-        self.kv = DeepseekV4HPUCache(f"{prefix}.kv", self.head_dim, torch.bfloat16)
+        self.kv = DeepseekV4HPUCache(
+            f"{prefix}.kv", self.head_dim, torch.bfloat16, window=self.window
+        )
         self.compressor = None
         self.indexer = None
         if self.ratio:
@@ -284,11 +292,10 @@ class DeepseekV4HPUAttention(nn.Module):
 
         index_q = index_weights = None
         if self.compressor is not None:
-            blocks = metadata[self.compressor.blocks.prefix]
             xf = x.float()
-            self.compressor(xf, tokens, blocks, rope, dtype)
+            self.compressor(xf, metadata, rope, dtype)
             if self.indexer is not None:
-                self.indexer.compressor(xf, tokens, blocks, rope, dtype)
+                self.indexer.compressor(xf, metadata, rope, dtype)
                 index_q, index_weights = self.indexer.queries(x, qr, rope)
 
         out = self._attend(q.to(gemm), metadata, index_q, index_weights).to(dtype)
@@ -318,8 +325,13 @@ class DeepseekV4HPUAttention(nn.Module):
             ranker = None
         kept = num_blocks if ranker is None else ranker.topk
         per_token = (self.window + kept) * self.head_dim
+        index_keys = None
         if ranker is not None:
             per_token = max(per_token, num_blocks * ranker.head_dim)
+            # The indexer's keys sit in a cache of their own.
+            index_keys = metadata[ranker.compressor.blocks.prefix].candidates[
+                self.ratio
+            ]
         chunk = max(1, _ATTENTION_CHUNK // per_token)
 
         outs = []
@@ -338,8 +350,12 @@ class DeepseekV4HPUAttention(nn.Module):
                 ).masked_fill(~closed, float("-inf"))
                 if ranker is not None:
                     assert index_q is not None and index_weights is not None
+                    assert index_keys is not None
                     top = ranker.select(
-                        index_q[part], index_weights[part], states, block_bias
+                        index_q[part],
+                        index_weights[part],
+                        index_keys.states.index_select(0, tokens.requests[part]),
+                        block_bias,
                     )
                     states = states.gather(1, top)
                     block_bias = block_bias.gather(1, top)
@@ -622,6 +638,7 @@ class DeepseekV4Model(nn.Module):
         self.hc_head_fn = _param(hc, hc * hidden, dtype=torch.float32)
         self.hc_head_base = _param(hc, dtype=torch.float32)
         self.hc_head_scale = _param(1, dtype=torch.float32)
+        pack_blocks([m for m in self.modules() if isinstance(m, DeepseekV4HPUCache)])
 
         # A layer with no compressor rotates by the base theta without YaRN.
         scaling = config.rope_scaling
