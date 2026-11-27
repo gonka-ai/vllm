@@ -2359,7 +2359,8 @@ class GPUModelRunner(
 
             # Fill unused block table entries with NULL_BLOCK_ID (null block)
             # for CUDAGraph padding. Block 0 is reserved for padding.
-            blk_table_tensor[num_reqs:num_reqs_padded].fill_(NULL_BLOCK_ID)
+            if num_reqs_padded > num_reqs:
+                blk_table_tensor[num_reqs:num_reqs_padded].fill_(NULL_BLOCK_ID)
             return blk_table_tensor
 
         assert slot_mappings is not None
@@ -4161,7 +4162,8 @@ class GPUModelRunner(
 
             # Fill unused with -1. Needed for reshape_and_cache in full cuda
             # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
-            slot_mapping[num_tokens_unpadded:num_tokens_padded].fill_(-1)
+            if num_tokens_padded > num_tokens_unpadded:
+                slot_mapping[num_tokens_unpadded:num_tokens_padded].fill_(-1)
 
             return slot_mapping
 
